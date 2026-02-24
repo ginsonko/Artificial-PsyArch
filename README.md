@@ -1,4 +1,4 @@
-# --Artificial-PsyArch
+# Artificial-PsyArch
 
 这是与论文《人工心智架构-Artificial PsyArch-》配套的代码仓库。
 
