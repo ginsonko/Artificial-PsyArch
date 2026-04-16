@@ -1,28 +1,61 @@
 @echo off
-chcp 65001 >nul
-setlocal
+setlocal EnableExtensions
+
 cd /d "%~dp0"
+
 echo ======================================
-echo          启动 Observatory
+echo          Start Observatory
 echo ======================================
+echo Current directory: %cd%
 echo.
-echo 当前运行目录：%cd%
-echo.
-set "PY=python"
+
+set "PY_CMD="
+set "PY_ARGS="
+
 if exist ".venv\\Scripts\\python.exe" (
-  set "PY=.venv\\Scripts\\python.exe"
+  set "PY_CMD=.venv\\Scripts\\python.exe"
 ) else (
-  where python >nul 2>nul || (
-    where py >nul 2>nul && set "PY=py -3"
+  echo [WARN] .venv not found. It is recommended to run the dependency installer first.
+  echo.
+
+  where py >nul 2>nul
+  if %errorlevel%==0 (
+    set "PY_CMD=py"
+    set "PY_ARGS=-3"
+  ) else (
+    where python >nul 2>nul
+    if %errorlevel%==0 (
+      set "PY_CMD=python"
+    )
   )
 )
-echo 正在执行命令：%PY% -m observatory
+
+if "%PY_CMD%"=="" (
+  echo [ERROR] Python not found.
+  echo Please install Python 3.10+ and ensure it is on PATH.
+  echo.
+  pause
+  exit /b 1
+)
+
+echo Running: %PY_CMD% %PY_ARGS% -m observatory
 echo.
-:: 执行核心命令
-%PY% -m observatory
+
+%PY_CMD% %PY_ARGS% -m observatory
+if %errorlevel% neq 0 (
+  echo.
+  echo [ERROR] Observatory exited with errorlevel=%errorlevel%.
+  echo.
+  pause
+  exit /b %errorlevel%
+)
+
 echo.
 echo ======================================
-echo          运行结束
+echo           Observatory End
 echo ======================================
 pause
+
 endlocal
+
+

@@ -1,115 +1,134 @@
 @echo off
-chcp 65001 >nul
-setlocal enabledelayedexpansion
-cd /d "%~dp0"
+setlocal EnableExtensions
+
+cd /d "%~dp0" || goto :err_cd
 
 echo ======================================
-echo     AP 原型依赖自检与安装 (Windows)
+echo   AP Prototype - Dependency Check
 echo ======================================
-echo.
-echo 当前目录: %cd%
+echo Current directory: %cd%
 echo.
 
-:: 1) Locate Python (prefer py -3, fallback to python)
-set "PY="
+if not exist "requirements.txt" goto :err_requirements
+
+if exist ".venv\\Scripts\\python.exe" goto :have_venv
+
+set "SYS_PY_CMD="
+set "SYS_PY_ARGS="
+
 where py >nul 2>nul
-if %errorlevel%==0 (
-  set "PY=py -3"
-) else (
-  where python >nul 2>nul
-  if %errorlevel%==0 (
-    set "PY=python"
-  )
+if not errorlevel 1 (
+  set "SYS_PY_CMD=py"
+  set "SYS_PY_ARGS=-3"
+  goto :create_venv
 )
 
-if "%PY%"=="" (
-  echo [ERROR] 未检测到 Python.
-  echo 解决方案:
-  echo 1. 安装 Python 3.10+ (推荐 3.11)
-  echo 2. 安装时勾选 "Add Python to PATH"
-  echo 3. 重新打开本窗口再试一次
-  echo.
-  pause
-  exit /b 1
+where python >nul 2>nul
+if not errorlevel 1 (
+  set "SYS_PY_CMD=python"
+  goto :create_venv
 )
 
-echo 使用 Python: %PY%
+goto :err_python
+
+:create_venv
+echo Creating venv: .venv
+%SYS_PY_CMD% %SYS_PY_ARGS% -m venv .venv
+if errorlevel 1 goto :err_venv
+
+:have_venv
+set "PY=.venv\\Scripts\\python.exe"
+
+echo Using venv python: %PY%
 %PY% --version
-if %errorlevel% neq 0 (
-  echo [ERROR] Python 命令不可用: %PY%
-  echo.
-  pause
-  exit /b 1
-)
+if errorlevel 1 goto :err_venv_python
 
 echo.
-:: 2) Create venv
-if not exist ".venv\\Scripts\\python.exe" (
-  echo 正在创建虚拟环境: .venv
-  %PY% -m venv .venv
-  if %errorlevel% neq 0 (
-    echo [ERROR] 创建虚拟环境失败。
-    echo 你可以尝试手动运行: %PY% -m venv .venv
-    echo.
-    pause
-    exit /b 1
-  )
+echo Upgrading pip...
+%PY% -m pip install -U pip
+if errorlevel 1 goto :err_pip
+
+echo.
+echo Installing dependencies: requirements.txt
+%PY% -m pip install -r requirements.txt
+if errorlevel 1 goto :err_install
+
+echo.
+echo Optional import checks:
+%PY% -c "import yaml; print('PyYAML OK')" >nul 2>nul
+if errorlevel 1 (
+  echo - PyYAML: NOT FOUND
 ) else (
-  echo 已检测到虚拟环境: .venv
-)
-
-echo.
-:: 3) Activate venv
-call ".venv\\Scripts\\activate.bat"
-if %errorlevel% neq 0 (
-  echo [ERROR] 激活虚拟环境失败。
-  echo.
-  pause
-  exit /b 1
-)
-
-echo.
-:: 4) Install deps
-echo 正在升级 pip...
-python -m pip install -U pip
-
-echo.
-echo 正在安装依赖: requirements.txt
-python -m pip install -r requirements.txt
-if %errorlevel% neq 0 (
-  echo.
-  echo [ERROR] 依赖安装失败。
-  echo 你可以尝试:
-  echo 1. 检查网络代理/防火墙
-  echo 2. 在命令行里重试: python -m pip install -r requirements.txt
-  echo.
-  pause
-  exit /b 1
-)
-
-echo.
-echo 依赖自检:
-python -c "import yaml; print('PyYAML OK')" >nul 2>nul
-if %errorlevel%==0 (
   echo - PyYAML: OK
-) else (
-  echo - PyYAML: NOT FOUND (可选, 但建议安装)
 )
 
-python -c "import jieba; print('jieba OK')" >nul 2>nul
-if %errorlevel%==0 (
-  echo - jieba: OK
+%PY% -c "import jieba; print('jieba OK')" >nul 2>nul
+if errorlevel 1 (
+  echo - jieba: NOT FOUND (the system will auto-disable jieba at runtime)
 ) else (
-  echo - jieba: NOT FOUND (系统会自动关闭 jieba 分词并回退到字符切分, 不影响运行)
+  echo - jieba: OK
 )
 
 echo.
 echo ======================================
-echo 完成. 下一步:
-echo 1. 双击 "快速启动观测台.bat"
-echo 2. 浏览器打开后输入短文本试跑一轮
+echo Done.
+echo Next step: run the Observatory launcher.
 echo ======================================
 echo.
 pause
+exit /b 0
+
+:err_cd
+echo [ERROR] Failed to cd to script directory.
+echo.
+pause
+exit /b 1
+
+:err_requirements
+echo [ERROR] requirements.txt not found.
+echo.
+pause
+exit /b 1
+
+:err_python
+echo [ERROR] Python not found.
+echo Please install Python 3.10+ and ensure it is on PATH.
+echo.
+pause
+exit /b 1
+
+:err_venv
+echo.
+echo [ERROR] Failed to create venv: .venv
+echo.
+pause
+exit /b 1
+
+:err_venv_python
+echo.
+echo [ERROR] venv python is not usable: %PY%
+echo.
+pause
+exit /b 1
+
+:err_pip
+echo.
+echo [ERROR] Failed to upgrade pip.
+echo.
+pause
+exit /b 1
+
+:err_install
+echo.
+echo [ERROR] pip install failed.
+echo Tips:
+echo - Check network / proxy / firewall.
+echo - Retry in a terminal:
+echo   %PY% -m pip install -r requirements.txt
+echo.
+pause
+exit /b 1
+
 endlocal
+
 
