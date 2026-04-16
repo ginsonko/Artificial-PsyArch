@@ -1,0 +1,69 @@
+# AP 注意力模块配置（AF, Attention Filter）
+# AP Attention (AF) module config
+#
+# 注：界面与注释尽量中文优先；出现简写（AF/CAM/SP/ER/EV/CP 等）时请附中文全称。
+
+# max_cam_items / CAM（当前注意记忆体）对象数量上限（cap）
+# 作用（Purpose）: 限制每 tick 最多允许多少对象进入 CAM（用于控制计算预算与前端可读性）。
+# 注意（Important）:
+#   - 这是“上限”，不是“永远填满 Top-N”。真实入选数量由注意力抑制阈值动态决定，常常会 < cap。
+#   - 这样才能更贴近理论中的“只维持波峰”的注意力现象。
+# 参考（Reference）: 默认 16；典型测试范围 8~24。
+max_cam_items: 16
+
+# top_n / 兼容字段（旧名）
+# 说明：旧版配置使用 top_n，这里保留但建议改用 max_cam_items。
+top_n: 16
+
+# min_cam_items / 最少保留 CAM 项数量（兜底）
+# 作用：避免极端情况下 CAM 为空导致后续结构级查存一体没有输入。
+min_cam_items: 2
+
+# ---- 动态抑制阈值（Dynamic cutoff）----
+# keep_score_ratio_base / 基础阈值比例
+# 含义：cutoff = peak_score * keep_score_ratio，其中 peak_score 是波峰（最高优先级）分数。
+# 低于 cutoff 的对象会被“注意力抑制”，不进入 CAM。
+keep_score_ratio_base: 0.28
+
+# keep_score_ratio_concentration_gain / 集中度增益
+# 含义：当分布更“集中”（一个/少数波峰明显）时，提高阈值，让 CAM 更短；反之让 CAM 更长。
+keep_score_ratio_concentration_gain: 0.22
+
+# keep_score_ratio_min/max / 阈值比例钳制范围
+keep_score_ratio_min: 0.18
+keep_score_ratio_max: 0.72
+
+# score_entropy_eps / 计算熵时的数值稳定 epsilon
+score_entropy_eps: 0.000000001
+
+# consume_energy / 构建 CAM 时是否从状态池对象扣能
+# 作用（Purpose）: 为 CAM 预算进行真实能量转移（记账式），而非复制能量。
+# 意义（Meaning）: 对齐“思考有成本”的记账原则。
+consume_energy: true
+
+# memory_energy_ratio / CAM 抽取比例（0~1）
+# 作用（Purpose）: 从 SP（状态池）向 CAM 转移的 (ER,EV) 比例。
+# 参考（Reference）: 默认 0.5。
+memory_energy_ratio: 0.5
+
+# exclude_ref_object_types / 排除的运行态对象类型
+# 参考（Reference）: 默认 ["em"]（情景记忆条目一般不作为 CAM 项）。
+exclude_ref_object_types: ["em"]
+
+# min_total_energy / 最低能量过滤阈值
+min_total_energy: 0.0
+
+# ---- 选择优先级权重（MVP 默认与 observatory 保持一致）----
+priority_weight_total_energy: 1.25
+priority_weight_cp_abs: 0.35
+priority_weight_salience: 0.15
+priority_weight_updated_at: 0.000000000001
+
+# 预留：疲劳/近因调制（默认 0，不改变当前语义）
+priority_weight_fatigue: 0.0
+priority_weight_recency_gain: 0.0
+
+# ---- 日志 ----
+log_dir: ""
+log_max_file_bytes: 5242880
+stdout_fallback_when_log_fail: true

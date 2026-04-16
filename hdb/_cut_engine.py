@@ -1,0 +1,1987 @@
+﻿# -*- coding: utf-8 -*-
+"""
+Cut engine and sequence helpers for HDB.
+"""
+
+from __future__ import annotations
+
+import time
+from collections import Counter
+
+from ._id_generator import next_id
+from ._sequence_display import format_group_display, format_sequence_groups
+
+
+class CutEngine:
+    def __init__(self):
+        self._pointer_index = None
+
+    def set_pointer_index(self, pointer_index) -> None:
+        self._pointer_index = pointer_index
+
+    def build_sequence_profile_from_stimulus_packet(self, stimulus_packet: dict) -> dict:
+        sa_index = {
+            item.get("id", ""): item
+            for item in stimulus_packet.get("sa_items", [])
+            if isinstance(item, dict) and item.get("id")
+        }
+        csa_index = {
+            item.get("id", ""): item
+            for item in stimulus_packet.get("csa_items", [])
+            if isinstance(item, dict) and item.get("id")
+        }
+
+        groups = []
+        member_refs: list[str] = []
+
+        for order_index, group in enumerate(stimulus_packet.get("grouped_sa_sequences", [])):
+            source_type = str(group.get("source_type", "current"))
+            origin_frame_id = str(group.get("origin_frame_id", ""))
+            source_group_index = int(group.get("source_group_index", group.get("group_index", order_index)))
+
+            referenced_sa_ids: list[str] = [str(sa_id) for sa_id in group.get("sa_ids", []) if str(sa_id)]
+            csa_members = [csa_index.get(csa_id) for csa_id in group.get("csa_ids", []) if csa_index.get(csa_id)]
+            csa_members.sort(key=lambda item: item.get("ext", {}).get("packet_context", {}).get("sequence_index", 0))
+            for csa in csa_members:
+                for member_id in csa.get("member_sa_ids", []):
+                    member_text = str(member_id)
+                    if member_text:
+                        referenced_sa_ids.append(member_text)
+
+            ordered_sa_ids = self._dedupe_preserve_order(referenced_sa_ids)
+            sa_members = [sa_index.get(sa_id) for sa_id in ordered_sa_ids if sa_index.get(sa_id)]
+            sa_members.sort(key=lambda item: item.get("ext", {}).get("packet_context", {}).get("sequence_index", 0))
+
+            units = [
+                self._build_unit_from_packet_object(
+                    obj=sa,
+                    group_index=order_index,
+                    source_group_index=source_group_index,
+                    source_type=source_type,
+                    origin_frame_id=origin_frame_id,
+                )
+                for sa in sa_members
+            ]
+            units = [unit for unit in units if unit]
+
+            csa_bundles = []
+            for csa in csa_members:
+                bundle = self._build_bundle_from_csa(csa, units)
+                if bundle:
+                    csa_bundles.append(bundle)
+
+            if not units and csa_members:
+                for csa in csa_members:
+                    synthetic = self._build_synthetic_unit_from_csa(
+                        csa=csa,
+                        group_index=order_index,
+                        source_group_index=source_group_index,
+                        source_type=source_type,
+                        origin_frame_id=origin_frame_id,
+                    )
+                    if synthetic:
+                        units.append(synthetic)
+
+            normalized_group = self._normalize_sequence_group(
+                {
+                    "group_index": order_index,
+                    "source_type": source_type,
+                    "origin_frame_id": origin_frame_id,
+                    "source_group_index": source_group_index,
+                    "units": units,
+                    "csa_bundles": csa_bundles,
+                },
+                order_index=order_index,
+            )
+            if not normalized_group.get("units"):
+                continue
+            groups.append(normalized_group)
+            member_refs.extend(str(unit.get("unit_id", "")) for unit in normalized_group.get("units", []) if str(unit.get("unit_id", "")))
+
+        return self._build_profile(groups=groups, member_refs=member_refs)
+
+    def build_sequence_profile_from_structure(self, structure_obj: dict) -> dict:
+        structure = structure_obj.get("structure", {})
+        groups = self._normalize_sequence_groups(structure.get("sequence_groups", []))
+        if not groups:
+            groups = self._normalize_sequence_groups(
+                [
+                    {
+                        "group_index": 0,
+                        "source_type": "structure",
+                        "origin_frame_id": structure_obj.get("id", ""),
+                        "tokens": list(structure.get("flat_tokens", [])),
+                    }
+                ]
+            )
+        member_refs = list(structure.get("member_refs", []))
+        profile = self._build_profile(groups=groups, member_refs=member_refs)
+        if structure.get("display_text"):
+            profile["display_text"] = structure.get("display_text", profile["display_text"])
+        if structure.get("content_signature"):
+            profile["legacy_content_signature"] = structure.get("content_signature", "")
+        if structure.get("semantic_signature"):
+            profile["legacy_semantic_signature"] = structure.get("semantic_signature", "")
+        return profile
+
+    def build_sequence_profile_from_groups(self, groups: list[dict]) -> dict:
+        normalized_groups = self._normalize_sequence_groups(groups)
+        member_refs = [
+            str(unit.get("unit_id", ""))
+            for group in normalized_groups
+            for unit in group.get("units", [])
+            if str(unit.get("unit_id", ""))
+        ]
+        return self._build_profile(groups=normalized_groups, member_refs=member_refs)
+
+    def maximum_common_part(self, existing_groups: list[dict], incoming_groups: list[dict]) -> dict:
+        normalized_existing = self._normalize_sequence_groups(existing_groups)
+        normalized_incoming = self._normalize_sequence_groups(incoming_groups)
+        if not normalized_existing or not normalized_incoming:
+            return self._empty_common_part(normalized_existing, normalized_incoming)
+
+        rows = len(normalized_existing) + 1
+        cols = len(normalized_incoming) + 1
+        # The stimulus/structure theory is group-first: keep cross-group temporal order
+        # stable before maximizing per-group token richness. We therefore rank DP paths by:
+        # 1) matched group count, 2) earlier incoming alignment, 3) earlier existing alignment,
+        # 4) total matched unit count.
+        zero = (0, 0, 0, 0)
+        dp: list[list[tuple[int, int, int, int]]] = [[zero for _ in range(cols)] for _ in range(rows)]
+        action: list[list[str | None]] = [[None for _ in range(cols)] for _ in range(rows)]
+
+        for i in range(1, rows):
+            for j in range(1, cols):
+                best_value = dp[i - 1][j]
+                best_action: str | None = "up"
+                if dp[i][j - 1] > best_value:
+                    best_value = dp[i][j - 1]
+                    best_action = "left"
+
+                common_length = self._maximum_common_group_length(
+                    existing_group=normalized_existing[i - 1],
+                    incoming_group=normalized_incoming[j - 1],
+                )
+                if common_length > 0:
+                    candidate_value = (
+                        dp[i - 1][j - 1][0] + 1,
+                        dp[i - 1][j - 1][1] - (j - 1),
+                        dp[i - 1][j - 1][2] - (i - 1),
+                        dp[i - 1][j - 1][3] + common_length,
+                    )
+                    if candidate_value > best_value:
+                        best_value = candidate_value
+                        best_action = "diag"
+
+                dp[i][j] = best_value
+                action[i][j] = best_action
+
+        matched_pairs = []
+        matched_pairs_indices: list[dict] = []
+        i = len(normalized_existing)
+        j = len(normalized_incoming)
+        while i > 0 and j > 0:
+            move = action[i][j]
+            if move is None:
+                break
+            if move == "diag":
+                matched_pairs_indices.append(
+                    {
+                        "existing_group_index": i - 1,
+                        "incoming_group_index": j - 1,
+                    }
+                )
+                i -= 1
+                j -= 1
+            elif move == "up":
+                i -= 1
+            else:
+                j -= 1
+
+        matched_pairs_indices.reverse()
+        if not matched_pairs_indices:
+            return self._empty_common_part(normalized_existing, normalized_incoming)
+
+        for pair in matched_pairs_indices:
+            existing_group_index = int(pair.get("existing_group_index", 0))
+            incoming_group_index = int(pair.get("incoming_group_index", 0))
+            group_match = self._maximum_common_group(
+                existing_group=normalized_existing[existing_group_index],
+                incoming_group=normalized_incoming[incoming_group_index],
+            )
+            matched_pairs.append(
+                {
+                    "existing_group_index": existing_group_index,
+                    "incoming_group_index": incoming_group_index,
+                    "common_tokens": list(group_match.get("common_group", {}).get("tokens", [])),
+                    "common_unit_signatures": list(group_match.get("common_group", {}).get("unit_signatures", [])),
+                    "incoming_unit_refs": list(group_match.get("matched_incoming_unit_ids", [])),
+                    "existing_unit_refs": list(group_match.get("matched_existing_unit_ids", [])),
+                    "matched_existing_unit_similarities": dict(group_match.get("matched_existing_unit_similarities", {})),
+                    "matched_incoming_unit_similarities": dict(group_match.get("matched_incoming_unit_similarities", {})),
+                    "common_bundle_signatures": list(group_match.get("common_group", {}).get("bundle_signatures", [])),
+                    # CSA/bundle gate / CSA 门控结果（用于“完全包含/完全匹配”判断）
+                    "bundle_constraints_ok_existing_included": bool(group_match.get("bundle_constraints_ok_existing_included", True)),
+                    "bundle_constraints_ok_incoming_included": bool(group_match.get("bundle_constraints_ok_incoming_included", True)),
+                    "bundle_constraints_ok_exact": bool(group_match.get("bundle_constraints_ok_exact", True)),
+                    "bundle_constraints": dict(group_match.get("bundle_constraints", {}) or {}),
+                    "common_group": dict(group_match.get("common_group", {})),
+                    "residual_existing_group": dict(group_match.get("residual_existing_group", {})),
+                    "residual_incoming_group": dict(group_match.get("residual_incoming_group", {})),
+                }
+            )
+
+        common_groups = []
+        common_tokens: list[str] = []
+        matched_existing_group_indices = []
+        matched_incoming_group_indices = []
+        existing_residual_by_index = {}
+        incoming_residual_by_index = {}
+        matched_existing_unit_similarities: dict[str, float] = {}
+        matched_incoming_unit_similarities: dict[str, float] = {}
+
+        for order_index, pair in enumerate(matched_pairs):
+            common_group = self._reindex_group(pair.get("common_group", {}), order_index=order_index)
+            if common_group.get("units"):
+                common_groups.append(common_group)
+                common_tokens.extend(common_group.get("tokens", []))
+            matched_existing_group_indices.append(int(pair.get("existing_group_index", 0)))
+            matched_incoming_group_indices.append(int(pair.get("incoming_group_index", 0)))
+            existing_residual_by_index[int(pair.get("existing_group_index", 0))] = dict(pair.get("residual_existing_group", {}))
+            incoming_residual_by_index[int(pair.get("incoming_group_index", 0))] = dict(pair.get("residual_incoming_group", {}))
+            matched_existing_unit_similarities.update(
+                {
+                    str(unit_id): float(similarity)
+                    for unit_id, similarity in pair.get("matched_existing_unit_similarities", {}).items()
+                    if str(unit_id)
+                }
+            )
+            matched_incoming_unit_similarities.update(
+                {
+                    str(unit_id): float(similarity)
+                    for unit_id, similarity in pair.get("matched_incoming_unit_similarities", {}).items()
+                    if str(unit_id)
+                }
+            )
+
+        residual_existing_groups = []
+        residual_incoming_groups = []
+        for order_index, group in enumerate(normalized_existing):
+            residual_group = existing_residual_by_index.get(order_index, group)
+            residual_group = self._reindex_group(residual_group, order_index=len(residual_existing_groups))
+            if residual_group.get("units"):
+                residual_existing_groups.append(residual_group)
+        for order_index, group in enumerate(normalized_incoming):
+            residual_group = incoming_residual_by_index.get(order_index, group)
+            residual_group = self._reindex_group(residual_group, order_index=len(residual_incoming_groups))
+            if residual_group.get("units"):
+                residual_incoming_groups.append(residual_group)
+
+        incoming_span = [matched_incoming_group_indices[0], matched_incoming_group_indices[-1] + 1]
+        existing_span = [matched_existing_group_indices[0], matched_existing_group_indices[-1] + 1]
+        common_display = format_sequence_groups(common_groups)
+
+        # CSA/bundle gate aggregation / CSA 门控汇总：逐组 AND。
+        bundle_ok_existing_included = all(bool(pair.get("bundle_constraints_ok_existing_included", True)) for pair in matched_pairs)
+        bundle_ok_incoming_included = all(bool(pair.get("bundle_constraints_ok_incoming_included", True)) for pair in matched_pairs)
+        bundle_ok_exact = bool(bundle_ok_existing_included and bundle_ok_incoming_included)
+
+        # Flatten diagnostics for the UI/debug (keep it bounded).
+        # 扁平化诊断信息（用于 UI/调试；做长度上限避免爆炸）。
+        existing_gate_items = [dict((pair.get("bundle_constraints", {}) or {}).get("existing_included_in_incoming", {}) or {}) for pair in matched_pairs]
+        incoming_gate_items = [dict((pair.get("bundle_constraints", {}) or {}).get("incoming_included_in_existing", {}) or {}) for pair in matched_pairs]
+        existing_unmatched = [u for item in existing_gate_items for u in list(item.get("unmatched", []) or [])]
+        incoming_unmatched = [u for item in incoming_gate_items for u in list(item.get("unmatched", []) or [])]
+
+        return {
+            "common_tokens": common_tokens,
+            "common_length": sum(len(group.get("units", [])) for group in common_groups),
+            "common_group_count": len(common_groups),
+            "matched_existing_unit_count": sum(len(pair.get("existing_unit_refs", [])) for pair in matched_pairs),
+            "matched_incoming_unit_count": sum(len(pair.get("incoming_unit_refs", [])) for pair in matched_pairs),
+            "common_signature": self.sequence_groups_to_signature(common_groups),
+            "common_display": common_display or "".join(common_tokens),
+            "common_groups": common_groups,
+            "matched_pairs": matched_pairs,
+            "matched_existing_unit_similarities": matched_existing_unit_similarities,
+            "matched_incoming_unit_similarities": matched_incoming_unit_similarities,
+            # Bundle gate / CSA 门控：下游“完全包含/完全匹配”需额外检查这些布尔值。
+            "bundle_constraints_ok_existing_included": bundle_ok_existing_included,
+            "bundle_constraints_ok_incoming_included": bundle_ok_incoming_included,
+            "bundle_constraints_ok_exact": bundle_ok_exact,
+            "bundle_constraints": {
+                "existing_included_in_incoming": {
+                    "ok": bundle_ok_existing_included,
+                    "required_count": sum(int(item.get("required_count", 0) or 0) for item in existing_gate_items),
+                    "matched_count": sum(int(item.get("matched_count", 0) or 0) for item in existing_gate_items),
+                    "unmatched": existing_unmatched[:48],
+                },
+                "incoming_included_in_existing": {
+                    "ok": bundle_ok_incoming_included,
+                    "required_count": sum(int(item.get("required_count", 0) or 0) for item in incoming_gate_items),
+                    "matched_count": sum(int(item.get("matched_count", 0) or 0) for item in incoming_gate_items),
+                    "unmatched": incoming_unmatched[:48],
+                },
+            },
+            "existing_range": existing_span,
+            "incoming_range": incoming_span,
+            "matched_existing_group_indices": matched_existing_group_indices,
+            "matched_incoming_group_indices": matched_incoming_group_indices,
+            "residual_existing_tokens": [token for group in residual_existing_groups for token in group.get("tokens", [])],
+            "residual_incoming_tokens": [token for group in residual_incoming_groups for token in group.get("tokens", [])],
+            "residual_existing_groups": residual_existing_groups,
+            "residual_incoming_groups": residual_incoming_groups,
+            "residual_existing_signature": self.sequence_groups_to_signature(residual_existing_groups),
+            "residual_incoming_signature": self.sequence_groups_to_signature(residual_incoming_groups),
+        }
+
+    def _maximum_common_group_length(self, *, existing_group: dict, incoming_group: dict) -> int:
+        existing_units = list(existing_group.get("units", []))
+        incoming_units = list(incoming_group.get("units", []))
+        if not existing_units or not incoming_units:
+            return 0
+
+        available_existing: dict[str, list[dict]] = {}
+        for unit in existing_units:
+            available_existing.setdefault(str(unit.get("unit_signature", "")), []).append(unit)
+
+        common_length = 0
+        matched_existing_ids: set[str] = set()
+        matched_incoming_ids: set[str] = set()
+
+        for incoming_unit in incoming_units:
+            signature = str(incoming_unit.get("unit_signature", ""))
+            bucket = available_existing.get(signature, [])
+            if not bucket:
+                continue
+            matched_existing = bucket.pop(0)
+            existing_id = str(matched_existing.get("unit_id", ""))
+            incoming_id = str(incoming_unit.get("unit_id", ""))
+            if existing_id:
+                matched_existing_ids.add(existing_id)
+            if incoming_id:
+                matched_incoming_ids.add(incoming_id)
+            common_length += 1
+
+        residual_existing = [unit for unit in existing_units if str(unit.get("unit_id", "")) not in matched_existing_ids]
+        residual_incoming = [unit for unit in incoming_units if str(unit.get("unit_id", "")) not in matched_incoming_ids]
+
+        still_existing = [unit for unit in residual_existing]
+        remaining_incoming: list[dict] = []
+        for incoming_unit in residual_incoming:
+            best_index = -1
+            best_key = None
+            for index, existing_unit in enumerate(still_existing):
+                numeric_match = self._numeric_unit_match(existing_unit=existing_unit, incoming_unit=incoming_unit)
+                if not numeric_match:
+                    continue
+                candidate_key = (
+                    float(numeric_match.get("similarity", 0.0)),
+                    -float(numeric_match.get("distance", 0.0)),
+                    -abs(int(existing_unit.get("sequence_index", 0)) - int(incoming_unit.get("sequence_index", 0))),
+                )
+                if best_key is None or candidate_key > best_key:
+                    best_key = candidate_key
+                    best_index = index
+            if best_index < 0:
+                remaining_incoming.append(incoming_unit)
+                continue
+            common_length += 1
+            still_existing.pop(best_index)
+
+        remaining_existing = [unit for unit in still_existing]
+        for incoming_unit in remaining_incoming:
+            best_index = -1
+            best_key = None
+            for index, existing_unit in enumerate(remaining_existing):
+                structure_match = self._structure_unit_match(existing_unit=existing_unit, incoming_unit=incoming_unit)
+                if not structure_match:
+                    continue
+                candidate_key = (
+                    float(structure_match.get("similarity", 0.0)),
+                    -abs(int(existing_unit.get("sequence_index", 0)) - int(incoming_unit.get("sequence_index", 0))),
+                )
+                if best_key is None or candidate_key > best_key:
+                    best_key = candidate_key
+                    best_index = index
+            if best_index < 0:
+                continue
+            common_length += 1
+            remaining_existing.pop(best_index)
+
+        return common_length
+
+    def make_structure_payload_from_profile(self, profile: dict, *, confidence: float = 0.8, ext: dict | None = None) -> dict:
+        groups = self._normalize_sequence_groups(profile.get("sequence_groups", []))
+        merged_ext = dict(profile.get("ext", {}))
+        merged_ext.update(ext or {})
+        merged_ext.setdefault("sequence_mode", "group_relaxed")
+        merged_ext.setdefault("temporal_signature", self.sequence_groups_to_signature(groups))
+        rebuilt_profile = self._build_profile(groups=groups, member_refs=list(profile.get("member_refs", [])))
+        return {
+            "display_text": profile.get("display_text", "") or rebuilt_profile.get("display_text", ""),
+            "member_refs": list(profile.get("member_refs", [])),
+            "sequence_groups": groups,
+            "flat_tokens": list(rebuilt_profile.get("flat_tokens", [])),
+            "content_signature": self.sequence_groups_to_signature(groups),
+            "semantic_signature": self.sequence_groups_to_signature(groups),
+            "confidence": confidence,
+            "ext": merged_ext,
+        }
+
+    def make_structure_payload_from_tokens(self, tokens: list[str], *, confidence: float = 0.8, ext: dict | None = None) -> dict:
+        tokens = [str(token) for token in tokens if str(token)]
+        group = self._normalize_sequence_group(
+            {
+                "group_index": 0,
+                "source_type": "cut",
+                "origin_frame_id": "",
+                "tokens": tokens,
+            },
+            order_index=0,
+        )
+        groups = [group] if group.get("units") else []
+        merged_ext = dict(ext or {})
+        merged_ext.setdefault("sequence_mode", "group_relaxed")
+        merged_ext.setdefault("temporal_signature", self.sequence_groups_to_signature(groups))
+        return {
+            "display_text": format_sequence_groups(groups) or "".join(tokens),
+            "member_refs": [],
+            "sequence_groups": groups,
+            "flat_tokens": [token for group in groups for token in group.get("tokens", [])],
+            "content_signature": self.sequence_groups_to_signature(groups),
+            "semantic_signature": self.sequence_groups_to_signature(groups),
+            "confidence": confidence,
+            "ext": merged_ext,
+        }
+
+    def make_structure_payload_from_units(
+        self,
+        units: list[dict],
+        *,
+        confidence: float = 0.8,
+        ext: dict | None = None,
+        force_strict_order: bool | None = None,
+    ) -> dict:
+        valid_units = [dict(unit) for unit in units if isinstance(unit, dict) and str(unit.get("token", ""))]
+        if not valid_units:
+            return self.make_structure_payload_from_tokens([], confidence=confidence, ext=ext)
+
+        member_refs = [str(unit.get("unit_id", "")) for unit in valid_units if str(unit.get("unit_id", ""))]
+        source_types = {str(unit.get("source_type", "")) for unit in valid_units if str(unit.get("source_type", ""))}
+        strict_order = bool(force_strict_order)
+        if strict_order:
+            raw_groups = [
+                {
+                    "group_index": order_index,
+                    "source_type": str(unit.get("source_type", "")),
+                    "origin_frame_id": str(unit.get("origin_frame_id", "")),
+                    "units": [dict(unit)],
+                    "source_group_index": int(unit.get("source_group_index", unit.get("group_index", order_index))),
+                    "source_sequence_index": int(unit.get("sequence_index", 0)),
+                }
+                for order_index, unit in enumerate(valid_units)
+            ]
+        else:
+            grouped_map: dict[tuple[int, str, str], list[dict]] = {}
+            group_keys: list[tuple[int, str, str]] = []
+            for unit in valid_units:
+                key = (
+                    int(unit.get("group_index", 0)),
+                    str(unit.get("source_type", "")),
+                    str(unit.get("origin_frame_id", "")),
+                )
+                if key not in grouped_map:
+                    grouped_map[key] = []
+                    group_keys.append(key)
+                grouped_map[key].append(dict(unit))
+            raw_groups = []
+            for order_index, key in enumerate(group_keys):
+                members = sorted(grouped_map[key], key=lambda item: int(item.get("sequence_index", 0)))
+                if not members:
+                    continue
+                raw_groups.append(
+                    {
+                        "group_index": order_index,
+                        "source_type": key[1],
+                        "origin_frame_id": key[2],
+                        "units": members,
+                        "source_group_index": int(members[0].get("source_group_index", key[0])),
+                        "source_sequence_index": int(members[0].get("sequence_index", 0)),
+                    }
+                )
+
+        sequence_groups = self._normalize_sequence_groups(raw_groups)
+        temporal_signature = self.sequence_groups_to_signature(sequence_groups)
+        merged_ext = dict(ext or {})
+        merged_ext.setdefault("sequence_mode", "strict_order" if strict_order else "group_relaxed")
+        merged_ext.setdefault("temporal_signature", temporal_signature)
+        merged_ext.setdefault("source_types", sorted(source_types))
+
+        flat_tokens = [token for group in sequence_groups for token in group.get("tokens", [])]
+        display_text = format_sequence_groups(sequence_groups) or "".join(flat_tokens)
+        return {
+            "display_text": display_text,
+            "member_refs": member_refs,
+            "sequence_groups": sequence_groups,
+            "flat_tokens": flat_tokens,
+            "content_signature": temporal_signature,
+            "semantic_signature": temporal_signature,
+            "confidence": confidence,
+            "ext": merged_ext,
+        }
+
+    def build_internal_stimulus_packet(self, fragments: list[dict], trace_id: str, tick_id: str = "") -> dict:
+        now_ms = int(time.time() * 1000)
+        packet_id = next_id("ispkt")
+        sa_items = []
+        csa_items = []
+        grouped_sequences = []
+        packet_sequence_index = 0
+        internal_group_sa_ids: list[str] = []
+        internal_group_csa_ids: list[str] = []
+
+        for fragment in fragments:
+            sequence_groups = fragment.get("sequence_groups") or [
+                {
+                    "group_index": 0,
+                    "source_type": "internal",
+                    "origin_frame_id": fragment.get("fragment_id", ""),
+                    "tokens": list(fragment.get("flat_tokens", [])),
+                }
+            ]
+            normalized_groups = self._normalize_sequence_groups(sequence_groups)
+            unit_count = sum(len(group.get("units", [])) for group in normalized_groups)
+            if unit_count <= 0:
+                continue
+            fragment_total_er = round(float(fragment.get("er_hint", fragment.get("energy_hint", 0.0))), 6)
+            fragment_total_ev = round(float(fragment.get("ev_hint", fragment.get("energy_hint", 0.0))), 6)
+            per_unit_er = round(fragment_total_er / unit_count, 6)
+            per_unit_ev = round(fragment_total_ev / unit_count, 6)
+
+            for source_group in normalized_groups:
+                units = list(source_group.get("units", []))
+                if not units:
+                    continue
+                group_unit_id_map: dict[str, str] = {}
+                created_sa_items: list[dict] = []
+
+                for unit in units:
+                    sa_id = next_id("sa_internal")
+                    token = str(unit.get("token", ""))
+                    attribute_name = str(unit.get("attribute_name", ""))
+                    attribute_value = unit.get("attribute_value")
+                    value_type = str(unit.get("value_type", "discrete") or "discrete")
+                    if attribute_name:
+                        content = {
+                            "raw": token,
+                            "display": token,
+                            "normalized": token,
+                            "value_type": "numerical" if attribute_value is not None else value_type,
+                            "attribute_name": attribute_name,
+                            "attribute_value": attribute_value,
+                        }
+                    else:
+                        content = {
+                            "raw": token,
+                            "display": token,
+                            "normalized": token,
+                            "value_type": value_type,
+                        }
+                    packet_context = {
+                        "source_type": "internal",
+                        "group_index": 0,
+                        "source_group_index": int(source_group.get("source_group_index", source_group.get("group_index", 0))),
+                        "origin_frame_id": source_group.get("origin_frame_id", fragment.get("fragment_id", "")),
+                        "echo_depth": 0,
+                        "round_created": 0,
+                        "decay_count": 0,
+                        "sequence_index": packet_sequence_index,
+                    }
+                    role = str(unit.get("unit_role", "feature"))
+                    sa_obj = {
+                        "id": sa_id,
+                        "object_type": "sa",
+                        "content": content,
+                        "stimulus": {"role": role, "modality": "internal_text"},
+                        "energy": {"er": per_unit_er, "ev": per_unit_ev},
+                        "source": {
+                            "module": "hdb",
+                            "interface": "build_internal_stimulus_packet",
+                            "origin": "internal_fragments",
+                            "origin_id": fragment.get("fragment_id", ""),
+                            "parent_ids": [],
+                        },
+                        "ext": {"packet_context": packet_context},
+                        "created_at": now_ms,
+                        "updated_at": now_ms,
+                    }
+                    group_unit_id_map[str(unit.get("unit_id", ""))] = sa_id
+                    created_sa_items.append(sa_obj)
+                    sa_items.append(sa_obj)
+                    internal_group_sa_ids.append(sa_id)
+                    packet_sequence_index += 1
+
+                created_sa_by_id = {item["id"]: item for item in created_sa_items}
+                for bundle in source_group.get("csa_bundles", []):
+                    anchor_id = group_unit_id_map.get(str(bundle.get("anchor_unit_id", "")), "")
+                    member_ids = [
+                        group_unit_id_map.get(str(member_id), "")
+                        for member_id in bundle.get("member_unit_ids", [])
+                        if group_unit_id_map.get(str(member_id), "")
+                    ]
+                    member_ids = self._dedupe_preserve_order(member_ids)
+                    if not anchor_id or len(member_ids) < 2:
+                        continue
+                    csa_id = next_id("csa_internal")
+                    csa_obj = {
+                        "id": csa_id,
+                        "object_type": "csa",
+                        "anchor_sa_id": anchor_id,
+                        "member_sa_ids": member_ids,
+                        "content": {
+                            "display": f"CSA[{created_sa_by_id.get(anchor_id, {}).get('content', {}).get('display', '')}]",
+                            "raw": created_sa_by_id.get(anchor_id, {}).get("content", {}).get("raw", ""),
+                        },
+                        "bundle_summary": {
+                            "member_count": len(member_ids),
+                            "display_total_er": round(
+                                sum(float(created_sa_by_id.get(member_id, {}).get("energy", {}).get("er", 0.0)) for member_id in member_ids),
+                                6,
+                            ),
+                            "display_total_ev": round(
+                                sum(float(created_sa_by_id.get(member_id, {}).get("energy", {}).get("ev", 0.0)) for member_id in member_ids),
+                                6,
+                            ),
+                        },
+                        "ext": {
+                            "packet_context": {
+                                "group_index": 0,
+                                "source_group_index": int(source_group.get("source_group_index", source_group.get("group_index", 0))),
+                                "origin_frame_id": source_group.get("origin_frame_id", fragment.get("fragment_id", "")),
+                                "source_type": "internal",
+                                "sequence_index": int(
+                                    created_sa_by_id.get(anchor_id, {}).get("ext", {}).get("packet_context", {}).get("sequence_index", 0)
+                                ),
+                            },
+                            "source_bundle_id": str(bundle.get("bundle_id", "")),
+                        },
+                        "created_at": now_ms,
+                        "updated_at": now_ms,
+                    }
+                    csa_items.append(csa_obj)
+                    internal_group_csa_ids.append(csa_id)
+                    for member_id in member_ids:
+                        sa_obj = created_sa_by_id.get(member_id)
+                        if not sa_obj:
+                            continue
+                        if member_id != anchor_id and sa_obj.get("stimulus", {}).get("role") == "attribute":
+                            sa_obj.setdefault("source", {}).setdefault("parent_ids", [])
+                            sa_obj["source"]["parent_ids"] = [anchor_id]
+
+        if internal_group_sa_ids or internal_group_csa_ids:
+            # Internal stimulus is a co-occurrence packet: it carries SA/CSA only,
+            # without reintroducing structure-level temporal groups.
+            grouped_sequences.append(
+                {
+                    "group_index": 0,
+                    "source_type": "internal",
+                    "origin_frame_id": packet_id,
+                    "sa_ids": self._dedupe_preserve_order(internal_group_sa_ids),
+                    "csa_ids": self._dedupe_preserve_order(internal_group_csa_ids),
+                    "source_group_index": 0,
+                }
+            )
+
+        total_er = round(sum(item.get("energy", {}).get("er", 0.0) for item in sa_items), 6)
+        total_ev = round(sum(item.get("energy", {}).get("ev", 0.0) for item in sa_items), 6)
+        return {
+            "id": packet_id,
+            "object_type": "stimulus_packet",
+            "sub_type": "internal_residual_stimulus_packet",
+            "schema_version": "1.1",
+            "packet_type": "internal",
+            "current_frame_id": packet_id,
+            "echo_frame_ids": [],
+            "sa_items": sa_items,
+            "csa_items": csa_items,
+            "echo_frames": [],
+            "grouped_sa_sequences": grouped_sequences,
+            "energy_summary": {
+                "total_er": total_er,
+                "total_ev": total_ev,
+                "current_total_er": total_er,
+                "current_total_ev": total_ev,
+                "echo_total_er": 0.0,
+                "echo_total_ev": 0.0,
+                "combined_context_er": total_er,
+                "combined_context_ev": total_ev,
+                "ownership_level": "sa",
+                "echo_merged_into_objects": False,
+            },
+            "trace_id": trace_id,
+            "tick_id": tick_id or trace_id,
+            "created_at": now_ms,
+            "updated_at": now_ms,
+            "source": {
+                "module": "hdb",
+                "interface": "build_internal_stimulus_packet",
+                "origin": "internal_fragments",
+                "origin_id": packet_id,
+                "parent_ids": [fragment.get("fragment_id", "") for fragment in fragments],
+            },
+            "status": "active",
+            "ext": {},
+            "meta": {"confidence": 0.7, "field_registry_version": "1.1", "debug": {}, "ext": {}},
+        }
+
+    def merge_stimulus_packets(self, external_packet: dict | None, internal_packet: dict | None, trace_id: str, tick_id: str = "") -> dict:
+        if external_packet and not internal_packet:
+            return external_packet
+        if internal_packet and not external_packet:
+            return internal_packet
+        if not external_packet and not internal_packet:
+            return self.build_internal_stimulus_packet([], trace_id=trace_id, tick_id=tick_id)
+
+        now_ms = int(time.time() * 1000)
+        merged = {
+            "id": next_id("spkt_merge"),
+            "object_type": "stimulus_packet",
+            "sub_type": "merged_stimulus_packet",
+            "schema_version": "1.1",
+            "packet_type": "merged",
+            "current_frame_id": external_packet.get("current_frame_id", external_packet.get("id", "")),
+            "echo_frame_ids": list(external_packet.get("echo_frame_ids", [])),
+            "sa_items": list(external_packet.get("sa_items", [])) + list(internal_packet.get("sa_items", [])),
+            "csa_items": list(external_packet.get("csa_items", [])) + list(internal_packet.get("csa_items", [])),
+            "echo_frames": list(external_packet.get("echo_frames", [])),
+            "grouped_sa_sequences": [],
+            "trace_id": trace_id,
+            "tick_id": tick_id or trace_id,
+            "created_at": now_ms,
+            "updated_at": now_ms,
+            "source": {
+                "module": "hdb",
+                "interface": "merge_stimulus_packets",
+                "origin": "external_plus_internal",
+                "origin_id": external_packet.get("id", ""),
+                "parent_ids": [external_packet.get("id", ""), internal_packet.get("id", "")],
+            },
+            "status": "active",
+            "ext": {},
+            "meta": {"confidence": 0.8, "field_registry_version": "1.1", "debug": {}, "ext": {}},
+        }
+
+        external_groups = [dict(group) for group in external_packet.get("grouped_sa_sequences", [])]
+        internal_groups = [dict(group) for group in internal_packet.get("grouped_sa_sequences", [])]
+        internal_sa_ids = [
+            str(sa_id)
+            for group in internal_groups
+            for sa_id in group.get("sa_ids", [])
+            if str(sa_id)
+        ]
+        internal_csa_ids = [
+            str(csa_id)
+            for group in internal_groups
+            for csa_id in group.get("csa_ids", [])
+            if str(csa_id)
+        ]
+        if not internal_sa_ids:
+            internal_sa_ids = [str(item.get("id", "")) for item in internal_packet.get("sa_items", []) if str(item.get("id", ""))]
+        if not internal_csa_ids:
+            internal_csa_ids = [str(item.get("id", "")) for item in internal_packet.get("csa_items", []) if str(item.get("id", ""))]
+
+        if external_groups:
+            merged_groups = external_groups
+            last_group = dict(merged_groups[-1])
+            last_group["sa_ids"] = self._dedupe_preserve_order(
+                [str(sa_id) for sa_id in last_group.get("sa_ids", []) if str(sa_id)] + internal_sa_ids
+            )
+            last_group["csa_ids"] = self._dedupe_preserve_order(
+                [str(csa_id) for csa_id in last_group.get("csa_ids", []) if str(csa_id)] + internal_csa_ids
+            )
+            merged_groups[-1] = last_group
+        else:
+            merged_groups = internal_groups
+            if not merged_groups and (internal_sa_ids or internal_csa_ids):
+                merged_groups = [
+                    {
+                        "group_index": 0,
+                        "source_type": "internal",
+                        "origin_frame_id": internal_packet.get("id", ""),
+                        "sa_ids": self._dedupe_preserve_order(internal_sa_ids),
+                        "csa_ids": self._dedupe_preserve_order(internal_csa_ids),
+                        "source_group_index": 0,
+                    }
+                ]
+
+        for index, group in enumerate(merged_groups):
+            group["group_index"] = index
+        merged["grouped_sa_sequences"] = merged_groups
+
+        total_er = sum(item.get("energy", {}).get("er", 0.0) for item in merged["sa_items"])
+        total_ev = sum(item.get("energy", {}).get("ev", 0.0) for item in merged["sa_items"])
+        merged["energy_summary"] = {
+            "total_er": round(total_er, 6),
+            "total_ev": round(total_ev, 6),
+            "current_total_er": round(total_er, 6),
+            "current_total_ev": round(total_ev, 6),
+            "echo_total_er": round(sum(item.get("energy", {}).get("er", 0.0) for item in internal_packet.get("sa_items", [])), 6),
+            "echo_total_ev": round(sum(item.get("energy", {}).get("ev", 0.0) for item in internal_packet.get("sa_items", [])), 6),
+            "combined_context_er": round(total_er, 6),
+            "combined_context_ev": round(total_ev, 6),
+            "ownership_level": "sa",
+            "echo_merged_into_objects": True,
+        }
+        return merged
+
+    def tokens_to_signature(self, tokens: list[str]) -> str:
+        return "|".join(str(token) for token in tokens if str(token))
+
+    def group_tokens_to_signature(self, tokens: list[str]) -> str:
+        normalized = [str(token) for token in tokens if str(token)]
+        normalized.sort()
+        return self.tokens_to_signature(normalized)
+
+    def sequence_groups_to_signature(self, groups: list[dict]) -> str:
+        normalized_groups = self._normalize_sequence_groups(groups)
+        return "||".join(group.get("group_signature", "") for group in normalized_groups if group.get("group_signature", ""))
+
+    def profile_equals(self, left_profile: dict, right_profile: dict) -> bool:
+        return self.sequence_groups_to_signature(left_profile.get("sequence_groups", [])) == self.sequence_groups_to_signature(
+            right_profile.get("sequence_groups", [])
+        )
+
+    def _build_profile(self, *, groups: list[dict], member_refs: list[str]) -> dict:
+        flat_tokens = [token for group in groups for token in group.get("tokens", [])]
+        flat_unit_signatures = [
+            str(unit.get("unit_signature", ""))
+            for group in groups
+            for unit in group.get("units", [])
+            if str(unit.get("unit_signature", ""))
+        ]
+        content_signature = self.sequence_groups_to_signature(groups)
+        display_text = format_sequence_groups(groups) or "".join(flat_tokens)
+        return {
+            "display_text": display_text,
+            "flat_tokens": flat_tokens,
+            "flat_unit_signatures": flat_unit_signatures,
+            "member_refs": [ref for ref in member_refs if ref],
+            "sequence_groups": groups,
+            "content_signature": content_signature,
+            "semantic_signature": content_signature,
+            "token_count": len(flat_tokens),
+            "unit_count": sum(len(group.get("units", [])) for group in groups),
+        }
+
+    def _normalize_sequence_groups(self, groups: list[dict]) -> list[dict]:
+        normalized = []
+        for order_index, group in enumerate(groups):
+            if isinstance(group, dict):
+                raw_group = group
+            else:
+                raw_group = {
+                    "group_index": order_index,
+                    "source_type": "legacy",
+                    "origin_frame_id": "",
+                    "tokens": [str(group)],
+                }
+            normalized_group = self._normalize_sequence_group(raw_group, order_index=order_index)
+            if normalized_group.get("units"):
+                normalized.append(normalized_group)
+        return normalized
+
+    def _normalize_sequence_group(self, group: dict, *, order_index: int) -> dict:
+        raw_units = group.get("units", [])
+        if raw_units:
+            units = [
+                self._normalize_unit(
+                    unit,
+                    order_index=order_index,
+                    fallback_sequence_index=index,
+                    source_type=str(group.get("source_type", "")),
+                    origin_frame_id=str(group.get("origin_frame_id", "")),
+                    source_group_index=int(group.get("source_group_index", group.get("group_index", order_index))),
+                )
+                for index, unit in enumerate(raw_units)
+            ]
+        else:
+            units = [
+                self._normalize_unit(
+                    {
+                        "unit_id": f"legacy_{order_index}_{index}",
+                        "token": str(token),
+                        "display_text": str(token),
+                        "unit_role": "feature",
+                        "display_visible": True,
+                    },
+                    order_index=order_index,
+                    fallback_sequence_index=index,
+                    source_type=str(group.get("source_type", "")),
+                    origin_frame_id=str(group.get("origin_frame_id", "")),
+                    source_group_index=int(group.get("source_group_index", group.get("group_index", order_index))),
+                )
+                for index, token in enumerate(group.get("tokens", []))
+                if str(token)
+            ]
+
+        units = [unit for unit in units if unit]
+        units.sort(key=lambda item: (int(item.get("sequence_index", 0)), str(item.get("unit_id", "")), str(item.get("unit_signature", ""))))
+
+        units_by_id = {str(unit.get("unit_id", "")): dict(unit) for unit in units if str(unit.get("unit_id", ""))}
+        raw_bundles = group.get("csa_bundles", []) or self._infer_raw_bundles_from_units(units)
+        bundles = self._normalize_csa_bundles(raw_bundles, units_by_id)
+        units = self._apply_bundles_to_units(units, bundles)
+
+        tokens = [
+            str(unit.get("token", ""))
+            for unit in units
+            if str(unit.get("token", "")) and (bool(unit.get("display_visible", False)) or bool(unit.get("is_placeholder", False)))
+        ]
+        if not tokens:
+            tokens = [str(unit.get("token", "")) for unit in units if str(unit.get("token", ""))]
+
+        return {
+            "group_index": order_index,
+            "source_type": str(group.get("source_type", "")),
+            "origin_frame_id": str(group.get("origin_frame_id", "")),
+            "tokens": tokens,
+            "display_text": format_group_display(units, bundles) or "".join(tokens),
+            "group_signature": self._compose_group_signature(units, bundles),
+            "source_group_index": int(group.get("source_group_index", group.get("group_index", order_index))),
+            "source_sequence_index": int(group.get("source_sequence_index", 0)),
+            "units": units,
+            "unit_signatures": [str(unit.get("unit_signature", "")) for unit in units if str(unit.get("unit_signature", ""))],
+            "csa_bundles": bundles,
+            "bundle_signatures": [str(bundle.get("bundle_signature", "")) for bundle in bundles if str(bundle.get("bundle_signature", ""))],
+        }
+
+    def _maximum_common_group(self, *, existing_group: dict, incoming_group: dict) -> dict:
+        existing_units = list(existing_group.get("units", []))
+        incoming_units = list(incoming_group.get("units", []))
+        if not existing_units or not incoming_units:
+            return {
+                "common_length": 0,
+                "common_group": self._build_group_from_units(template_group=incoming_group, units=[], order_index=int(incoming_group.get("group_index", 0))),
+                "residual_existing_group": self._build_group_from_units(template_group=existing_group, units=existing_units, order_index=int(existing_group.get("group_index", 0))),
+                "residual_incoming_group": self._build_group_from_units(template_group=incoming_group, units=incoming_units, order_index=int(incoming_group.get("group_index", 0))),
+                "matched_existing_unit_ids": [],
+                "matched_incoming_unit_ids": [],
+                "matched_existing_unit_count": 0,
+                "matched_incoming_unit_count": 0,
+            }
+
+        available_existing: dict[str, list[dict]] = {}
+        for unit in existing_units:
+            available_existing.setdefault(str(unit.get("unit_signature", "")), []).append(dict(unit))
+
+        pair_records = []
+        for incoming_unit in incoming_units:
+            signature = str(incoming_unit.get("unit_signature", ""))
+            bucket = available_existing.get(signature, [])
+            if not bucket:
+                continue
+            matched_existing = bucket.pop(0)
+            pair_records.append(
+                {
+                    "existing_unit": matched_existing,
+                    "incoming_unit": dict(incoming_unit),
+                    "common_unit": dict(incoming_unit),
+                    "similarity": 1.0,
+                }
+            )
+
+        matched_existing_units = [dict(item.get("existing_unit", {})) for item in pair_records]
+        matched_incoming_units = [dict(item.get("incoming_unit", {})) for item in pair_records]
+        common_units = [dict(item.get("common_unit", {})) for item in pair_records]
+
+        matched_existing_ids = {str(unit.get("unit_id", "")) for unit in matched_existing_units if str(unit.get("unit_id", ""))}
+        matched_incoming_ids = {str(unit.get("unit_id", "")) for unit in matched_incoming_units if str(unit.get("unit_id", ""))}
+        residual_existing_units = [dict(unit) for unit in existing_units if str(unit.get("unit_id", "")) not in matched_existing_ids]
+        residual_incoming_units = [dict(unit) for unit in incoming_units if str(unit.get("unit_id", "")) not in matched_incoming_ids]
+
+        still_existing = [dict(unit) for unit in residual_existing_units]
+        still_incoming = [dict(unit) for unit in residual_incoming_units]
+        residual_existing_units = []
+        residual_incoming_units = []
+        for incoming_unit in still_incoming:
+            best_index = -1
+            best_existing = None
+            best_match = None
+            best_key = None
+            for index, existing_unit in enumerate(still_existing):
+                numeric_match = self._numeric_unit_match(existing_unit=existing_unit, incoming_unit=incoming_unit)
+                if not numeric_match:
+                    continue
+                candidate_key = (
+                    float(numeric_match.get("similarity", 0.0)),
+                    -float(numeric_match.get("distance", 0.0)),
+                    -abs(int(existing_unit.get("sequence_index", 0)) - int(incoming_unit.get("sequence_index", 0))),
+                )
+                if best_key is None or candidate_key > best_key:
+                    best_key = candidate_key
+                    best_index = index
+                    best_existing = dict(existing_unit)
+                    best_match = dict(numeric_match)
+            if best_index < 0 or best_existing is None or best_match is None:
+                residual_incoming_units.append(dict(incoming_unit))
+                continue
+            common_unit = self._generalize_numeric_common_unit(
+                existing_unit=best_existing,
+                incoming_unit=incoming_unit,
+                numeric_match=best_match,
+            )
+            matched_existing_units.append(best_existing)
+            matched_incoming_units.append(dict(incoming_unit))
+            common_units.append(common_unit)
+            pair_records.append(
+                {
+                    "existing_unit": best_existing,
+                    "incoming_unit": dict(incoming_unit),
+                    "common_unit": dict(common_unit),
+                    "similarity": float(best_match.get("similarity", 1.0)),
+                }
+            )
+            still_existing.pop(best_index)
+
+        remaining_existing = [dict(unit) for unit in still_existing]
+        still_existing = []
+        still_incoming = [dict(unit) for unit in residual_incoming_units]
+        residual_incoming_units = []
+        for incoming_unit in still_incoming:
+            best_index = -1
+            best_existing = None
+            best_match = None
+            best_key = None
+            for index, existing_unit in enumerate(remaining_existing):
+                structure_match = self._structure_unit_match(existing_unit=existing_unit, incoming_unit=incoming_unit)
+                if not structure_match:
+                    continue
+                candidate_key = (
+                    float(structure_match.get("similarity", 0.0)),
+                    -abs(int(existing_unit.get("sequence_index", 0)) - int(incoming_unit.get("sequence_index", 0))),
+                )
+                if best_key is None or candidate_key > best_key:
+                    best_key = candidate_key
+                    best_index = index
+                    best_existing = dict(existing_unit)
+                    best_match = dict(structure_match)
+            if best_index < 0 or best_existing is None or best_match is None:
+                residual_incoming_units.append(dict(incoming_unit))
+                continue
+            common_unit = self._generalize_structure_common_unit(
+                existing_unit=best_existing,
+                incoming_unit=incoming_unit,
+                structure_match=best_match,
+            )
+            matched_existing_units.append(best_existing)
+            matched_incoming_units.append(dict(incoming_unit))
+            common_units.append(common_unit)
+            pair_records.append(
+                {
+                    "existing_unit": best_existing,
+                    "incoming_unit": dict(incoming_unit),
+                    "common_unit": dict(common_unit),
+                    "similarity": float(best_match.get("similarity", 1.0)),
+                }
+            )
+            remaining_existing.pop(best_index)
+        residual_existing_units.extend(dict(unit) for unit in remaining_existing)
+
+        common_bundles = self._build_common_raw_bundles(
+            existing_group=existing_group,
+            incoming_group=incoming_group,
+            pair_records=pair_records,
+        )
+        common_group = self._build_group_from_units(
+            template_group=incoming_group,
+            units=common_units,
+            order_index=int(incoming_group.get("group_index", 0)),
+            raw_bundles=common_bundles,
+        )
+        residual_existing_group = self._build_group_from_units(
+            template_group=existing_group,
+            units=residual_existing_units,
+            order_index=int(existing_group.get("group_index", 0)),
+        )
+        residual_incoming_group = self._build_group_from_units(
+            template_group=incoming_group,
+            units=residual_incoming_units,
+            order_index=int(incoming_group.get("group_index", 0)),
+        )
+
+        # ---- CSA/bundle gate check (directional) / CSA 门控检查（有方向） ----
+        # existing_incoming_ok: "existing side bundles" must be fully covered by ONE incoming bundle each.
+        # incoming_existing_ok: symmetric check, mainly used for exact match.
+        existing_to_incoming, incoming_to_existing = self._build_unit_id_mapping(pair_records)
+        gate_existing_included = self._bundle_gate_report(
+            required_group=existing_group,
+            container_group=incoming_group,
+            required_to_container_unit_id=existing_to_incoming,
+        )
+        gate_incoming_included = self._bundle_gate_report(
+            required_group=incoming_group,
+            container_group=existing_group,
+            required_to_container_unit_id=incoming_to_existing,
+        )
+        gate_ok_existing_included = bool(gate_existing_included.get("ok", True))
+        gate_ok_incoming_included = bool(gate_incoming_included.get("ok", True))
+
+        return {
+            "common_length": len(common_group.get("units", [])),
+            "common_group": common_group,
+            "residual_existing_group": residual_existing_group,
+            "residual_incoming_group": residual_incoming_group,
+            "matched_existing_unit_ids": [str(unit.get("unit_id", "")) for unit in matched_existing_units if str(unit.get("unit_id", ""))],
+            "matched_incoming_unit_ids": [str(unit.get("unit_id", "")) for unit in matched_incoming_units if str(unit.get("unit_id", ""))],
+            "matched_existing_unit_count": len(matched_existing_units),
+            "matched_incoming_unit_count": len(matched_incoming_units),
+            "bundle_constraints_ok_existing_included": gate_ok_existing_included,
+            "bundle_constraints_ok_incoming_included": gate_ok_incoming_included,
+            "bundle_constraints_ok_exact": bool(gate_ok_existing_included and gate_ok_incoming_included),
+            "bundle_constraints": {
+                "existing_included_in_incoming": gate_existing_included,
+                "incoming_included_in_existing": gate_incoming_included,
+            },
+            "matched_existing_unit_similarities": {
+                str(item.get("existing_unit", {}).get("unit_id", "")): round(float(item.get("similarity", 1.0)), 8)
+                for item in pair_records
+                if str(item.get("existing_unit", {}).get("unit_id", ""))
+            },
+            "matched_incoming_unit_similarities": {
+                str(item.get("incoming_unit", {}).get("unit_id", "")): round(float(item.get("similarity", 1.0)), 8)
+                for item in pair_records
+                if str(item.get("incoming_unit", {}).get("unit_id", ""))
+            },
+        }
+
+    def _build_group_from_units(
+        self,
+        *,
+        template_group: dict,
+        units: list[dict],
+        order_index: int,
+        raw_bundles: list[dict] | None = None,
+        bundle_signature_whitelist: list[str] | None = None,
+    ) -> dict:
+        raw_group = {
+            "group_index": order_index,
+            "source_type": template_group.get("source_type", ""),
+            "origin_frame_id": template_group.get("origin_frame_id", ""),
+            "source_group_index": int(template_group.get("source_group_index", template_group.get("group_index", order_index))),
+            "source_sequence_index": int(template_group.get("source_sequence_index", 0)),
+            "units": [dict(unit) for unit in units if isinstance(unit, dict)],
+        }
+        if raw_bundles is not None:
+            raw_group["csa_bundles"] = [dict(bundle) for bundle in raw_bundles if isinstance(bundle, dict)]
+        normalized = self._normalize_sequence_group(raw_group, order_index=order_index)
+        if bundle_signature_whitelist is None:
+            return normalized
+
+        allowed = Counter(str(signature) for signature in bundle_signature_whitelist if str(signature))
+        selected_bundles = []
+        for bundle in normalized.get("csa_bundles", []):
+            signature = str(bundle.get("bundle_signature", ""))
+            if allowed.get(signature, 0) <= 0:
+                continue
+            allowed[signature] -= 1
+            selected_bundles.append(dict(bundle))
+
+        stripped_units = [self._clear_unit_bundle_fields(unit) for unit in normalized.get("units", [])]
+        filtered_group = {
+            "group_index": order_index,
+            "source_type": normalized.get("source_type", ""),
+            "origin_frame_id": normalized.get("origin_frame_id", ""),
+            "source_group_index": int(normalized.get("source_group_index", order_index)),
+            "source_sequence_index": int(normalized.get("source_sequence_index", 0)),
+            "units": stripped_units,
+            "csa_bundles": [
+                {
+                    "bundle_id": bundle.get("bundle_id", ""),
+                    "anchor_unit_id": bundle.get("anchor_unit_id", ""),
+                    "member_unit_ids": list(bundle.get("member_unit_ids", [])),
+                    "anchor_unit_signature": bundle.get("anchor_unit_signature", ""),
+                    "member_unit_signatures": list(bundle.get("member_unit_signatures", [])),
+                    "bundle_signature": bundle.get("bundle_signature", ""),
+                }
+                for bundle in selected_bundles
+            ],
+        }
+        return self._normalize_sequence_group(filtered_group, order_index=order_index)
+
+    def _normalize_unit(
+        self,
+        unit: dict,
+        *,
+        order_index: int,
+        fallback_sequence_index: int,
+        source_type: str,
+        origin_frame_id: str,
+        source_group_index: int,
+    ) -> dict | None:
+        token = str(unit.get("token", unit.get("display_text", unit.get("content", {}).get("display", ""))))
+        if not token:
+            return None
+        unit_role = str(unit.get("unit_role", unit.get("stimulus_role", unit.get("role", "feature")) or "feature"))
+        is_placeholder = bool(unit.get("is_placeholder", False) or token.startswith("SELF["))
+        if is_placeholder and unit_role == "feature":
+            unit_role = "placeholder"
+        display_visible = unit.get("display_visible")
+        if display_visible is None:
+            display_visible = unit_role != "attribute"
+        sequence_index = int(unit.get("sequence_index", fallback_sequence_index))
+        unit_id = str(unit.get("unit_id", unit.get("id", f"unit_{order_index}_{fallback_sequence_index}")))
+        signature = str(unit.get("unit_signature", "")) or self._default_unit_signature(token=token, unit_role=unit_role)
+        attribute_name = str(unit.get("attribute_name", unit.get("content", {}).get("attribute_name", "")))
+        attribute_value = unit.get("attribute_value", unit.get("content", {}).get("attribute_value"))
+        er = round(float(unit.get("er", unit.get("energy", {}).get("er", 0.0))), 8)
+        ev = round(float(unit.get("ev", unit.get("energy", {}).get("ev", 0.0))), 8)
+        sensor_fatigue = dict(unit.get("sensor_fatigue", {}) or {})
+        return {
+            "unit_id": unit_id,
+            "object_type": str(unit.get("object_type", "sa")),
+            "token": token,
+            "display_text": str(unit.get("display_text", token)),
+            "unit_role": unit_role,
+            "unit_signature": signature,
+            "sequence_index": sequence_index,
+            "group_index": order_index,
+            "source_group_index": int(unit.get("source_group_index", source_group_index)),
+            "source_type": str(unit.get("source_type", source_type)),
+            "origin_frame_id": str(unit.get("origin_frame_id", origin_frame_id)),
+            "er": er,
+            "ev": ev,
+            "total_energy": round(er + ev, 8),
+            "is_punctuation": bool(unit.get("is_punctuation", self._is_punctuation_token(token))),
+            "display_visible": bool(display_visible),
+            "is_placeholder": is_placeholder,
+            "attribute_name": attribute_name,
+            "attribute_value": attribute_value,
+            "fatigue": round(float(unit.get("fatigue", 0.0)), 8),
+            "sensor_fatigue": sensor_fatigue,
+            "suppression_ratio": round(float(unit.get("suppression_ratio", sensor_fatigue.get("suppression_ratio", 0.0))), 6),
+            "er_before_fatigue": round(float(unit.get("er_before_fatigue", sensor_fatigue.get("er_before_fatigue", er))), 8),
+            "er_after_fatigue": round(float(unit.get("er_after_fatigue", sensor_fatigue.get("er_after_fatigue", er))), 8),
+            "window_count": int(unit.get("window_count", sensor_fatigue.get("window_count", 0)) or 0),
+            "threshold_count": int(unit.get("threshold_count", sensor_fatigue.get("threshold_count", 0)) or 0),
+            "window_rounds": int(unit.get("window_rounds", sensor_fatigue.get("window_rounds", 0)) or 0),
+            "sensor_round": int(unit.get("sensor_round", sensor_fatigue.get("sensor_round", 0)) or 0),
+            "bundle_id": str(unit.get("bundle_id", "")),
+            "bundle_anchor_unit_id": str(unit.get("bundle_anchor_unit_id", "")),
+            "bundle_anchor_signature": str(unit.get("bundle_anchor_signature", "")),
+            "bundle_signature": str(unit.get("bundle_signature", "")),
+            "bundle_member_unit_ids": list(unit.get("bundle_member_unit_ids", [])),
+            "bundle_member_signatures": list(unit.get("bundle_member_signatures", [])),
+        }
+
+    def _compose_group_signature(self, units: list[dict], bundles: list[dict]) -> str:
+        unit_part = self.tokens_to_signature(sorted(str(unit.get("unit_signature", "")) for unit in units if str(unit.get("unit_signature", ""))))
+        bundle_part = self.tokens_to_signature(sorted(str(bundle.get("bundle_signature", "")) for bundle in bundles if str(bundle.get("bundle_signature", ""))))
+        if unit_part and bundle_part:
+            return f"U[{unit_part}]#B[{bundle_part}]"
+        if bundle_part:
+            return f"B[{bundle_part}]"
+        if unit_part:
+            return f"U[{unit_part}]"
+        return ""
+
+    def _infer_raw_bundles_from_units(self, units: list[dict]) -> list[dict]:
+        bundles = {}
+        for unit in units:
+            bundle_id = str(unit.get("bundle_id", ""))
+            anchor_unit_id = str(unit.get("bundle_anchor_unit_id", ""))
+            anchor_signature = str(unit.get("bundle_anchor_signature", ""))
+            if not bundle_id and not anchor_unit_id and not anchor_signature:
+                continue
+            key = bundle_id or anchor_unit_id or anchor_signature
+            current = bundles.setdefault(
+                key,
+                {
+                    "bundle_id": bundle_id or key,
+                    "anchor_unit_id": anchor_unit_id,
+                    "anchor_unit_signature": anchor_signature,
+                    "member_unit_ids": [],
+                },
+            )
+            current["member_unit_ids"].append(str(unit.get("unit_id", "")))
+            if not current.get("anchor_unit_id") and anchor_unit_id:
+                current["anchor_unit_id"] = anchor_unit_id
+            if not current.get("anchor_unit_signature") and anchor_signature:
+                current["anchor_unit_signature"] = anchor_signature
+        return list(bundles.values())
+
+    def _normalize_csa_bundles(self, raw_bundles: list[dict], units_by_id: dict[str, dict]) -> list[dict]:
+        normalized = []
+        for index, raw_bundle in enumerate(raw_bundles):
+            member_unit_ids = [
+                str(member_id)
+                for member_id in raw_bundle.get("member_unit_ids", [])
+                if str(member_id) in units_by_id
+            ]
+            member_unit_ids = self._dedupe_preserve_order(member_unit_ids)
+            if not member_unit_ids:
+                continue
+            anchor_unit_id = str(raw_bundle.get("anchor_unit_id", ""))
+            if anchor_unit_id not in units_by_id:
+                anchor_unit_id = ""
+            if not anchor_unit_id:
+                anchor_signature = str(raw_bundle.get("anchor_unit_signature", ""))
+                for member_id in member_unit_ids:
+                    member = units_by_id.get(member_id, {})
+                    if anchor_signature and str(member.get("unit_signature", "")) == anchor_signature:
+                        anchor_unit_id = member_id
+                        break
+                if not anchor_unit_id:
+                    for member_id in member_unit_ids:
+                        member = units_by_id.get(member_id, {})
+                        if str(member.get("unit_role", "")) != "attribute":
+                            anchor_unit_id = member_id
+                            break
+            if not anchor_unit_id:
+                continue
+            ordered_member_ids = sorted(
+                member_unit_ids,
+                key=lambda member_id: (
+                    int(units_by_id.get(member_id, {}).get("sequence_index", 0)),
+                    str(member_id),
+                ),
+            )
+            if anchor_unit_id not in ordered_member_ids:
+                ordered_member_ids.insert(0, anchor_unit_id)
+            attribute_member_ids = [member_id for member_id in ordered_member_ids if member_id != anchor_unit_id]
+            if not attribute_member_ids:
+                continue
+            anchor_signature = str(units_by_id.get(anchor_unit_id, {}).get("unit_signature", ""))
+            member_signatures = [str(units_by_id.get(member_id, {}).get("unit_signature", "")) for member_id in ordered_member_ids if str(units_by_id.get(member_id, {}).get("unit_signature", ""))]
+            bundle_signature = str(raw_bundle.get("bundle_signature", "")) or self._bundle_signature(anchor_signature, member_signatures[1:])
+            normalized.append(
+                {
+                    "bundle_id": str(raw_bundle.get("bundle_id", "")) or f"bundle_{index}",
+                    "anchor_unit_id": anchor_unit_id,
+                    "member_unit_ids": ordered_member_ids,
+                    "anchor_unit_signature": anchor_signature,
+                    "member_unit_signatures": member_signatures,
+                    "bundle_signature": bundle_signature,
+                }
+            )
+        normalized.sort(
+            key=lambda bundle: (
+                int(units_by_id.get(str(bundle.get("anchor_unit_id", "")), {}).get("sequence_index", 0)),
+                str(bundle.get("bundle_id", "")),
+            )
+        )
+        return normalized
+
+    def _apply_bundles_to_units(self, units: list[dict], bundles: list[dict]) -> list[dict]:
+        cloned_units = [self._clear_unit_bundle_fields(unit) for unit in units]
+        units_by_id = {str(unit.get("unit_id", "")): unit for unit in cloned_units if str(unit.get("unit_id", ""))}
+        for bundle in bundles:
+            anchor_unit_id = str(bundle.get("anchor_unit_id", ""))
+            member_unit_ids = [str(member_id) for member_id in bundle.get("member_unit_ids", []) if str(member_id) in units_by_id]
+            member_signatures = [
+                str(units_by_id.get(member_id, {}).get("unit_signature", ""))
+                for member_id in member_unit_ids
+                if str(units_by_id.get(member_id, {}).get("unit_signature", ""))
+            ]
+            for member_id in member_unit_ids:
+                member = units_by_id.get(member_id)
+                if not member:
+                    continue
+                member["bundle_id"] = str(bundle.get("bundle_id", ""))
+                member["bundle_anchor_unit_id"] = anchor_unit_id
+                member["bundle_anchor_signature"] = str(bundle.get("anchor_unit_signature", ""))
+                member["bundle_signature"] = str(bundle.get("bundle_signature", ""))
+                member["bundle_member_unit_ids"] = list(member_unit_ids)
+                member["bundle_member_signatures"] = list(member_signatures)
+        cloned_units.sort(key=lambda item: (int(item.get("sequence_index", 0)), str(item.get("unit_id", "")), str(item.get("unit_signature", ""))))
+        return cloned_units
+
+    def _clear_unit_bundle_fields(self, unit: dict) -> dict:
+        cloned = dict(unit)
+        cloned["bundle_id"] = ""
+        cloned["bundle_anchor_unit_id"] = ""
+        cloned["bundle_anchor_signature"] = ""
+        cloned["bundle_signature"] = ""
+        cloned["bundle_member_unit_ids"] = []
+        cloned["bundle_member_signatures"] = []
+        return cloned
+
+    def _default_unit_signature(self, *, token: str, unit_role: str) -> str:
+        role = str(unit_role or "feature")
+        if role == "attribute":
+            prefix = "A"
+        elif role == "placeholder":
+            prefix = "P"
+        else:
+            prefix = "F"
+        return f"{prefix}:{token}"
+
+    def _bundle_signature(self, anchor_signature: str, attribute_signatures: list[str]) -> str:
+        normalized_attrs = sorted(str(item) for item in attribute_signatures if str(item))
+        return f"CSA[{anchor_signature}=>{'|'.join(normalized_attrs)}]"
+
+    def _intersect_multiset(self, left_items: list[str], right_items: list[str]) -> list[str]:
+        right_counter = Counter(str(item) for item in right_items if str(item))
+        common = []
+        for item in left_items:
+            text = str(item)
+            if not text:
+                continue
+            if right_counter.get(text, 0) <= 0:
+                continue
+            right_counter[text] -= 1
+            common.append(text)
+        return common
+
+    @staticmethod
+    def _coerce_numeric_value(value) -> float | None:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
+
+    def _numeric_unit_match(self, *, existing_unit: dict, incoming_unit: dict) -> dict | None:
+        if str(existing_unit.get("unit_role", "")) != "attribute":
+            return None
+        if str(incoming_unit.get("unit_role", "")) != "attribute":
+            return None
+        family = str(existing_unit.get("attribute_name", "") or incoming_unit.get("attribute_name", ""))
+        if not family or family != str(incoming_unit.get("attribute_name", "") or family):
+            return None
+        existing_value = self._coerce_numeric_value(existing_unit.get("attribute_value"))
+        incoming_value = self._coerce_numeric_value(incoming_unit.get("attribute_value"))
+        if existing_value is None or incoming_value is None:
+            return None
+        similarity = self._numeric_similarity(existing_value, incoming_value)
+        average_value = round((float(existing_value) + float(incoming_value)) / 2.0, 8)
+        return {
+            "family": family,
+            "left_value": round(float(existing_value), 8),
+            "right_value": round(float(incoming_value), 8),
+            "average_value": average_value,
+            "distance": round(abs(float(existing_value) - float(incoming_value)), 8),
+            "similarity": round(float(similarity), 8),
+        }
+
+    @staticmethod
+    def _format_generalized_numeric_token(attribute_name: str, numeric_match: dict) -> str:
+        text = CutEngine._format_numeric_value_text(numeric_match.get("average_value", 0.0))
+        return f"{attribute_name}:~{text}"
+
+    def _generalize_numeric_common_unit(self, *, existing_unit: dict, incoming_unit: dict, numeric_match: dict) -> dict:
+        family = str(incoming_unit.get("attribute_name", "") or existing_unit.get("attribute_name", ""))
+        average_value = float(numeric_match.get("average_value", 0.0))
+        token = f"{family}:{self._format_numeric_value_text(average_value)}"
+        sequence_index = min(
+            int(existing_unit.get("sequence_index", 0)),
+            int(incoming_unit.get("sequence_index", 0)),
+        )
+        return {
+            **dict(incoming_unit),
+            "unit_id": "numeric_common::"
+            + family
+            + "::"
+            + str(existing_unit.get("unit_id", ""))
+            + "::"
+            + str(incoming_unit.get("unit_id", "")),
+            "token": token,
+            "display_text": token,
+            "unit_signature": f"AN:{family}:{self._format_numeric_value_text(average_value)}",
+            "sequence_index": sequence_index,
+            "attribute_name": family,
+            "attribute_value": average_value,
+            "display_visible": False,
+            "numeric_match_similarity": float(numeric_match.get("similarity", 0.0)),
+            "match_similarity": float(numeric_match.get("similarity", 0.0)),
+        }
+
+    def _structure_unit_match(self, *, existing_unit: dict, incoming_unit: dict) -> dict | None:
+        if str(existing_unit.get("object_type", "")) != "st":
+            return None
+        if str(incoming_unit.get("object_type", "")) != "st":
+            return None
+        existing_signature = str(existing_unit.get("structure_fuzzy_signature", ""))
+        incoming_signature = str(incoming_unit.get("structure_fuzzy_signature", ""))
+        if not existing_signature or existing_signature != incoming_signature:
+            return None
+        existing_slots = list(existing_unit.get("structure_numeric_slots", []))
+        incoming_slots = list(incoming_unit.get("structure_numeric_slots", []))
+        if len(existing_slots) != len(incoming_slots):
+            return None
+        averaged_slots = []
+        similarities = []
+        for existing_slot, incoming_slot in zip(existing_slots, incoming_slots):
+            existing_family = str(existing_slot.get("family", ""))
+            incoming_family = str(incoming_slot.get("family", ""))
+            if not existing_family or existing_family != incoming_family:
+                return None
+            left_value = self._coerce_numeric_value(existing_slot.get("value"))
+            right_value = self._coerce_numeric_value(incoming_slot.get("value"))
+            if left_value is None or right_value is None:
+                return None
+            similarity = self._numeric_similarity(left_value, right_value)
+            similarities.append(similarity)
+            averaged_slots.append(
+                {
+                    "family": existing_family,
+                    "value": round((float(left_value) + float(right_value)) / 2.0, 8),
+                }
+            )
+        similarity = round(sum(similarities) / len(similarities), 8) if similarities else 1.0
+        template = str(incoming_unit.get("structure_display_template", "") or existing_unit.get("structure_display_template", ""))
+        common_display = self._format_structure_common_display(
+            template=template,
+            averaged_slots=averaged_slots,
+            fallback_display=str(incoming_unit.get("display_text", "") or existing_unit.get("display_text", "")),
+        )
+        return {
+            "similarity": similarity,
+            "average_numeric_slots": averaged_slots,
+            "common_display_text": common_display,
+            "common_unit_signature": existing_signature,
+        }
+
+    def _generalize_structure_common_unit(self, *, existing_unit: dict, incoming_unit: dict, structure_match: dict) -> dict:
+        return {
+            **dict(incoming_unit),
+            "token": str(structure_match.get("common_display_text", "")) or str(incoming_unit.get("token", "")),
+            "display_text": str(structure_match.get("common_display_text", "")) or str(incoming_unit.get("display_text", "")),
+            "unit_signature": str(structure_match.get("common_unit_signature", "")) or str(incoming_unit.get("unit_signature", "")),
+            "structure_fuzzy_signature": str(structure_match.get("common_unit_signature", "")) or str(incoming_unit.get("structure_fuzzy_signature", "")),
+            "structure_numeric_slots": list(structure_match.get("average_numeric_slots", [])),
+            "structure_display_text": str(structure_match.get("common_display_text", "")) or str(incoming_unit.get("structure_display_text", "")),
+            "structure_display_template": str(incoming_unit.get("structure_display_template", "") or existing_unit.get("structure_display_template", "")),
+            "match_similarity": float(structure_match.get("similarity", 1.0)),
+        }
+
+    @staticmethod
+    def _format_numeric_value_text(value: float | int | str) -> str:
+        try:
+            text = f"{float(value):.4f}".rstrip("0").rstrip(".")
+        except (TypeError, ValueError):
+            text = str(value)
+        return text or "0"
+
+    @staticmethod
+    def _numeric_similarity(left_value: float, right_value: float) -> float:
+        left = float(left_value)
+        right = float(right_value)
+        if left == right:
+            return 1.0
+        if left == 0.0 or right == 0.0:
+            return 0.0
+        if left * right < 0.0:
+            return 0.0
+        return max(0.0, min(1.0, min(abs(left), abs(right)) / max(abs(left), abs(right))))
+
+    @classmethod
+    def _format_structure_common_display(cls, *, template: str, averaged_slots: list[dict], fallback_display: str) -> str:
+        text = str(template or "")
+        if not text:
+            return fallback_display
+        for index, slot in enumerate(averaged_slots):
+            token = cls._format_numeric_value_text(slot.get("value", 0.0))
+            text = text.replace(f"{{{{NUM{index}}}}}", token)
+        return text or fallback_display
+
+    def _build_common_raw_bundles(self, *, existing_group: dict, incoming_group: dict, pair_records: list[dict]) -> list[dict]:
+        incoming_to_common = {
+            str(item.get("incoming_unit", {}).get("unit_id", "")): str(item.get("common_unit", {}).get("unit_id", ""))
+            for item in pair_records
+            if str(item.get("incoming_unit", {}).get("unit_id", "")) and str(item.get("common_unit", {}).get("unit_id", ""))
+        }
+        existing_to_common = {
+            str(item.get("existing_unit", {}).get("unit_id", "")): str(item.get("common_unit", {}).get("unit_id", ""))
+            for item in pair_records
+            if str(item.get("existing_unit", {}).get("unit_id", "")) and str(item.get("common_unit", {}).get("unit_id", ""))
+        }
+        existing_bundle_keys = set()
+        for bundle in existing_group.get("csa_bundles", []):
+            existing_attr_ids = [
+                str(member_id)
+                for member_id in bundle.get("member_unit_ids", [])
+                if str(member_id) and str(member_id) != str(bundle.get("anchor_unit_id", ""))
+            ]
+            mapped_anchor = existing_to_common.get(str(bundle.get("anchor_unit_id", "")), "")
+            mapped_attrs = [
+                existing_to_common.get(str(member_id), "")
+                for member_id in bundle.get("member_unit_ids", [])
+                if str(member_id) != str(bundle.get("anchor_unit_id", ""))
+            ]
+            mapped_attrs = [member_id for member_id in mapped_attrs if member_id]
+            # Only treat a bundle as "common candidate" when ALL required attribute members are mapped.
+            # 仅当该 bundle 的全部属性成员都被映射（匹配）到 common 单位时，才认为它可能进入“共同部分”。
+            if not mapped_anchor or not mapped_attrs or len(mapped_attrs) < len(existing_attr_ids):
+                continue
+            existing_bundle_keys.add((mapped_anchor, tuple(sorted(mapped_attrs))))
+
+        common_bundles = []
+        for index, bundle in enumerate(incoming_group.get("csa_bundles", [])):
+            mapped_anchor = incoming_to_common.get(str(bundle.get("anchor_unit_id", "")), "")
+            mapped_attrs = [
+                incoming_to_common.get(str(member_id), "")
+                for member_id in bundle.get("member_unit_ids", [])
+                if str(member_id) != str(bundle.get("anchor_unit_id", ""))
+            ]
+            mapped_attrs = [member_id for member_id in mapped_attrs if member_id]
+            if not mapped_anchor or not mapped_attrs:
+                continue
+            bundle_key = (mapped_anchor, tuple(sorted(mapped_attrs)))
+            if bundle_key not in existing_bundle_keys:
+                continue
+            common_bundles.append(
+                {
+                    "bundle_id": f"common_bundle_{index}",
+                    "anchor_unit_id": mapped_anchor,
+                    "member_unit_ids": [mapped_anchor, *mapped_attrs],
+                }
+            )
+        return common_bundles
+
+    # ================================================================== #
+    # CSA/Bundle Gate (核心门控语义)                                       #
+    # ================================================================== #
+    #
+    # Theory alignment / 理论对齐（见《理论核心》3.3.3）:
+    # - If the "structure side" contains a CSA bundle (anchor + attributes),
+    #   the "matching side" must provide ONE bundle that fully contains it.
+    #   若结构侧包含某个 CSA（锚点 + 属性集合），匹配侧必须提供一个能够完全包含它的 CSA；
+    #   不能用两个 CSA 分别拼接来匹配一个结构 CSA。
+    #
+    # Why this is needed / 为什么需要这一步：
+    # - Unit matching alone ("A:属性token") may accidentally cross-bind attributes
+    #   across different anchors (objects).
+    #   仅靠属性 unit 的 token 匹配容易发生“跨对象拼接”，导致误匹配与错误触发。
+    #
+    # Engineering choice / 工程取舍：
+    # - Keep the DP token matching logic stable (MVP friendly), and add an
+    #   explicit CSA/bundle gate check here. Downstream "full included" checks
+    #   must additionally require this gate to pass.
+    #   维持现有 DP/单位匹配逻辑稳定，在这里增加显式门控检查；下游判断“完全包含”时必须同时满足门控。
+
+    @staticmethod
+    def _build_unit_id_mapping(pair_records: list[dict]) -> tuple[dict[str, str], dict[str, str]]:
+        """Build matched unit_id mapping between existing <-> incoming.
+
+        构造单位 id 的匹配映射：existing_unit_id -> incoming_unit_id 以及反向映射。
+        """
+        existing_to_incoming: dict[str, str] = {}
+        incoming_to_existing: dict[str, str] = {}
+        for rec in pair_records:
+            eu = rec.get("existing_unit", {}) or {}
+            iu = rec.get("incoming_unit", {}) or {}
+            e_id = str(eu.get("unit_id", "") or "")
+            i_id = str(iu.get("unit_id", "") or "")
+            if not e_id or not i_id:
+                continue
+            existing_to_incoming[e_id] = i_id
+            incoming_to_existing[i_id] = e_id
+        return existing_to_incoming, incoming_to_existing
+
+    def _bundle_gate_report(
+        self,
+        *,
+        required_group: dict,
+        container_group: dict,
+        required_to_container_unit_id: dict[str, str],
+    ) -> dict:
+        """Check: each required CSA bundle is covered by ONE container bundle.
+
+        检查：required_group 的每个 CSA bundle 是否都能被 container_group 中“某一个”bundle 完全包含。
+        """
+        required_bundles = [b for b in (required_group.get("csa_bundles", []) or []) if isinstance(b, dict)]
+        container_bundles = [b for b in (container_group.get("csa_bundles", []) or []) if isinstance(b, dict)]
+
+        bundles_by_anchor: dict[str, list[dict]] = {}
+        for bundle in container_bundles:
+            anchor_id = str(bundle.get("anchor_unit_id", "") or "")
+            if not anchor_id:
+                continue
+            bundles_by_anchor.setdefault(anchor_id, []).append(bundle)
+
+        required_count = 0
+        matched_count = 0
+        unmatched: list[dict] = []
+        matched: list[dict] = []
+
+        for rb in required_bundles:
+            anchor_id = str(rb.get("anchor_unit_id", "") or "")
+            member_ids = [str(mid) for mid in rb.get("member_unit_ids", []) if str(mid)]
+            attr_ids = [mid for mid in member_ids if mid and mid != anchor_id]
+            if not anchor_id or not attr_ids:
+                # Not a valid gate bundle (no anchor or no attrs) -> ignore in the gate.
+                # 非有效门控 bundle（无锚点或无属性）-> 原型阶段先不纳入门控统计。
+                continue
+
+            required_count += 1
+            mapped_anchor = str(required_to_container_unit_id.get(anchor_id, "") or "")
+            if not mapped_anchor:
+                unmatched.append(
+                    {
+                        "bundle_signature": str(rb.get("bundle_signature", "")),
+                        "reason": "anchor_not_matched",
+                        "anchor_unit_id": anchor_id,
+                        "anchor_unit_signature": str(rb.get("anchor_unit_signature", "")),
+                    }
+                )
+                continue
+
+            mapped_attrs: list[str] = []
+            missing_attr_ids: list[str] = []
+            for attr_id in attr_ids:
+                mapped = str(required_to_container_unit_id.get(attr_id, "") or "")
+                if not mapped:
+                    missing_attr_ids.append(attr_id)
+                else:
+                    mapped_attrs.append(mapped)
+
+            if missing_attr_ids:
+                unmatched.append(
+                    {
+                        "bundle_signature": str(rb.get("bundle_signature", "")),
+                        "reason": "attribute_not_matched",
+                        "anchor_unit_id": anchor_id,
+                        "anchor_unit_signature": str(rb.get("anchor_unit_signature", "")),
+                        "missing_attribute_unit_ids": missing_attr_ids[:12],
+                        "missing_attribute_count": len(missing_attr_ids),
+                    }
+                )
+                continue
+
+            required_attr_set = set(mapped_attrs)
+            candidates = bundles_by_anchor.get(mapped_anchor, [])
+            found = None
+            for cb in candidates:
+                container_member_ids = {str(mid) for mid in (cb.get("member_unit_ids", []) or []) if str(mid)}
+                if required_attr_set.issubset(container_member_ids):
+                    found = cb
+                    break
+
+            if not found:
+                unmatched.append(
+                    {
+                        "bundle_signature": str(rb.get("bundle_signature", "")),
+                        "reason": "no_single_container_bundle_covers_all_attributes",
+                        "anchor_unit_id": anchor_id,
+                        "anchor_unit_signature": str(rb.get("anchor_unit_signature", "")),
+                        "mapped_anchor_unit_id": mapped_anchor,
+                        "required_attribute_count": len(mapped_attrs),
+                    }
+                )
+                continue
+
+            matched_count += 1
+            matched.append(
+                {
+                    "required_bundle_signature": str(rb.get("bundle_signature", "")),
+                    "container_bundle_signature": str(found.get("bundle_signature", "")),
+                    "mapped_anchor_unit_id": mapped_anchor,
+                    "required_attribute_count": len(mapped_attrs),
+                    "container_attribute_count": max(0, len(list(found.get("member_unit_ids", []) or [])) - 1),
+                }
+            )
+
+        ok = bool(required_count == matched_count)
+        return {
+            "required_count": int(required_count),
+            "matched_count": int(matched_count),
+            "ok": ok,
+            "unmatched": unmatched,
+            "matched": matched,
+        }
+
+    def _reindex_group(self, group: dict, *, order_index: int) -> dict:
+        if not isinstance(group, dict):
+            return self._normalize_sequence_group({"group_index": order_index, "tokens": []}, order_index=order_index)
+        raw = {
+            "group_index": order_index,
+            "source_type": group.get("source_type", ""),
+            "origin_frame_id": group.get("origin_frame_id", ""),
+            "source_group_index": int(group.get("source_group_index", group.get("group_index", order_index))),
+            "source_sequence_index": int(group.get("source_sequence_index", 0)),
+            "units": [dict(unit) for unit in group.get("units", [])],
+            "csa_bundles": [dict(bundle) for bundle in group.get("csa_bundles", [])],
+        }
+        return self._normalize_sequence_group(raw, order_index=order_index)
+
+    def _build_unit_from_packet_object(
+        self,
+        *,
+        obj: dict,
+        group_index: int,
+        source_group_index: int,
+        source_type: str,
+        origin_frame_id: str,
+    ) -> dict | None:
+        token = self._display_text(obj)
+        if not token:
+            return None
+        packet_context = obj.get("ext", {}).get("packet_context", {})
+        sequence_index = int(packet_context.get("sequence_index", obj.get("stimulus", {}).get("global_sequence_index", 0)))
+        effective_source_type = str(packet_context.get("source_type", source_type))
+        effective_source_group_index = int(packet_context.get("source_group_index", source_group_index))
+        effective_origin_frame_id = str(packet_context.get("origin_frame_id", origin_frame_id))
+        role = str(obj.get("stimulus", {}).get("role", "feature") or "feature")
+        parent_ids = list((obj.get("source", {}) or {}).get("parent_ids", []))
+        attribute_name = str(obj.get("content", {}).get("attribute_name", ""))
+        attribute_value = obj.get("content", {}).get("attribute_value")
+        er = round(float(obj.get("energy", {}).get("er", 0.0)), 8)
+        ev = round(float(obj.get("energy", {}).get("ev", 0.0)), 8)
+        sensor_fatigue = dict(obj.get("ext", {}).get("sensor_fatigue", {}) or {})
+        return {
+            "unit_id": obj.get("id", ""),
+            "object_type": str(obj.get("object_type", "sa")),
+            "token": token,
+            "display_text": token,
+            "unit_role": role,
+            "sequence_index": sequence_index,
+            "group_index": group_index,
+            "source_group_index": effective_source_group_index,
+            "source_type": effective_source_type,
+            "origin_frame_id": effective_origin_frame_id,
+            "er": er,
+            "ev": ev,
+            "total_energy": round(er + ev, 8),
+            "display_visible": role != "attribute",
+            "is_placeholder": False,
+            "is_punctuation": bool(obj.get("linguistic", {}).get("is_punctuation", self._is_punctuation_token(token))),
+            "attribute_name": attribute_name,
+            "attribute_value": attribute_value,
+            "bundle_anchor_unit_id": str(parent_ids[0]) if role == "attribute" and parent_ids else "",
+            "fatigue": round(float(obj.get("energy", {}).get("fatigue", 0.0)), 8),
+            "sensor_fatigue": sensor_fatigue,
+            "suppression_ratio": round(float(sensor_fatigue.get("suppression_ratio", 0.0)), 6),
+            "er_before_fatigue": round(float(sensor_fatigue.get("er_before_fatigue", er)), 8),
+            "er_after_fatigue": round(float(sensor_fatigue.get("er_after_fatigue", er)), 8),
+            "window_count": int(sensor_fatigue.get("window_count", 0) or 0),
+            "threshold_count": int(sensor_fatigue.get("threshold_count", 0) or 0),
+            "window_rounds": int(sensor_fatigue.get("window_rounds", 0) or 0),
+            "sensor_round": int(sensor_fatigue.get("sensor_round", 0) or 0),
+        }
+
+    def _build_bundle_from_csa(self, csa: dict, units: list[dict]) -> dict | None:
+        units_by_id = {str(unit.get("unit_id", "")): unit for unit in units if str(unit.get("unit_id", ""))}
+        for unit in units_by_id.values():
+            if str(unit.get("unit_signature", "")):
+                continue
+            unit["unit_signature"] = self._default_unit_signature(
+                token=str(unit.get("token", "")),
+                unit_role=str(unit.get("unit_role", "feature") or "feature"),
+            )
+        member_ids = [
+            str(member_id)
+            for member_id in csa.get("member_sa_ids", [])
+            if str(member_id) in units_by_id
+        ]
+        if not member_ids:
+            return None
+        anchor_unit_id = str(csa.get("anchor_sa_id", ""))
+        if anchor_unit_id not in units_by_id:
+            return None
+        raw_bundle = {
+            "bundle_id": str(csa.get("id", "")),
+            "anchor_unit_id": anchor_unit_id,
+            "member_unit_ids": member_ids,
+        }
+        normalized = self._normalize_csa_bundles([raw_bundle], units_by_id)
+        return normalized[0] if normalized else None
+
+    def _build_synthetic_unit_from_csa(
+        self,
+        *,
+        csa: dict,
+        group_index: int,
+        source_group_index: int,
+        source_type: str,
+        origin_frame_id: str,
+    ) -> dict | None:
+        token = str(csa.get("content", {}).get("raw", "") or csa.get("content", {}).get("display", ""))
+        if not token:
+            return None
+        summary = csa.get("bundle_summary", {}) or {}
+        er = round(float(summary.get("display_total_er", 0.0)), 8)
+        ev = round(float(summary.get("display_total_ev", 0.0)), 8)
+        return {
+            "unit_id": str(csa.get("anchor_sa_id", csa.get("id", ""))) or str(csa.get("id", "")),
+            "object_type": "sa",
+            "token": token,
+            "display_text": token,
+            "unit_role": "feature",
+            "sequence_index": int(csa.get("ext", {}).get("packet_context", {}).get("sequence_index", 0)),
+            "group_index": group_index,
+            "source_group_index": source_group_index,
+            "source_type": source_type,
+            "origin_frame_id": origin_frame_id,
+            "er": er,
+            "ev": ev,
+            "total_energy": round(er + ev, 8),
+            "display_visible": True,
+            "is_placeholder": False,
+            "is_punctuation": self._is_punctuation_token(token),
+        }
+
+    def _empty_common_part(self, existing_groups: list[dict], incoming_groups: list[dict]) -> dict:
+        normalized_existing = self._normalize_sequence_groups(existing_groups)
+        normalized_incoming = self._normalize_sequence_groups(incoming_groups)
+        return {
+            "common_tokens": [],
+            "common_length": 0,
+            "common_group_count": 0,
+            "matched_existing_unit_count": 0,
+            "matched_incoming_unit_count": 0,
+            "common_signature": "",
+            "common_display": "",
+            "common_groups": [],
+            "matched_pairs": [],
+            "matched_existing_unit_similarities": {},
+            "matched_incoming_unit_similarities": {},
+            "existing_range": [0, 0],
+            "incoming_range": [0, 0],
+            "matched_existing_group_indices": [],
+            "matched_incoming_group_indices": [],
+            "residual_existing_tokens": [token for group in normalized_existing for token in group.get("tokens", [])],
+            "residual_incoming_tokens": [token for group in normalized_incoming for token in group.get("tokens", [])],
+            "residual_existing_groups": normalized_existing,
+            "residual_incoming_groups": normalized_incoming,
+            "residual_existing_signature": self.sequence_groups_to_signature(normalized_existing),
+            "residual_incoming_signature": self.sequence_groups_to_signature(normalized_incoming),
+        }
+
+    def _display_text(self, obj: dict) -> str:
+        content = obj.get("content", {})
+        if isinstance(content, dict):
+            display = content.get("display") or content.get("normalized") or content.get("raw")
+            if display is not None:
+                return str(display)
+        return str(obj.get("id", ""))
+
+    @staticmethod
+    def _dedupe_preserve_order(items: list[str]) -> list[str]:
+        seen = set()
+        ordered = []
+        for item in items:
+            text = str(item)
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            ordered.append(text)
+        return ordered
+
+    @staticmethod
+    def _is_punctuation_token(token: str) -> bool:
+        text = str(token or "").strip()
+        if not text:
+            return True
+        for char in text:
+            if char.isalnum() or "\u4e00" <= char <= "\u9fff":
+                return False
+        return True
+
+

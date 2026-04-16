@@ -1,0 +1,48 @@
+# =========================
+# AP 原型（Artificial PsyArch）Git 忽略规则
+# =========================
+# 目标：
+# - 让仓库更适合公开到 GitHub（避免把运行时输出/日志/缓存/数据库一起提交）
+# - 保留配置与源码（config/*.yaml、docs 等）
+
+# ---- Python / 缓存 ----
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- 虚拟环境（若你使用）----
+.venv/
+venv/
+env/
+
+# ---- IDE / 本地环境 ----
+.idea/
+.vscode/
+.gitconfig_codex
+
+# ---- 观测台输出（运行后生成）----
+observatory/outputs/
+reports/
+
+# ---- Bench logs / 压测日志 ----
+bench_logs_pool/
+bench_logs_sensor/
+
+# ---- 各模块日志与临时数据（运行后生成）----
+**/logs/
+
+# ---- HDB / 状态池运行数据（可重新生成，不建议入库）----
+hdb/data/
+
+# ---- 大文件/过程文档（不影响原型运行，默认不入库）----
+*.docx
+txt版本的理论核心.txt
+当前模块实现情况报告.md
+Artificial PsyArch 原型阶段总技术规范.md
+Artificial PsyArch 模块代码实现通用提示文件.md
+HDB模块设计文档.md
+文本感受器设计文档.md
+状态池模块设计文档.md
+通用字段标准.md

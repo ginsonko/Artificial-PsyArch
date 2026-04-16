@@ -1,0 +1,154 @@
+# ======================================================================
+# AP Observatory runtime configuration
+# AP 研究观测台运行配置
+#
+# This file is both the runtime config source and the annotation source
+# for the Observatory settings panel.
+# 本文件既是观测台运行配置来源，也是前端“设置”页面读取说明的注释来源。
+#
+# Save path note / 保存链路说明:
+# The Observatory UI reads these comments and preserves them when saving.
+# 观测台前端会读取这些注释并在保存时保留它们。
+# ======================================================================
+
+# ---- Base View / 基础观测 ----
+
+# attention_top_n / 注意力占位 Top-N
+# Purpose / 作用: Controls how many high-salience state items are sampled by the current attention stub in each cycle.
+# Meaning / 意义: Larger values expose more candidates to structure-level retrieval, but also increase rendering and matching cost.
+# Reference / 参考: Default 16. Use 8-24 for routine debugging; raise to 32+ only when you need broader observation.
+attention_top_n: 16
+
+# attention_stub_consume_energy / 注意力占位是否真实扣能
+# Purpose / 作用: Decides whether forming temporary attention-memory items consumes energy from the selected state items.
+# Meaning / 意义: When true, the observatory stays closer to the current prototype loop; when false, it behaves more like a dry observation tool.
+# Reference / 参考: Default true. Turn off only for comparison experiments where you want zero intervention from the observatory layer.
+attention_stub_consume_energy: true
+
+# attention_memory_energy_ratio / 记忆体抽取能量比例
+# Purpose / 作用: Sets the fraction of source energy copied or consumed when the attention stub forms temporary memory items.
+# Meaning / 意义: Higher values make attention-memory traces more visible, but they also disturb the current state more strongly.
+# Reference / 参考: Default 0.5. Typical test range is 0.2-0.8.
+attention_memory_energy_ratio: 0.5
+
+# snapshot_top_k / 默认快照展示数量
+# Purpose / 作用: Controls how many state-pool items are shown in default snapshot views.
+# Meaning / 意义: Larger values improve observability but increase HTML/JSON size and front-end rendering load.
+# Reference / 参考:
+# - Default 200 (research/acceptance oriented): helps target-resolution in UI so you see object content instead of only IDs.
+# - 日常：48~240 之间较合理；若你更关注性能可调低。
+snapshot_top_k: 200
+
+# cfs_source_mode / 认知感受信号（CFS）来源模式
+# Purpose / 作用: Selects where Cognitive Feeling Signals (CFS) are produced in each cycle.
+# Meaning / 意义:
+#   - "iesm": produced by IESM rules (phase=cfs). This is the recommended path because rules are observable and editable.
+#   - "legacy": produced by the legacy CFS module with hard-coded logic (transition / comparison only).
+# Reference / 参考: Default "iesm". Switch to "legacy" only when comparing with the old path.
+cfs_source_mode: iesm
+
+# export_html / 是否导出 HTML 报告
+# Purpose / 作用: Enables writing a human-readable HTML report after each cycle.
+# Meaning / 意义: Good for inspection and archive review; disabling it reduces I/O overhead.
+# Reference / 参考: Default true. Keep enabled in research mode unless you are batch-running speed tests.
+export_html: true
+
+# export_json / 是否导出 JSON 报告
+# Purpose / 作用: Enables structured JSON export after each cycle.
+# Meaning / 意义: Useful for programmatic diffing, replay, and future tooling; disabling it reduces disk writes.
+# Reference / 参考: Default true. Keep enabled if you need machine-readable traces.
+export_json: true
+
+# auto_open_html_report / 是否自动打开 HTML 报告
+# Purpose / 作用: Opens the newly written HTML report automatically after a cycle completes.
+# Meaning / 意义: Convenient during manual debugging, but intrusive during dense multi-cycle testing.
+# Reference / 参考: Default false. Enable only when running slowly and inspecting one cycle at a time.
+auto_open_html_report: false
+
+# history_limit / 最近轮次保留数
+# Purpose / 作用: Controls how many recent cycle summaries are kept in Observatory history.
+# Meaning / 意义: Higher values give a longer short-term observation window, but also increase response payload size.
+# Reference / 参考: Default 24. Use 12-100 depending on how much recent history you want in the web UI.
+history_limit: 24
+
+# ---- Web Launch / Web 启动 ----
+
+# default_launch_mode / 默认启动模式
+# Purpose / 作用: Selects whether the Observatory starts in web mode or CLI mode by default.
+# Meaning / 意义: Web mode is the primary interface for this prototype; CLI remains a fallback and inspection path.
+# Reference / 参考: Default "web". Only switch to "cli" if you are intentionally running terminal-first experiments.
+default_launch_mode: web
+
+# web_host / Web 监听地址
+# Purpose / 作用: Controls the local bind address of the built-in Observatory web server.
+# Meaning / 意义: 127.0.0.1 keeps it local-only; broader addresses expose it to the LAN and should be used deliberately.
+# Reference / 参考: Default 127.0.0.1. Use 0.0.0.0 only when you explicitly need remote access on a trusted network.
+web_host: 127.0.0.1
+
+# web_port / Web 监听端口
+# Purpose / 作用: Sets the HTTP port used by the Observatory web UI.
+# Meaning / 意义: Change this only when the default port conflicts with another local service.
+# Reference / 参考: Default 8765. Any unused local port is acceptable.
+web_port: 8765
+
+# web_auto_open_browser / 启动时自动打开浏览器
+# Purpose / 作用: Controls whether the default browser is opened automatically when the web server starts.
+# Meaning / 意义: Helpful for manual local use, unnecessary for automated scripts or remote sessions.
+# Reference / 参考: Default true. Disable in headless, SSH, or batched test scenarios.
+web_auto_open_browser: true
+
+# ---- Runtime Overrides / 运行时覆盖 ----
+
+# sensor_default_mode / TextSensor 默认模式覆盖
+# Purpose / 作用: Overrides TextSensor.default_mode when the Observatory launches submodules.
+# Meaning / 意义: This does not change the sensor file value; it only changes the active runtime mode under Observatory control.
+# Reference / 参考: Default "advanced". Use "simple" for character-only debugging, or "hybrid" for combined output.
+sensor_default_mode: advanced
+
+# sensor_tokenizer_backend / TextSensor 分词后端覆盖
+# Purpose / 作用: Overrides which tokenizer backend the TextSensor uses under Observatory launch.
+# Meaning / 意义: This lets the observatory force a consistent segmentation setup without rewriting the sensor file directly.
+# Reference / 参考: Default "jieba". Use "none" for character-only fallback tests.
+sensor_tokenizer_backend: jieba
+
+# sensor_enable_token_output / TextSensor 是否输出 token SA
+# Purpose / 作用: Forces token-level SA output on or off for Observatory-driven sensor runs.
+# Meaning / 意义: If disabled, token structures disappear from the sensor packet and downstream matching space becomes simpler.
+# Reference / 参考: Default true. Disable only when isolating char-level behavior.
+sensor_enable_token_output: true
+
+# sensor_enable_char_output / TextSensor 是否输出字符 SA
+# Purpose / 作用: Forces character-level SA output on or off for Observatory-driven sensor runs.
+# Meaning / 意义: Turning it on increases granularity; turning it off reduces packet size and competing anchors.
+# Reference / 参考: Default false. Enable for fine-grained debugging or mixed-granularity experiments.
+sensor_enable_char_output: false
+
+# sensor_enable_echo / TextSensor 是否启用残响
+# Purpose / 作用: Forces sensor-side echo generation and decay on or off when launched by Observatory.
+# Meaning / 意义: Echo strongly changes what enters the current packet, so this switch is central when comparing local-memory carryover.
+# Reference / 参考: Default true. Disable only when you want purely current-input experiments.
+sensor_enable_echo: true
+
+# sensor_include_echoes_in_packet / TextSensor 是否将残响并入刺激包
+# Purpose / 作用: Controls whether historical echo objects are merged into the outgoing stimulus packet.
+# Meaning / 意义: If false, echo still exists in the sensor pool but will not participate in downstream cycles through the packet.
+# Reference / 参考: Default true. Keep true for the current prototype loop.
+sensor_include_echoes_in_packet: true
+
+# state_pool_enable_placeholder_interfaces / 状态池占位接口覆盖
+# Purpose / 作用: Overrides whether placeholder interfaces inside StatePool are enabled under Observatory launch.
+# Meaning / 意义: Useful for debugging extension hooks without changing the persistent StatePool file value.
+# Reference / 参考: Default false. Enable only when explicitly testing placeholder integration.
+state_pool_enable_placeholder_interfaces: false
+
+# state_pool_enable_script_broadcast / 状态池脚本广播覆盖
+# Purpose / 作用: Overrides whether StatePool broadcasts script packets during Observatory sessions.
+# Meaning / 意义: Broadcasting is helpful for integration checks, but unnecessary when focusing on pure core-loop behavior.
+# Reference / 参考: Default false. Enable during external script or future module integration testing.
+state_pool_enable_script_broadcast: false
+
+# hdb_enable_background_repair / HDB 后台修复覆盖
+# Purpose / 作用: Overrides whether HDB may start background repair jobs during Observatory sessions.
+# Meaning / 意义: Keeping it off makes experiments more deterministic; keeping it on preserves maintenance realism.
+# Reference / 参考: Default true. Disable for tightly controlled debugging, enable for long-running resilience observation.
+hdb_enable_background_repair: true

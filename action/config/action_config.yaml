@@ -1,0 +1,198 @@
+# ======================================================================
+# AP 行动管理模块配置（Action/Drive，驱动力）
+# AP Action/Drive configuration
+#
+# 本文件既供 ActionManager.reload_config() 热加载，
+# 也作为观测台“设置”页的字段说明来源。
+#
+# 注：界面与注释尽量中文优先；出现简写（Drive/IESM/CFS/AF/CAM/MAP 等）时请附中文全称。
+# ======================================================================
+
+# ---- 基础开关 ----
+
+# enabled / 是否启用行动模块
+# 作用（Purpose）: 行动模块总开关。
+# 意义（Meaning）: 关闭后仅输出空结果，不修改任何“下一 tick 生效”的待处理指令。
+enabled: true
+
+# ---- Drive（驱动力）运行参数 ----
+
+# drive_decay_ratio / Drive（驱动力）每 tick 保留系数（指数衰减）
+# 作用（Purpose）: 控制驱动力跨 tick 的衰减速度。
+# 意义（Meaning）: 越大表示意图更持久；越小表示更容易“放下”。
+drive_decay_ratio: 0.85
+
+# drive_max / 单个行动节点的 Drive 上限
+# 作用（Purpose）: 防止长时间运行时驱动力无上限增长。
+drive_max: 3.0
+
+# node_idle_prune_ticks / 节点闲置淘汰 tick 数
+# 作用（Purpose）: 长时间未更新/未触发的行动节点会被移除，避免运行态膨胀。
+node_idle_prune_ticks: 18
+
+# max_action_nodes / 运行态最大行动节点数
+# 作用（Purpose）: 内存安全上限，避免失控创建过多行动节点。
+max_action_nodes: 64
+
+# ---- 执行配额（行动预算）与冲突仲裁 ----
+#
+# 对齐理论核心：
+# - 4.2.1.3 行动预算：行动器应有限制，避免“无穷聚焦/无穷回忆”。
+# - 你最新验收口径：同一行动器内“不冲突的行动可以同时执行”；冲突的行动同 tick 只能一个。
+#
+# 工程口径（MVP）：
+# - 以 action_kind 作为“行动器类型”的粗粒度标识（例如 attention_focus / recall）。
+# - 互斥域用 mutex_key / mutex_keys 表示：同一 mutex_key 同 tick 只能 1 个行动胜出。
+#   不同 mutex_key 视为不冲突，可并行执行（仍受全局上限限制）。
+
+# max_actions_per_kind_per_tick_default / 每类 action_kind 每 tick 的执行上限（默认值）
+# 说明：
+# - 默认值按“更像人、更保守”的口径：每类行动每 tick 默认只执行 1 个（避免一次 tick 里刷屏式执行）。
+# - 互斥（冲突）依旧主要靠 mutex_key/mutex_keys：同一 mutex_key 同 tick 只能 1 个胜出；
+#   不同 mutex_key 视为不冲突，可并行执行（但仍会受这里的数量上限与全局上限约束）。
+# 你如果确认某类行动天然可并行（例如未来工具调用类行动），可以在下方覆盖该 action_kind 的上限。
+max_actions_per_kind_per_tick_default: 1
+
+# max_actions_per_kind_per_tick / 针对特定 action_kind 的覆盖（字典）
+# 示例：
+#   attention_focus: 1   # 注意力聚焦同 tick 只执行 1 次（更像人类注意力）
+#   recall: 1            # 回忆同 tick 只执行 1 次（防止刷屏）
+max_actions_per_kind_per_tick: {}
+
+# max_total_actions_per_tick / 全局每 tick 最大可执行行动数（安全上限）
+max_total_actions_per_tick: 8
+
+# default_mutex_keys_by_action_kind / 各 action_kind 的默认互斥域（冲突注册表）
+# 说明：
+# - 你可以把“冲突的行动”配置成同一个 key，从而在同 tick 只能一个胜出。
+# - 同时也允许 IESM（先天规则）在 action_trigger.params 里显式指定 mutex_key/mutex_keys 来细分冲突域。
+default_mutex_keys_by_action_kind:
+  attention_focus: ["attention_focus"]       # 注意力聚焦：默认互斥
+  attention_focus_mode: ["attention_mode"]   # 注意力模式：聚焦/发散互斥
+  attention_diverge_mode: ["attention_mode"]
+  recall: ["recall"]                         # 回忆：默认互斥
+
+# executed_history_keep / 最近执行历史保留条数（用于观测台展示）
+executed_history_keep: 200
+
+# ---- 行动阈值调制（对齐理论 4.2.1.4）----
+#
+# 说明：
+# - 行动节点的“基准阈值（base_threshold）”通常来自 IESM（先天规则）或内置默认值；
+# - 行动节点的“实时阈值（effective_threshold）” = base_threshold * threshold_scale；
+# - threshold_scale 由情绪递质（NT）与行动疲劳等因素共同决定（MVP 先做线性 + 截断）。
+#
+# threshold_scale_by_nt / 递质通道对阈值缩放的影响（线性系数）
+# 计算方式（MVP）：
+#   threshold_scale = clamp( 1 + Σ(nt[ch] * coef), min, max )
+# 直觉解释：
+# - DA（多巴胺）偏“趋利/冲动”，让行动更容易启动（阈值降低）
+# - COR（皮质醇）偏“长期警戒/保守”，让行动更难启动（阈值提高）
+threshold_scale_by_nt:
+  DA: -0.25
+  ADR: -0.06
+  OXY: -0.05
+  SER: 0.06
+  END: -0.03
+  COR: 0.30
+
+# threshold_scale_min / 阈值缩放下限（避免过度冲动导致失控）
+threshold_scale_min: 0.55
+
+# threshold_scale_max / 阈值缩放上限（避免过度保守导致系统不行动）
+threshold_scale_max: 1.75
+
+# ---- 行动疲劳（模块内局部实现）----
+#
+# 说明：
+# - 理论中疲劳主要用于避免“同一路径无限循环”。
+# - 这里的 fatigue 是行动模块内部的局部疲劳（0~1），每 tick 衰减，执行行动会提升。
+# - fatigue 会提高阈值：effective_threshold *= (1 + fatigue * action_fatigue_threshold_gain)
+action_fatigue_enabled: true
+action_fatigue_decay_ratio: 0.92
+action_fatigue_increase_on_execute: 0.35
+action_fatigue_threshold_gain: 0.55
+
+# ---- 注意力行动（内在行动器）: 聚焦 / 发散 ----
+
+# focus_threshold / 注意力聚焦行动阈值
+# 说明：当 drive >= threshold 时，才会“消耗 drive 并触发”聚焦行动。
+# 经验值：为了让 IESM（先天规则）产生的聚焦触发源能尽快生效，默认阈值不宜过高。
+focus_threshold: 0.30
+
+# focus_gain_base / 聚焦触发增益基础系数
+# 意义（Meaning）: drive += focus_gain_base * directive.strength
+# 经验值：配合 focus_threshold，使强度 >= 0.30 的聚焦触发源一般能在同 tick 产生可见行动输出。
+focus_gain_base: 1.00
+
+# mode_threshold / 模式切换行动阈值（聚焦模式/发散模式）
+mode_threshold: 0.55
+
+# mode_drive_gain / 模式切换驱动力增益系数
+mode_drive_gain: 0.60
+
+# focus_mode_complexity_threshold / “繁”阈值（复杂度高 -> 聚焦模式）
+focus_mode_complexity_threshold: 0.65
+
+# diverge_mode_complexity_threshold / “简”阈值（复杂度低 -> 发散模式）
+diverge_mode_complexity_threshold: 0.25
+
+# mode_focus_top_n_scale / 聚焦模式 top_n 缩放
+mode_focus_top_n_scale: 0.70
+
+# mode_diverge_top_n_scale / 发散模式 top_n 缩放
+mode_diverge_top_n_scale: 1.30
+
+# mode_cooldown_ticks / 模式行动冷却 tick
+mode_cooldown_ticks: 2
+
+# ---- 回忆行动（Recall） ----
+
+# recall_threshold / 回忆行动阈值
+recall_threshold: 0.40
+
+# recall_gain_base / 回忆驱动力增益基础系数
+# 意义（Meaning）: drive += recall_gain_base * max_trigger_strength
+recall_gain_base: 0.90
+
+# recall_trigger_kinds / 回忆触发来源（CFS kind 列表）
+recall_trigger_kinds: ["expectation", "pressure"]
+
+# recall_min_strength / 回忆触发最小强度
+recall_min_strength: 0.45
+
+# recall_focus_boost / 回忆触发的聚焦加成
+recall_focus_boost: 0.65
+
+# recall_ttl_ticks / 回忆聚焦指令存活 tick 数
+recall_ttl_ticks: 2
+
+# ---- 回忆行动 -> MAP（记忆赋能池）赋能映射（MVP） ----
+#
+# 对齐理论 4.2.7.2：回忆行动应把命中的记忆赋能进入 MAP，并走默认记忆反哺回到状态池。
+# 说明：Drive（驱动力）与 ER/EV（双能量）单位不同，因此这里使用“工程映射”（可配置、可调整）。
+# 当前映射：delta_ev ≈ effective_threshold * recall_map_delta_ev_per_threshold * strength，并做 min/max 截断。
+recall_map_delta_ev_per_threshold: 0.90
+recall_map_delta_ev_min: 0.08
+recall_map_delta_ev_max: 0.85
+recall_map_mode_tag: "recall_action"
+
+# ---- 内置触发源（旧逻辑回退）----
+#
+# 说明：
+# - 为了让“先天行动触发规则”可在 IESM 先天规则里观察与编辑，
+#   行动模块内部不建议长期保留复杂度/回忆等硬编码触发源。
+# - 因此默认关闭；仅当你想快速对照/回退旧行为时再打开。
+enable_builtin_triggers_complexity: false
+enable_builtin_triggers_recall: false
+
+# ---- 日志 / Logging ----
+
+# log_dir / 日志目录（留空则写到模块 logs/）
+log_dir: ""
+
+# log_max_file_bytes / 单个日志文件最大字节数（超过自动轮转）
+log_max_file_bytes: 5242880
+
+# stdout_fallback_when_log_fail / 写日志失败时是否降级输出到 stdout/stderr
+stdout_fallback_when_log_fail: true

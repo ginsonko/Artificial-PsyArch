@@ -1,0 +1,816 @@
+# ======================================================================
+# AP 先天规则（IESM 规则）
+# AP 先天规则（先天编码脚本管理器 IESM 的规则文件）
+#
+# This file is generated/updated by the Observatory UI or tools.
+# 本文件可由观测台前端或工具生成/更新。
+#
+# Quick Start / 快速开始：
+# 1) 运行 `python -m observatory` 启动观测台
+# 2) 打开浏览器侧边栏「先天规则」
+# 3) 校验 -> 保存并热加载
+# 4) 用最近一轮模拟 查看触发结果
+#
+# Schema / 结构提示：
+# - Top-level: rules_schema_version, rules_version, enabled, defaults, rules
+# - Rule item: id, title, enabled, priority, cooldown_ticks, when, then, note
+# - when supports: any/all/not + cfs/state_window/timer/metric
+# - then supports: cfs_emit/focus/emit_script/emotion_update/action_trigger/pool_energy/pool_bind_attribute/delay/branch/log
+#
+# Tips / 提示：
+# - Keep rule ids stable for auditing.
+#   规则 id 请保持稳定，便于审计与回滚。
+# - Rules are pure data, no Python code execution.
+#   规则是纯数据，不执行 Python 代码。
+# ======================================================================
+rules_schema_version: '1.0'
+rules_version: '0.6'
+enabled: true
+defaults:
+  focus_directive:
+    ttl_ticks: 2
+    focus_boost: 0.9
+    deduplicate_by: target_ref_object_id
+    max_directives_per_rule: 8
+rules:
+- id: state_window_fast_cp_rise
+  title: '状态窗口：认知压（CP）快速上升 -> 触发记录（emit_script）'
+  enabled: true
+  priority: 50
+  cooldown_ticks: 0
+  when:
+    state_window:
+      stage: any
+      fast_cp_rise_min: 1
+  then:
+  - emit_script:
+      script_id: innate_state_window_cp_rise
+      script_kind: window_trigger
+      priority: 50
+      trigger: fast_cp_rise
+  note: 'MVP: 对接 StatePool 的 script_check_packet，用于观测与后续扩展。'
+- id: state_window_fast_cp_drop
+  title: '状态窗口：认知压（CP）快速下降 -> 触发记录（emit_script）'
+  enabled: true
+  priority: 50
+  cooldown_ticks: 0
+  when:
+    state_window:
+      stage: any
+      fast_cp_drop_min: 1
+  then:
+  - emit_script:
+      script_id: innate_state_window_cp_drop
+      script_kind: window_trigger
+      priority: 50
+      trigger: fast_cp_drop
+  note: 'MVP: 对接 StatePool 的 script_check_packet，用于观测与后续扩展。'
+
+# ======================================================================
+# CFS 脚本（phase=cfs）：从能量/过程指标生成认知感受信号
+# 说明：
+# - 对齐理论 3.8/3.10：认知感受信号（CFS）建议由 IESM 统一脚本化管理，避免散落硬编码。
+# - 这里的 CFS 信号会进入同 tick 后续规则（phase=directives），并被 EMgr（情绪管理器）与 Action/Drive（行动模块）消费。
+# ======================================================================
+
+- id: cfs_dissonance_from_cp_abs
+  title: 'CFS脚本：认知压大小（|CP|）过高 -> 违和感（并绑定属性）'
+  phase: cfs
+  enabled: true
+  priority: 90
+  cooldown_ticks: 0
+  when:
+    metric:
+      preset: cp_abs_state
+      selector:
+        mode: top_n
+        top_n: 12
+        ref_object_types: ['st', 'sa']
+      op: '>='
+      value: 0.5
+  then:
+  - cfs_emit:
+      kind: dissonance
+      from: metric_matches
+      scope: object
+      max_signals: 8
+      strength:
+        from: match_value
+        policy: linear_clamp
+        min: 0.5
+        max: 2.0
+        out_min: 0.3
+        out_max: 1.0
+      bind_attribute:
+        attribute_name: cfs_dissonance
+        display: '违和感:{{{strength}}}'
+        value_from: strength
+        value_type: numerical
+        modality: internal
+        er: 0.0
+        ev: 0.0
+  - pool_bind_attribute:
+      selector:
+        mode: specific_item
+        item_id: '{{{match_item_id}}}'
+      attribute:
+        attribute_name: punish_signal
+        attribute_value: 1.0
+        raw: 'punish_signal:1'
+        display: '惩罚信号:存在'
+        value_type: numerical
+        modality: internal
+        er: 0.0
+        ev: 0.0
+      reason: 'iesm:dissonance->punish_signal (MVP)'
+  note: '对齐理论3.8.2：违和感来源于高偏差/高认知压。原型以 |CP| 作为指标，并把“强违和”粗略记为 punish_signal 供压力通道使用（可编辑/可替换）。'
+
+- id: cfs_correct_event_from_cp_abs_drop
+  title: 'CFS脚本：违和显著下降 -> 正确事件（硬约束：上一tick需处于违和）'
+  phase: cfs
+  enabled: true
+  priority: 85
+  cooldown_ticks: 1
+  when:
+    metric:
+      preset: got_cp_abs
+      selector:
+        mode: top_n
+        top_n: 12
+        ref_object_types: ['st', 'sa']
+      op: '<='
+      value: -0.5
+      prev_gate:
+        op: '>='
+        value: 0.5
+  then:
+  - cfs_emit:
+      kind: correct_event
+      from: metric_matches
+      scope: object
+      max_signals: 6
+      strength:
+        from: match_value
+        abs: true
+        policy: linear_clamp
+        min: 0.5
+        max: 1.2
+        out_min: 0.4
+        out_max: 1.0
+      bind_attribute:
+        attribute_name: cfs_correct_event
+        display: '正确事件:{{{strength}}}'
+        value_from: strength
+        value_type: numerical
+        modality: internal
+        er: 0.0
+        ev: 0.0
+  - pool_bind_attribute:
+      selector:
+        mode: specific_item
+        item_id: '{{{match_item_id}}}'
+      attribute:
+        attribute_name: reward_signal
+        attribute_value: 1.0
+        raw: 'reward_signal:1'
+        display: '奖励信号:存在'
+        value_type: numerical
+        modality: internal
+        er: 0.0
+        ev: 0.0
+      reason: 'iesm:correct_event->reward_signal (MVP)'
+  note: '对齐理论3.8.2：正确事件必须依托违和显著下降。原型把正确事件粗略记为 reward_signal（可编辑/可替换），用于期待通道。'
+
+- id: cfs_surprise_from_er_surge_cp_positive
+  title: 'CFS脚本：实能量突增且实高于虚（CP>0） -> 惊（surprise）'
+  phase: cfs
+  enabled: true
+  priority: 80
+  cooldown_ticks: 0
+  when:
+    metric:
+      # 核心约束（对齐理论 3.8.2）：
+      # - “惊”只在“实能量侧突增”且 CP 为正（ER>EV）的情况下出现；
+      # - EV>>ER 导致的 |CP| 增大应归入“违和感”，而不是“惊”。
+      preset: got_er
+      selector:
+        mode: top_n
+        top_n: 12
+        ref_object_types: ['st', 'sa']
+        # selector.where：对候选对象的附加过滤（不改变 metric 本身，只筛选对象集合）。
+        # 这里用 cp_delta>=0 约束“实高于虚”，避免把 EV 侧突增误判为惊。
+        where:
+          cp_delta:
+            op: '>='
+            value: 0.3
+      op: '>='
+      value: 0.5
+  then:
+  - cfs_emit:
+      kind: surprise
+      from: metric_matches
+      scope: object
+      max_signals: 6
+      strength:
+        from: match_value
+        policy: linear_clamp
+        min: 0.5
+        max: 1.5
+        out_min: 0.3
+        out_max: 1.0
+      bind_attribute:
+        attribute_name: cfs_surprise
+        display: '惊:{{{strength}}}'
+        value_from: strength
+        value_type: numerical
+        modality: internal
+        er: 0.0
+        ev: 0.0
+  note: '对齐理论3.8.2：惊来自“实能量侧突增导致的短时高偏差”，并且要求 CP 为正（ER>EV）。本规则用 got_er 近似“实能量突增”，并用 cp_delta>=0 过滤掉 EV 侧突增的误报。'
+
+- id: cfs_expectation_from_reward_pred
+  title: 'CFS脚本：预测对象（EV高）且包含奖励信号 -> 期待（并安排“渐变验证/不验”）'
+  phase: cfs
+  enabled: true
+  priority: 75
+  cooldown_ticks: 0
+  when:
+    metric:
+      preset: ev_state
+      # capture_as：把“预测量（EV）”写入变量，供 delay 后的验证计算使用。
+      # 注意：这里只是“取值”，不做任何学习更新；学习更新仍由 HDB 的权重机制负责（见 hdb/_weight_engine.py）。
+      capture_as: expect_pred_ev
+      selector:
+        # 使用稳定键筛选：不要依赖 display 文本（翻译/格式变化会导致 contains_text 失效）
+        #
+        # 关键点（对齐理论）：期待/压力必须来自“记忆/结构侧学到的奖惩属性”，
+        # 也就是 packet 口径（来自回忆反哺/结构投影/刺激包），而不是 runtime 口径（脚本当下贴的标签）。
+        mode: has_attribute
+        scope: packet
+        attribute_name: reward_signal
+        ref_object_types: ['st', 'sa']
+      op: '>='
+      value: 0.3
+  then:
+  - cfs_emit:
+      kind: expectation
+      from: metric_matches
+      scope: object
+      max_signals: 1
+      emit_gate:
+        mode: strength_delta
+        min_delta: 0.03
+        min_interval_ticks: 1
+        bind_attribute_even_when_skipped: true
+      capture_as: expect_strength
+      strength:
+        from: match_value
+        policy: linear_clamp
+        min: 0.3
+        max: 1.5
+        out_min: 0.3
+        out_max: 1.0
+      bind_attribute:
+        attribute_name: cfs_expectation
+        display: '期待:{{{strength}}}'
+        value_from: strength
+        value_type: numerical
+        modality: internal
+        er: 0.0
+        ev: 0.0
+  # 实时验证（每 tick 一次）：只要“期待”仍满足存在条件（EV 高 + reward_signal），就持续做验证/不验的渐变对抗。
+  # 说明：
+  # - 不再采用固定 “2 tick 后” 的硬编码验证时机；
+  # - 只要该认知感受仍在（条件仍成立），就每轮基于“近 N tick 的 ER 平均变化率”估算现实验证程度；
+  # - verify_mix 允许部分验证，并且验证/不验是对称对抗，可为“预测收敛”提供连续梯度信号。
+  - branch:
+      when:
+        metric:
+          preset: er_rate
+          # 变化率窗口：建议 3~4 tick（对齐你提出的口径），这里取 4 tick 更平滑。
+          window_ticks: 4
+          selector:
+            mode: specific_item
+            item_id: '{{{match_item_id}}}'
+          op: exists
+          capture_as: expect_er_rate
+      then:
+      # 渐变验证（verified）
+      - cfs_emit:
+          kind: expectation_verified
+          from: metric_matches
+          scope: object
+          max_signals: 1
+          emit_gate:
+            mode: strength_delta
+            min_delta: 0.03
+            min_interval_ticks: 1
+            bind_attribute_even_when_skipped: true
+          min_strength: 0.02
+          strength:
+            from: var
+            var: expect_strength
+            policy: verify_mix
+            part: verified
+            pred_var: expect_pred_ev
+            actual_var: expect_er_rate
+            # actual_scale：把“变化率”换算为“窗口内总量”的近似（avg_rate * window_ticks）。
+            actual_scale: 4.0
+            gamma: 1.0
+            eps: 1e-6
+          bind_attribute:
+            attribute_name: cfs_expectation_verified
+            display: '期待验证:{{{strength}}}'
+            value_from: strength
+            value_type: numerical
+            modality: internal
+            er: 0.0
+            ev: 0.0
+      # 渐变不验（unverified）
+      - cfs_emit:
+          kind: expectation_unverified
+          from: metric_matches
+          scope: object
+          max_signals: 1
+          emit_gate:
+            mode: strength_delta
+            min_delta: 0.03
+            min_interval_ticks: 1
+            bind_attribute_even_when_skipped: true
+          min_strength: 0.02
+          strength:
+            from: var
+            var: expect_strength
+            policy: verify_mix
+            part: unverified
+            pred_var: expect_pred_ev
+            actual_var: expect_er_rate
+            actual_scale: 4.0
+            gamma: 1.0
+            eps: 1e-6
+          bind_attribute:
+            attribute_name: cfs_expectation_unverified
+            display: '期待不验:{{{strength}}}'
+            value_from: strength
+            value_type: numerical
+            modality: internal
+            er: 0.0
+            ev: 0.0
+      else:
+      # 目标对象消失或不可采样：视作“不验为主”（fallback）
+      - cfs_emit:
+          kind: expectation_unverified
+          from: single
+          scope: object
+          max_signals: 1
+          emit_gate:
+            mode: strength_delta
+            min_delta: 0.03
+            min_interval_ticks: 1
+            bind_attribute_even_when_skipped: true
+          min_strength: 0.02
+          strength:
+            from: var
+            var: expect_strength
+            policy: verify_mix
+            part: unverified
+            pred_var: expect_pred_ev
+            actual_var: expect_er_rate
+            actual_scale: 4.0
+            gamma: 1.0
+            eps: 1e-6
+          bind_attribute:
+            attribute_name: cfs_expectation_unverified
+            display: '期待不验:{{{strength}}}'
+            value_from: strength
+            value_type: numerical
+            modality: internal
+            er: 0.0
+            ev: 0.0
+  note: '对齐理论3.8.2：期待来自“预测结构(EV) + 奖励信号”。验证采用渐变混合（verify_mix）：允许部分验证、对称对抗，并为“预测收敛”提供连续信号。该实现为“实时持续验证”，不再硬编码固定验证时机。'
+
+- id: cfs_pressure_from_punish_pred
+  title: 'CFS脚本：预测对象（EV高）且包含惩罚信号 -> 压力（并安排“渐变验证/不验”）'
+  phase: cfs
+  enabled: true
+  priority: 74
+  cooldown_ticks: 0
+  when:
+    metric:
+      preset: ev_state
+      capture_as: pressure_pred_ev
+      selector:
+        # 使用稳定键筛选：不要依赖 display 文本（翻译/格式变化会导致 contains_text 失效）
+        #
+        # 关键点（对齐理论）：压力必须来自“记忆/结构侧学到的惩罚属性”（packet 口径），
+        # 而不是 runtime 口径（脚本当下贴的标签）。
+        mode: has_attribute
+        scope: packet
+        attribute_name: punish_signal
+        ref_object_types: ['st', 'sa']
+      op: '>='
+      value: 0.3
+  then:
+  - cfs_emit:
+      kind: pressure
+      from: metric_matches
+      scope: object
+      max_signals: 1
+      emit_gate:
+        mode: strength_delta
+        min_delta: 0.03
+        min_interval_ticks: 1
+        bind_attribute_even_when_skipped: true
+      capture_as: pressure_strength
+      strength:
+        from: match_value
+        policy: linear_clamp
+        min: 0.3
+        max: 1.5
+        out_min: 0.3
+        out_max: 1.0
+      bind_attribute:
+        attribute_name: cfs_pressure
+        display: '压力:{{{strength}}}'
+        value_from: strength
+        value_type: numerical
+        modality: internal
+        er: 0.0
+        ev: 0.0
+  # 实时验证（每 tick 一次）：只要“压力”仍满足存在条件（EV 高 + punish_signal），就持续做验证/不验的渐变对抗。
+  - branch:
+      when:
+        metric:
+          preset: er_rate
+          window_ticks: 4
+          selector:
+            mode: specific_item
+            item_id: '{{{match_item_id}}}'
+          op: exists
+          capture_as: pressure_er_rate
+      then:
+      - cfs_emit:
+          kind: pressure_verified
+          from: metric_matches
+          scope: object
+          max_signals: 1
+          emit_gate:
+            mode: strength_delta
+            min_delta: 0.03
+            min_interval_ticks: 1
+            bind_attribute_even_when_skipped: true
+          min_strength: 0.02
+          strength:
+            from: var
+            var: pressure_strength
+            policy: verify_mix
+            part: verified
+            pred_var: pressure_pred_ev
+            actual_var: pressure_er_rate
+            actual_scale: 4.0
+            gamma: 1.0
+            eps: 1e-6
+          bind_attribute:
+            attribute_name: cfs_pressure_verified
+            display: '压力验证:{{{strength}}}'
+            value_from: strength
+            value_type: numerical
+            modality: internal
+            er: 0.0
+            ev: 0.0
+      - cfs_emit:
+          kind: pressure_unverified
+          from: metric_matches
+          scope: object
+          max_signals: 1
+          emit_gate:
+            mode: strength_delta
+            min_delta: 0.03
+            min_interval_ticks: 1
+            bind_attribute_even_when_skipped: true
+          min_strength: 0.02
+          strength:
+            from: var
+            var: pressure_strength
+            policy: verify_mix
+            part: unverified
+            pred_var: pressure_pred_ev
+            actual_var: pressure_er_rate
+            actual_scale: 4.0
+            gamma: 1.0
+            eps: 1e-6
+          bind_attribute:
+            attribute_name: cfs_pressure_unverified
+            display: '压力不验:{{{strength}}}'
+            value_from: strength
+            value_type: numerical
+            modality: internal
+            er: 0.0
+            ev: 0.0
+      else:
+      - cfs_emit:
+          kind: pressure_unverified
+          from: single
+          scope: object
+          max_signals: 1
+          emit_gate:
+            mode: strength_delta
+            min_delta: 0.03
+            min_interval_ticks: 1
+            bind_attribute_even_when_skipped: true
+          min_strength: 0.02
+          strength:
+            from: var
+            var: pressure_strength
+            policy: verify_mix
+            part: unverified
+            pred_var: pressure_pred_ev
+            actual_var: pressure_er_rate
+            actual_scale: 4.0
+            gamma: 1.0
+            eps: 1e-6
+          bind_attribute:
+            attribute_name: cfs_pressure_unverified
+            display: '压力不验:{{{strength}}}'
+            value_from: strength
+            value_type: numerical
+            modality: internal
+            er: 0.0
+            ev: 0.0
+  note: '对齐理论3.8.2：压力来自“预测结构(EV) + 惩罚信号”。验证采用渐变混合（verify_mix）：允许部分验证、对称对抗，并为“预测收敛”提供连续信号。该实现为“实时持续验证”，不再硬编码固定验证时机。'
+
+- id: cfs_grasp_from_stimulus_match
+  title: 'CFS脚本：把握感/置信度综合得分较高 -> 把握感/置信度（grasp）'
+  phase: cfs
+  enabled: true
+  priority: 60
+  cooldown_ticks: 0
+  when:
+    metric:
+      preset: grasp_score
+      op: '>='
+      value: 0.65
+  then:
+  - cfs_emit:
+      kind: grasp
+      from: metric_matches
+      scope: object
+      max_signals: 1
+      emit_gate:
+        mode: strength_delta
+        min_delta: 0.03
+        min_interval_ticks: 1
+        bind_attribute_even_when_skipped: true
+      strength:
+        from: match_value
+        policy: linear_clamp
+        min: 0.65
+        max: 0.95
+        out_min: 0.30
+        out_max: 1.0
+      bind_attribute:
+        attribute_name: cfs_grasp
+        display: '把握感/置信度:{{{strength}}}'
+        value_from: strength
+        value_type: numerical
+        modality: internal
+        er: 0.0
+        ev: 0.0
+  note: '对齐理论3.8.3：把握感/置信度应来自匹配质量、残余比例、结构级一致性等。原型把这些组合成 grasp_score（见 observatory/_app.py），并以此触发 grasp。'
+
+- id: cfs_complexity_from_cam_size
+  title: 'CFS脚本：繁/简综合复杂度（complexity_score）-> 繁/简（complexity，global）'
+  phase: cfs
+  enabled: true
+  priority: 40
+  cooldown_ticks: 0
+  when:
+    metric:
+      preset: complexity_score
+      op: exists
+  then:
+  - cfs_emit:
+      kind: complexity
+      from: metric_matches
+      scope: global
+      max_signals: 1
+      emit_gate:
+        mode: strength_delta
+        min_delta: 0.02
+        min_interval_ticks: 1
+      strength:
+        from: match_value
+        policy: linear_clamp
+        min: 0.0
+        max: 1.0
+        out_min: 0.0
+        out_max: 1.0
+  note: '对齐理论3.8.3：繁/简建议结合 CAM 大小与状态池波峰数量/聚集度。原型用 complexity_score（见 observatory/_app.py，使用 CAM size + 有效波峰数量）输出可解释的综合强度。'
+
+- id: cfs_repetition_from_item_fatigue
+  title: 'CFS脚本：状态池疲劳度较高 -> 重复感/疲劳（repetition，global）'
+  phase: cfs
+  enabled: true
+  priority: 35
+  cooldown_ticks: 0
+  when:
+    metric:
+      preset: fatigue_state
+      selector:
+        mode: top_n
+        top_n: 16
+      op: '>='
+      value: 0.6
+  then:
+  - cfs_emit:
+      kind: repetition
+      from: metric_matches
+      scope: global
+      max_signals: 1
+      emit_gate:
+        mode: strength_delta
+        min_delta: 0.03
+        min_interval_ticks: 1
+      strength:
+        from: match_value
+        policy: linear_clamp
+        min: 0.6
+        max: 1.0
+        out_min: 0.4
+        out_max: 1.0
+  note: '对齐理论3.8.3：重复感可由疲劳值触发。原型用 top_n 条目中最高 fatigue 近似。'
+- id: innate_action_attention_focus_from_core_cfs
+  title: '先天行动规则：核心认知感受（CFS）-> 触发“注意力聚焦”行动节点（Action/Drive）'
+  phase: directives
+  enabled: true
+  priority: 65
+  cooldown_ticks: 0
+  when:
+    cfs:
+      kinds:
+      - dissonance
+      - correct_event
+      - surprise
+      - pressure
+      - expectation
+      - expectation_verified
+      - expectation_unverified
+      - pressure_verified
+      - pressure_unverified
+      min_strength: 0.3
+  then:
+  - action_trigger:
+      from: cfs_matches
+      match_policy: all
+      max_triggers: 8
+      action_kind: attention_focus
+      action_id: 'attention_focus_{{{match_ref_object_id}}}'
+      gain: '{{{match_value}}}'
+      threshold: 0.30
+      cooldown_ticks: 0
+      params:
+        # 注意：此处不需要写完整 focus_directive；行动模块会从这些字段自动构建标准聚焦指令。
+        target_ref_object_id: '{{{match_ref_object_id}}}'
+        target_ref_object_type: '{{{match_ref_object_type}}}'
+        target_item_id: '{{{match_item_id}}}'
+        target_display: '{{{match_display}}}'
+        strength: '{{{match_value}}}'
+        focus_boost: 0.90
+        ttl_ticks: 2
+        source_kind: iesm_cfs
+  note: '对齐理论3.10.2：当出现违和/期待/压力等 CFS，对其绑定对象触发“注意力聚焦”行动器。这里用 Drive 竞争执行，避免硬插入注意力。'
+
+- id: innate_action_recall_from_expect_pressure
+  title: '先天行动规则：期待/压力 -> 触发“回忆”行动节点（recall）'
+  phase: directives
+  enabled: true
+  priority: 62
+  cooldown_ticks: 0
+  when:
+    all:
+    - cfs:
+        kinds:
+        - expectation
+        - pressure
+        - expectation_verified
+        - pressure_verified
+        min_strength: 0.45
+    - metric:
+        preset: map_item_count
+        op: '>='
+        value: 1
+  then:
+  - action_trigger:
+      from: cfs_matches
+      match_policy: strongest
+      max_triggers: 1
+      action_kind: recall
+      action_id: recall_top_memory
+      gain: '{{{match_value}}}'
+      threshold: 0.40
+      cooldown_ticks: 0
+      params:
+        trigger_kind: '{{{match_kind}}}'
+        trigger_strength: '{{{match_value}}}'
+        trigger_target_ref: '{{{match_ref_object_type}}}:{{{match_ref_object_id}}}'
+  note: '对齐理论4.2.7：期待/压力可驱动回忆行动。原型：从 MAP（记忆赋能池）选一个候选，生成聚焦指令引导下一 tick。'
+
+- id: innate_action_recall_from_time_feeling_bucket_gain
+  title: '先天行动规则：时间感受（绑定属性）对象获得能量 -> 触发“回忆”行动节点（recall）'
+  phase: directives
+  enabled: true
+  priority: 63
+  cooldown_ticks: 2
+  when:
+    metric:
+      preset: got_total_energy
+      selector:
+        # 说明（对齐理论核心 4.2.6~4.2.7）：
+        # - 时间感受既可作为“数值刺激元”参与有限桶/双桶匹配，
+        #   也可作为“属性刺激元”绑定到具体锚点对象（结构/刺激元）上形成节奏等结构。
+        # - 原型落地默认用“属性绑定”作为触发入口：当“带时间感受属性”的对象在状态池中获得能量并超过阈值时触发回忆。
+        # - 如需实验“桶节点入池”，可在 time_sensor 配置打开 enable_bucket_nodes，并另写更严格的规则匹配 sa_time_bucket_*。
+        mode: has_attribute
+        attribute_name: '时间感受'
+        scope: runtime
+        ref_object_types:
+        - st
+        - sa
+      op: '>='
+      value: 0.08
+      window_ticks: 1
+  then:
+  - action_trigger:
+      from: metric_matches
+      match_policy: strongest
+      max_triggers: 1
+      action_kind: recall
+      action_id: recall_time_feeling
+      gain: '{{{match_value}}}'
+      threshold: 0.40
+      cooldown_ticks: 0
+      params:
+        # trigger_kind: 用于审计与前端显示来源
+        trigger_kind: time_feeling
+        trigger_strength: '{{{match_value}}}'
+        trigger_target_ref: '{{{match_ref_object_type}}}:{{{match_ref_object_id}}}'
+        trigger_target_display: '{{{match_display}}}'
+        # Align to theory 4.2.7: recall should carry a target time interval / 对齐理论 4.2.7：回忆应携带目标时间间隔
+        time_basis: '{{{match_time_basis}}}'
+        time_bucket_ref_object_id: '{{{match_time_bucket_ref_object_id}}}'
+        target_interval_sec: '{{{match_time_bucket_center_sec}}}'
+        target_interval_ticks: '{{{match_time_bucket_center_sec}}}'
+  note: '对齐理论4.2.7.1：当“带时间感受属性”的对象在状态池中获得足够能量并超过阈值时，触发回忆行动。原型默认用属性触发以避免回忆正反馈。'
+
+- id: innate_action_attention_focus_mode_from_complexity_high
+  title: '先天行动规则：繁（complexity 高）-> 触发“注意力聚焦模式”（attention_focus_mode）'
+  phase: directives
+  enabled: true
+  priority: 58
+  cooldown_ticks: 0
+  when:
+    cfs:
+      kinds:
+      - complexity
+      min_strength: 0.65
+  then:
+  - action_trigger:
+      from: cfs_matches
+      match_policy: strongest
+      max_triggers: 1
+      action_kind: attention_focus_mode
+      action_id: attention_focus_mode
+      gain: 0.60
+      threshold: 0.55
+      cooldown_ticks: 2
+      params:
+        complexity: '{{{match_value}}}'
+        source_kind: iesm_cfs
+  note: '把“复杂度调制 -> 注意力模式”脚本化，避免行动模块内部硬编码触发源。高 complexity 代表“更繁/更忙”，倾向聚焦。'
+
+- id: innate_action_attention_diverge_mode_from_complexity_low
+  title: '先天行动规则：简（complexity 低）-> 触发“注意力发散模式”（attention_diverge_mode）'
+  phase: directives
+  enabled: true
+  priority: 57
+  cooldown_ticks: 0
+  when:
+    cfs:
+      kinds:
+      - complexity
+      min_strength: 0.0
+      max_strength: 0.25
+  then:
+  - action_trigger:
+      from: cfs_matches
+      match_policy: strongest
+      max_triggers: 1
+      action_kind: attention_diverge_mode
+      action_id: attention_diverge_mode
+      gain: 0.60
+      threshold: 0.55
+      cooldown_ticks: 2
+      params:
+        complexity: '{{{match_value}}}'
+        source_kind: iesm_cfs
+  note: '把“简/空闲 -> 发散探索”的触发规则放到 IESM，便于观察与调整。原型先用常数 gain，后续可加入更精细的 gain 计算。'

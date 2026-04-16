@@ -1,0 +1,78 @@
+# ======================================================================
+# AP 认知感受系统配置（CFS, Cognitive Feeling System）
+# AP Cognitive Feeling System (CFS) configuration
+#
+# 本文件既供 CognitiveFeelingSystem.reload_config() 热加载，
+# 也作为观测台“设置”页的字段说明来源。
+#
+# 注：界面与注释尽量中文优先；出现简写（CFS/EV/ER/CP 等）时请附中文全称。
+# ======================================================================
+
+# enabled / 总开关
+#
+# 注意：
+# - 本模块为“旧版原型”的硬编码实现（用于对照/过渡）。
+# - 当前推荐做法是：把认知感受信号（CFS）的触发逻辑放到 IESM 规则（phase=cfs）里统一脚本化管理，
+#   在「先天规则」页面即可观测与编辑（更符合理论核心的目标）。
+#
+# 因此默认关闭；需要对照实验时再手动开启。
+enabled: false
+
+# max_object_signals_per_tick / 每 tick 最多输出多少条“对象绑定型”信号
+max_object_signals_per_tick: 12
+
+# target_ref_types_for_object_signals / 仅对哪些 ref_object_type 生成对象型信号
+target_ref_types_for_object_signals: ["st"]
+
+# write_to_state_pool / 是否写回 StatePool 形成元认知条目
+write_to_state_pool: true
+
+# write_strength_as_ev / 强度写入 EV 还是 ER（默认 EV）
+write_strength_as_ev: true
+
+# bind_presence_attribute_to_target / 是否把“存在型属性 SA”绑定到目标对象（增强可观测）
+bind_presence_attribute_to_target: true
+
+# attribute_bind_strength_threshold / 只有强度超过该阈值才绑定属性
+attribute_bind_strength_threshold: 0.35
+
+# ---- dissonance / 违和感 ----
+dissonance_cp_abs_threshold: 0.5
+dissonance_cp_abs_max: 2.0
+
+# ---- correct_event / 正确事件（依托违和下降）----
+correct_event_min_prior_dissonance_strength: 0.30
+correct_event_cp_drop_threshold: 0.50
+correct_event_strength_drop_max: 1.20
+correct_event_cooldown_ticks: 1
+
+# ---- surprise / 惊 ----
+surprise_cp_rise_threshold: 0.50
+surprise_strength_rise_max: 1.20
+surprise_require_delta_positive: true
+
+# ---- expectation / pressure / 期待与压力（原型：标记命中 + EV 门槛）----
+# 说明：当前实现会在 display/attribute_displays/bound_attribute_displays 中查找 reward/punish 关键词，
+#      然后以 EV（虚能量）作为强度来源输出期待/压力信号。
+expectation_ev_threshold: 0.30
+pressure_ev_threshold: 0.30
+reward_keywords: ["奖励", "reward", "positive_valence"]
+punish_keywords: ["惩罚", "punish", "negative_valence"]
+predicted_ref_types: ["st"]
+
+# ---- complexity / 复杂度（繁）----
+complexity_size_max: 24
+complexity_entropy_weight: 0.45
+complexity_size_weight: 0.55
+
+# ---- repetition / 重复感（疲劳）----
+repetition_fatigue_threshold: 0.60
+repetition_max_considered_items: 24
+
+# ---- grasp / 把握感 ----
+grasp_alignment_eps: 0.000001
+
+# ---- Logging / 日志 ----
+log_dir: ""
+log_max_file_bytes: 5242880
+stdout_fallback_when_log_fail: true

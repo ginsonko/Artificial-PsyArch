@@ -1,0 +1,61 @@
+# ======================================================================
+# Energy Balance Controller (EBC) runtime configuration
+# 实虚能量平衡控制器（EBC）运行配置
+#
+# Goal / 目标：
+# 让全局 EV_total / ER_total 在长时间运行后趋近 target_ratio（默认 1.0）。
+# 这是一个“可插拔闭环控制器”，默认可关闭。
+# ======================================================================
+
+# enabled / 是否启用
+# Purpose / 作用: Master on/off switch for the balance controller.
+# Meaning / 意义: When false, the controller outputs no modulation and keeps its state unchanged.
+# Reference / 参考: Default false (safe). Enable when you want stable EV:ER alignment experiments.
+enabled: false
+
+# target_ratio / 目标比例（EV_total / ER_total）
+# Purpose / 作用: Target ratio that the global EV/ER should converge to.
+# Meaning / 意义: 1.0 means “预测(虚能量) ≈ 现实(实能量)”。
+# Suggested / 建议: 1.0 is theory-aligned for “prediction matches reality”.
+target_ratio: 1.0
+
+# eps / 防止除零与 log(0)
+# Purpose / 作用: Numerical epsilon used in ratio computation to avoid division by zero.
+# Meaning / 意义: ratio = EV_total / (ER_total + eps).
+eps: 1e-6
+
+# window_ticks / 平滑窗口（tick 数）
+# Purpose / 作用: Number of recent ticks used for smoothing the ratio.
+# Meaning / 意义: Larger windows reduce jitter but respond slower.
+# Suggested / 建议: 4~12 for prototype; default 6.
+window_ticks: 6
+
+# ki / 积分增益（对数域）
+# Purpose / 作用: Integral gain in log-domain update. Larger values react faster but may oscillate.
+# Meaning / 意义: log_g <- log_g - ki * log(ratio/target)
+# Suggested / 建议: Start small (0.02~0.06). Default 0.04.
+ki: 0.04
+
+# g_min / g_max / 控制增益范围
+# Purpose / 作用: Clamp range for the controller output g (positive scale factor).
+# Meaning / 意义: Prevents the controller from driving EV propagation too extreme.
+g_min: 0.2
+g_max: 5.0
+
+# min_total_energy_to_update / 低能量冻结阈值
+# Purpose / 作用: If ER_total + EV_total is below this, skip updates to avoid noise.
+# Meaning / 意义: When the system is almost empty, ratios are unstable and should not drive control.
+# Suggested / 建议: Default 0.5.
+min_total_energy_to_update: 0.5
+
+# apply_scales / 输出作用到哪些 HDB 调制键
+# Purpose / 作用: Choose which HDB scale keys are multiplied by g each tick.
+# Meaning / 意义:
+#   - ev_propagation_ratio_scale: scales HDB ev_propagation_ratio (EV 传播比例)
+#   - er_induction_ratio_scale: scales HDB er_induction_ratio (ER 诱发比例)
+# Note / 注意:
+#   - 这些 scale 会与 EMgr（情绪管理器）的 hdb modulation 相乘（而不是互相覆盖）。
+apply_scales:
+  ev_propagation_ratio_scale: true
+  er_induction_ratio_scale: true
+
