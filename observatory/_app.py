@@ -458,7 +458,7 @@ class ObservatoryApp:
         print(render_header())
         print(format_help())
 
-    def run_cycle(self, text: str | None = None) -> dict:
+    def run_cycle(self, text: str | None = None, *, labels: dict[str, Any] | None = None) -> dict:
         trace_id = self.next_trace("cycle")
         tick_id = trace_id
         # Timing / 耗时统计（用于“找茬式验收”与性能排查）
@@ -478,6 +478,13 @@ class ObservatoryApp:
                 "output_dir": str(self.output_dir),
             },
         }
+
+        # Optional per-tick labels (experiment/teacher signals).
+        # 说明：
+        # - 默认 None，不影响原有观测台调用口径；
+        # - 实验跑批可通过 labels 注入“教师信号/外置奖惩/离线评估标签”等。
+        tick_labels = labels if isinstance(labels, dict) else {}
+        report["tick_labels"] = dict(tick_labels) if tick_labels else {}
 
         external_packet = None
         sensor_result = None
@@ -745,6 +752,25 @@ class ObservatoryApp:
         timing_steps_ms["time_sensor_ms"] = int((time.perf_counter() - t0) * 1000)
 
         # =============================================================== #
+        # Teacher Feedback（教师信号/外置奖惩）                              #
+        # =============================================================== #
+        # 说明：
+        # - 用于论文实验与元学习验证：数据集可在每个 tick 附带 labels.teacher_rwd/pun 等字段；
+        # - 教师信号既应进入“状态池可审计的属性绑定”（供记忆材料补全），
+        #   也应进入 EMgr 的 rwd/pun 汇总（供递质通道调制），但不应破坏原有闭环。
+        t0 = time.perf_counter()
+        try:
+            report["teacher_feedback"] = self._apply_teacher_feedback(
+                labels=tick_labels,
+                report=report,
+                trace_id=trace_id,
+                tick_id=tick_id,
+            )
+        except Exception as exc:
+            report["teacher_feedback"] = {"ok": False, "code": "EXCEPTION", "message": f"teacher_feedback failed: {exc}"}
+        timing_steps_ms["teacher_feedback_ms"] = int((time.perf_counter() - t0) * 1000)
+
+        # =============================================================== #
         # Step 7/8/IESM: CFS（认知感受信号）-> IESM（先天规则）-> Emotion    #
         # =============================================================== #
         # 说明：对齐理论（3.10/3.12）中“先天脚本可管理情绪脚本（NT）”的口径。
@@ -968,6 +994,37 @@ class ObservatoryApp:
             rwd_pun_override = self._estimate_rwd_pun_from_pool_items(rows, trace_id=trace_id, tick_id=tick_id)
         except Exception:
             rwd_pun_override = None
+
+        # External teacher reward/punish can add on top of pool aggregation.
+        # 外置奖惩注入：在不破坏“池内自然汇总”的前提下，把教师信号作为附加分量叠加进 rwd/pun。
+        try:
+            tfb = report.get("teacher_feedback", {}) if isinstance(report.get("teacher_feedback", {}), dict) else {}
+            teacher_rwd = float(tfb.get("teacher_rwd", 0.0) or 0.0)
+            teacher_pun = float(tfb.get("teacher_pun", 0.0) or 0.0)
+            if teacher_rwd > 0.0 or teacher_pun > 0.0:
+                base = dict(rwd_pun_override or {})
+                base_rwd = float(base.get("rwd", 0.0) or 0.0)
+                base_pun = float(base.get("pun", 0.0) or 0.0)
+                merged_rwd = self._clamp01(base_rwd + max(0.0, teacher_rwd))
+                merged_pun = self._clamp01(base_pun + max(0.0, teacher_pun))
+                detail = dict(base.get("detail", {}) or {}) if isinstance(base.get("detail", {}), dict) else {}
+                detail.update(
+                    {
+                        "teacher_rwd": round(float(max(0.0, teacher_rwd)), 8),
+                        "teacher_pun": round(float(max(0.0, teacher_pun)), 8),
+                        "teacher_mode": str(tfb.get("mode", "") or ""),
+                        "teacher_anchor": str(tfb.get("anchor", "") or ""),
+                    }
+                )
+                rwd_pun_override = {
+                    **base,
+                    "rwd": round(float(merged_rwd), 8),
+                    "pun": round(float(merged_pun), 8),
+                    "source": f"{str(base.get('source', '') or 'pool_items')}+teacher",
+                    "detail": detail,
+                }
+        except Exception:
+            pass
         emotion_result = self.emotion.update_emotion_state(
             {
                 "cfs_signals": cfs_signals,
@@ -2560,6 +2617,302 @@ class ObservatoryApp:
             return True
         hay = " ".join(str(x) for x in (row.get("bound_attribute_displays", []) or []) if str(x))
         return attr_name in hay
+
+    # ================================================================== #
+    # Teacher Feedback (External Reward/Punish)                           #
+    # 教师信号/外置奖惩（实验输入）                                         #
+    # ================================================================== #
+
+    def _apply_teacher_feedback(
+        self,
+        *,
+        labels: dict[str, Any] | None,
+        report: dict[str, Any] | None,
+        trace_id: str,
+        tick_id: str,
+    ) -> dict[str, Any]:
+        """
+        Apply external teacher feedback to the runtime StatePool.
+
+        Goals / 目标：
+        - 让“外置奖惩”能够被实验数据集注入（labels），并以“属性刺激元绑定”的形式进入可审计运行态；
+        - 不强依赖特定 action/tool，实现上尽量保守且不影响原有闭环；
+        - 允许空 tick 也能注入（例如奖励/惩罚在下一 tick 才到达）。
+
+        Supported label keys / 支持的字段（最小口径，未来可扩展）：
+        - teacher_rwd / teacher_pun: float in [0,1]
+        - teacher_anchor: cam_top1 | pool_top1_total | pool_top1_total_any | specific_item | specific_ref | none
+        - teacher_anchor_item_id / teacher_anchor_ref_object_id / teacher_anchor_ref_object_type
+        - teacher_anchor_ref_object_types: ['st', 'sa', ...] (default ['st'])
+        - tool_feedback_rwd / tool_feedback_pun: aliases for teacher_rwd/pun (for tool experiments)
+        """
+        labels = labels if isinstance(labels, dict) else {}
+        report = report if isinstance(report, dict) else {}
+
+        # Allow a nested "teacher" dict, but keep top-level keys as the stable protocol.
+        teacher = labels.get("teacher") if isinstance(labels.get("teacher"), dict) else {}
+
+        def _pick(keys: list[str], *, default: Any = None) -> Any:
+            for k in keys:
+                if k in teacher:
+                    return teacher.get(k)
+                if k in labels:
+                    return labels.get(k)
+            return default
+
+        def _as_float(v: Any) -> float:
+            try:
+                return float(v)
+            except Exception:
+                return 0.0
+
+        teacher_rwd = self._clamp01(_as_float(_pick(["teacher_rwd", "tool_feedback_rwd", "rwd"], default=0.0)))
+        teacher_pun = self._clamp01(_as_float(_pick(["teacher_pun", "tool_feedback_pun", "pun"], default=0.0)))
+        mode = str(_pick(["teacher_mode", "mode"], default="bind_attribute") or "bind_attribute").strip() or "bind_attribute"
+
+        anchor = str(_pick(["teacher_anchor", "anchor"], default="pool_top1_total") or "pool_top1_total").strip() or "pool_top1_total"
+        if anchor == "pool_top1":
+            anchor = "pool_top1_total"
+        if anchor == "pool_top1_any":
+            anchor = "pool_top1_total_any"
+
+        allow_types = _pick(["teacher_anchor_ref_object_types", "ref_object_types"], default=None)
+        ref_object_types: list[str] = []
+        if isinstance(allow_types, list):
+            ref_object_types = [str(x) for x in allow_types if str(x).strip()]
+        if not ref_object_types:
+            ref_object_types = ["st"]
+
+        explicit_item_id = str(_pick(["teacher_anchor_item_id", "item_id"], default="") or "").strip()
+        explicit_ref_id = str(_pick(["teacher_anchor_ref_object_id", "ref_object_id"], default="") or "").strip()
+        explicit_ref_type = str(_pick(["teacher_anchor_ref_object_type", "ref_object_type"], default="") or "").strip()
+        contains_text = str(_pick(["teacher_anchor_contains_text", "contains_text"], default="") or "").strip()
+        note = str(_pick(["teacher_note", "note", "teacher_reason", "reason"], default="") or "").strip()
+
+        # Early exit: no feedback provided.
+        if teacher_rwd <= 0.0 and teacher_pun <= 0.0:
+            return {
+                "ok": True,
+                "mode": mode,
+                "anchor": anchor,
+                "teacher_rwd": 0.0,
+                "teacher_pun": 0.0,
+                "applied_count": 0,
+                "applied": [],
+                "message": "no teacher feedback on this tick",
+            }
+
+        if anchor in {"none", "off", "disabled"}:
+            return {
+                "ok": True,
+                "mode": mode,
+                "anchor": anchor,
+                "teacher_rwd": round(float(teacher_rwd), 8),
+                "teacher_pun": round(float(teacher_pun), 8),
+                "applied_count": 0,
+                "applied": [],
+                "message": "teacher feedback ignored by anchor policy",
+            }
+
+        # ---- Resolve target ----
+        target_item_id = ""
+        target_row: dict[str, Any] = {}
+        resolve_reason = ""
+
+        # (1) Specific item id
+        if explicit_item_id:
+            it = self.pool._store.get(explicit_item_id)  # type: ignore[attr-defined]
+            if isinstance(it, dict):
+                target_item_id = explicit_item_id
+                try:
+                    target_row = self.pool._snapshot._build_top_item_summary(it)  # type: ignore[attr-defined]
+                except Exception:
+                    target_row = {}
+                resolve_reason = "specific_item"
+
+        # (2) Specific ref id
+        if not target_item_id and explicit_ref_id:
+            it = self.pool._store.get_by_ref(explicit_ref_id)  # type: ignore[attr-defined]
+            if isinstance(it, dict):
+                if explicit_ref_type and str(it.get("ref_object_type", "")) != explicit_ref_type:
+                    pass
+                else:
+                    target_item_id = str(it.get("id", "") or "")
+                    try:
+                        target_row = self.pool._snapshot._build_top_item_summary(it)  # type: ignore[attr-defined]
+                    except Exception:
+                        target_row = {}
+                    resolve_reason = "specific_ref"
+
+        # (3) CAM top1
+        if not target_item_id and anchor == "cam_top1":
+            att = report.get("attention", {}) if isinstance(report.get("attention", {}), dict) else {}
+            top_items = list(att.get("top_items", []) or [])
+            for r in top_items:
+                if not isinstance(r, dict):
+                    continue
+                if ref_object_types and str(r.get("ref_object_type", "")) not in set(ref_object_types):
+                    continue
+                iid = str(r.get("item_id", "") or "").strip()
+                if iid:
+                    target_item_id = iid
+                    target_row = dict(r)
+                    resolve_reason = "cam_top1"
+                    break
+
+        # (4) Contains text
+        if not target_item_id and (contains_text or anchor.startswith("contains_text")):
+            needle = contains_text
+            if not needle and ":" in anchor:
+                needle = anchor.split(":", 1)[1].strip()
+            if needle:
+                # Use a cheap scan on the live pool store.
+                try:
+                    all_items = list(self.pool._store.get_all())  # type: ignore[attr-defined]
+                except Exception:
+                    all_items = []
+                for it in all_items:
+                    if not isinstance(it, dict):
+                        continue
+                    try:
+                        row = self.pool._snapshot._build_top_item_summary(it)  # type: ignore[attr-defined]
+                    except Exception:
+                        continue
+                    if not isinstance(row, dict):
+                        continue
+                    if ref_object_types and str(row.get("ref_object_type", "")) not in set(ref_object_types):
+                        continue
+                    hay = " ".join(
+                        [
+                            str(row.get("display", "") or ""),
+                            str(row.get("display_detail", "") or ""),
+                            " ".join(str(x) for x in (row.get("attribute_displays", []) or []) if str(x)),
+                            " ".join(str(x) for x in (row.get("feature_displays", []) or []) if str(x)),
+                            " ".join(str(x) for x in (row.get("bound_attribute_displays", []) or []) if str(x)),
+                        ]
+                    )
+                    if needle in hay or needle.lower() in hay.lower():
+                        target_item_id = str(row.get("item_id", "") or "")
+                        target_row = dict(row)
+                        resolve_reason = f"contains_text:{needle}"
+                        break
+
+        # (5) Default: pool top1 by total_energy
+        if not target_item_id and anchor in {"pool_top1_total", "pool_top1_total_any"}:
+            prefer_any = anchor == "pool_top1_total_any"
+            try:
+                all_items = list(self.pool._store.get_all())  # type: ignore[attr-defined]
+            except Exception:
+                all_items = []
+            best_it: dict[str, Any] | None = None
+            best_total = -1.0
+            allow = set(ref_object_types)
+            for it in all_items:
+                if not isinstance(it, dict):
+                    continue
+                if (not prefer_any) and allow and str(it.get("ref_object_type", "")) not in allow:
+                    continue
+                e = it.get("energy", {}) if isinstance(it.get("energy", {}), dict) else {}
+                try:
+                    total = float(e.get("er", 0.0) or 0.0) + float(e.get("ev", 0.0) or 0.0)
+                except Exception:
+                    total = 0.0
+                if total > best_total:
+                    best_total = total
+                    best_it = it
+            if best_it is not None:
+                target_item_id = str(best_it.get("id", "") or "")
+                try:
+                    target_row = self.pool._snapshot._build_top_item_summary(best_it)  # type: ignore[attr-defined]
+                except Exception:
+                    target_row = {}
+                resolve_reason = f"{anchor}:top_by_total_energy"
+
+        if not target_item_id:
+            return {
+                "ok": False,
+                "mode": mode,
+                "anchor": anchor,
+                "teacher_rwd": round(float(teacher_rwd), 8),
+                "teacher_pun": round(float(teacher_pun), 8),
+                "ref_object_types": list(ref_object_types),
+                "applied_count": 0,
+                "applied": [],
+                "message": "teacher feedback provided but no anchor target found",
+                "resolve_reason": resolve_reason or "no_target",
+            }
+
+        # ---- Apply bindings ----
+        applied: list[dict[str, Any]] = []
+
+        def bind_attr(*, attr_name: str, attr_value: float, display: str) -> None:
+            target_ref_id = str(target_row.get("ref_object_id", "") or target_item_id)
+            attr_id = f"sa_teacher_attr_{attr_name}_{target_ref_id}"
+            attribute_sa = {
+                "id": attr_id,
+                "object_type": "sa",
+                "content": {
+                    "raw": f"{attr_name}:{round(float(attr_value), 8)}",
+                    "display": display,
+                    "value_type": "numerical",
+                    "attribute_name": attr_name,
+                    "attribute_value": round(float(attr_value), 8),
+                },
+                "stimulus": {"role": "attribute", "modality": "external"},
+                "energy": {"er": 0.0, "ev": 0.0},
+                "meta": {
+                    "ext": {
+                        "bound_from": "teacher_feedback",
+                        "trace_id": trace_id,
+                        "tick_id": tick_id,
+                        "mode": mode,
+                        "anchor": anchor,
+                        "resolve_reason": resolve_reason,
+                        "note": note,
+                    }
+                },
+            }
+            res = self.pool.bind_attribute_node_to_object(
+                target_item_id=target_item_id,
+                attribute_sa=attribute_sa,
+                trace_id=f"{trace_id}_teacher_bind_attr",
+                tick_id=tick_id,
+                source_module="teacher_feedback",
+                reason=f"teacher_feedback:{attr_name}",
+            )
+            applied.append(
+                {
+                    "attribute_name": attr_name,
+                    "attribute_sa_id": attr_id,
+                    "target_item_id": target_item_id,
+                    "success": bool(res.get("success", False)),
+                    "code": str(res.get("code", "") or ""),
+                    "data": res.get("data", {}) if isinstance(res.get("data", {}), dict) else {},
+                }
+            )
+
+        if teacher_rwd > 0.0:
+            bind_attr(attr_name="teacher_reward_signal", attr_value=teacher_rwd, display="外置奖励信号:教师")
+        if teacher_pun > 0.0:
+            bind_attr(attr_name="teacher_punish_signal", attr_value=teacher_pun, display="外置惩罚信号:教师")
+
+        return {
+            "ok": True,
+            "mode": mode,
+            "anchor": anchor,
+            "teacher_rwd": round(float(teacher_rwd), 8),
+            "teacher_pun": round(float(teacher_pun), 8),
+            "ref_object_types": list(ref_object_types),
+            "resolve_reason": resolve_reason,
+            "target": {
+                "item_id": target_item_id,
+                "ref_object_id": str(target_row.get("ref_object_id", "") or ""),
+                "ref_object_type": str(target_row.get("ref_object_type", "") or ""),
+                "display": str(target_row.get("display", "") or ""),
+            },
+            "applied_count": len(applied),
+            "applied": applied[:8],
+        }
 
     def _estimate_rwd_pun_from_pool_items(self, pool_items: list[dict[str, Any]], *, trace_id: str, tick_id: str) -> dict[str, Any]:
         """

@@ -1,0 +1,95 @@
+# -*- coding: utf-8 -*-
+# Classic general dataset — 10000 ticks
+# 说明：由 classic_1000_v0 的 repeat 扩展 10 倍得到，用于长跑稳定性与“涌现趋势”展示。
+
+dataset_id: classic_10000_v0
+seed: 20260418
+time_basis: tick
+tick_dt_ms: 100
+
+episodes:
+  - id: ep_bootstrap_greeting
+    tags: [warmup, structure]
+    repeat: 100
+    ticks:
+      - text: "你好"
+      - text: "你好!"
+      - text: "你好呀!"
+      - empty: true
+      - text: "你好!"
+      - text: "再见"
+
+  - id: ep_sequence_left_right
+    tags: [sequence, order, left_right]
+    repeat: 400
+    ticks:
+      - text: "左"
+      - text: "右"
+      - text: "左右"
+      - empty: true
+      - text: "左-右"
+
+  - id: ep_sequence_right_left
+    tags: [sequence, order, right_left]
+    repeat: 400
+    ticks:
+      - text: "右"
+      - text: "左"
+      - text: "右左"
+      - empty: true
+      - text: "右-左"
+
+  - id: ep_time_bucket_short
+    tags: [time, recall, gap_short]
+    repeat: 500
+    ticks:
+      - text: "敲门"
+      - empty: true
+        repeat: 2
+      - text: "敲门"
+
+  - id: ep_teacher_reward_pulse
+    tags: [teacher, reward]
+    repeat: 800
+    ticks:
+      - empty: true
+        labels:
+          teacher_rwd: 0.15
+          teacher_anchor: pool_top1_total
+          teacher_anchor_ref_object_types: [st]
+          teacher_note: "baseline reward pulse"
+
+  - id: ep_teacher_punish_pulse
+    tags: [teacher, punish]
+    repeat: 800
+    ticks:
+      - empty: true
+        labels:
+          teacher_pun: 0.15
+          teacher_anchor: pool_top1_total
+          teacher_anchor_ref_object_types: [st]
+          teacher_note: "baseline punish pulse"
+
+  - id: ep_weather_context_reward_punish
+    tags: [teacher, tool_meta_learning, weather_query]
+    repeat: 450
+    ticks:
+      - text: "查一下天气"
+        labels:
+          should_call_weather: 1
+      - empty: true
+        labels:
+          teacher_rwd: 0.25
+          teacher_anchor: "contains_text:天气"
+          teacher_anchor_ref_object_types: [st]
+          teacher_note: "reward after positive context"
+      - text: "不用查天气了"
+        labels:
+          should_call_weather: 0
+      - empty: true
+        labels:
+          teacher_pun: 0.10
+          teacher_anchor: "contains_text:天气"
+          teacher_anchor_ref_object_types: [st]
+          teacher_note: "punish after negative context"
+

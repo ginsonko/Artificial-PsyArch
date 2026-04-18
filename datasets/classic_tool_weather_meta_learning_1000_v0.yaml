@@ -1,0 +1,68 @@
+# -*- coding: utf-8 -*-
+# Classic dataset (topic: tool/action meta-learning with teacher reward/punish) — 1000 ticks
+# 说明：
+# - 目前 action/tool 侧可先做 stub；该数据集先用于“教师信号 + 外置奖惩”闭环验收；
+# - 后续接入 weather_query 行动后，可用 should_call_weather 计算 precision/recall/F1 并画学习曲线。
+
+dataset_id: classic_tool_weather_meta_learning_1000_v0
+seed: 20260418
+time_basis: tick
+tick_dt_ms: 100
+
+episodes:
+  - id: ep_train_positive
+    tags: [train, tool_meta_learning, weather_query]
+    repeat: 200
+    ticks:
+      - text: "帮我查下天气"
+        labels:
+          should_call_weather: 1
+      - empty: true
+        labels:
+          teacher_rwd: 0.40
+          teacher_anchor: "contains_text:天气"
+          teacher_anchor_ref_object_types: [st]
+          teacher_note: "teacher reward for correct tool usage (positive context)"
+
+  - id: ep_train_negative
+    tags: [train, tool_meta_learning, weather_query]
+    repeat: 200
+    ticks:
+      - text: "我们聊聊天气真好"
+        labels:
+          should_call_weather: 0
+      - empty: true
+        labels:
+          teacher_pun: 0.20
+          teacher_anchor: "contains_text:天气"
+          teacher_anchor_ref_object_types: [st]
+          teacher_note: "teacher punish for wrong tool usage (negative context)"
+
+  - id: ep_holdout_positive
+    tags: [holdout, tool_meta_learning, weather_query]
+    repeat: 50
+    ticks:
+      - text: "我想知道当前的天气情况"
+        labels:
+          should_call_weather: 1
+      - empty: true
+        labels:
+          teacher_rwd: 0.40
+          teacher_anchor: "contains_text:天气"
+          teacher_anchor_ref_object_types: [st]
+          teacher_note: "holdout positive reward"
+
+  - id: ep_holdout_negative
+    tags: [holdout, tool_meta_learning, weather_query]
+    repeat: 50
+    ticks:
+      - text: "天气这个词是什么意思?"
+        labels:
+          should_call_weather: 0
+      - empty: true
+        labels:
+          teacher_pun: 0.20
+          teacher_anchor: "contains_text:天气"
+          teacher_anchor_ref_object_types: [st]
+          teacher_note: "holdout negative punish"
+

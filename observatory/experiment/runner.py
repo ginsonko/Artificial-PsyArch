@@ -276,8 +276,9 @@ def run_dataset(
 
                 text = str(tick.get("input_text", "") or "")
                 is_empty = bool(tick.get("input_is_empty", False)) or (text == "")
+                labels = tick.get("labels") if isinstance(tick.get("labels"), dict) else None
                 with lock_ctx:
-                    report = app.run_cycle(text=None if is_empty else text)  # type: ignore[attr-defined]
+                    report = app.run_cycle(text=None if is_empty else text, labels=labels)  # type: ignore[attr-defined]
                 metrics = extract_tick_metrics(report=report, dataset_tick=tick)
                 mf.write(json.dumps(metrics, ensure_ascii=False))
                 mf.write("\n")

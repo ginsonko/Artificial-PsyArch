@@ -123,6 +123,7 @@ def extract_tick_metrics(*, report: dict[str, Any], dataset_tick: dict[str, Any]
                 cfs_max_by_kind[kind] = float(strength)
 
     emotion = _as_dict(report.get("emotion"))
+    rwd_pun_snapshot = _as_dict(emotion.get("rwd_pun_snapshot"))
     nt_after = _as_dict(emotion.get("nt_state_after"))
     # Normalize channel keys (keep original for audit; provide stable fields for plots)
     nt = {
@@ -198,6 +199,9 @@ def extract_tick_metrics(*, report: dict[str, Any], dataset_tick: dict[str, Any]
         "nt_COR": nt["COR"],
         "nt_ADR": nt["ADR"],
         "nt_SER": nt["SER"],
+        # reward / punish (global snapshot used by EMgr)
+        "rwd_pun_rwd": _as_float(rwd_pun_snapshot.get("rwd", 0.0)),
+        "rwd_pun_pun": _as_float(rwd_pun_snapshot.get("pun", 0.0)),
         # action
         "action_executed_count": len([x for x in executed_actions if isinstance(x, dict)]),
         "action_executed_attention_focus": int(executed_kind_counts.get("attention_focus", 0)),
@@ -215,6 +219,20 @@ def extract_tick_metrics(*, report: dict[str, Any], dataset_tick: dict[str, Any]
     labels = dt.get("labels")
     if isinstance(labels, dict) and labels:
         record["labels"] = dict(labels)
+
+        # Common teacher/external feedback labels (paper-friendly flat fields).
+        teacher = labels.get("teacher") if isinstance(labels.get("teacher"), dict) else {}
+        tr = labels.get("teacher_rwd", teacher.get("rwd", labels.get("tool_feedback_rwd", 0.0)))
+        tp = labels.get("teacher_pun", teacher.get("pun", labels.get("tool_feedback_pun", 0.0)))
+        record["label_teacher_rwd"] = _as_float(tr, 0.0)
+        record["label_teacher_pun"] = _as_float(tp, 0.0)
+        record["label_should_call_weather"] = _as_int(labels.get("should_call_weather", labels.get("tool_should_call_weather", 0)), 0)
+
+    # Teacher feedback apply result (from report, after clamping + anchor resolution).
+    tfb = _as_dict(report.get("teacher_feedback"))
+    record["teacher_rwd"] = _as_float(tfb.get("teacher_rwd", 0.0))
+    record["teacher_pun"] = _as_float(tfb.get("teacher_pun", 0.0))
+    record["teacher_applied_count"] = _as_int(tfb.get("applied_count", 0))
 
     return record
 

@@ -368,6 +368,7 @@ function renderRunSummary() {
             `tick_index=${last.tick_index ?? "-"} | trace_id=${last.trace_id ?? "-"}\n` +
             `pool ER=${n(last.pool_total_er)} / EV=${n(last.pool_total_ev)} / CP=${n(last.pool_total_cp)}\n` +
             `CFS count=${last.cfs_signal_count ?? "-"} | NT COR=${n(last.nt_COR)} ADR=${n(last.nt_ADR)} SER=${n(last.nt_SER)}\n` +
+            `Rwd/Pun rwd=${n(last.rwd_pun_rwd)} pun=${n(last.rwd_pun_pun)} | Teacher rwd=${n(last.teacher_rwd)} pun=${n(last.teacher_pun)}\n` +
             `Action executed=${last.action_executed_count ?? "-"} (focus=${last.action_executed_attention_focus ?? 0}, recall=${last.action_executed_recall ?? 0})`,
         },
         {
@@ -531,6 +532,16 @@ function renderCharts() {
       { key: "nt_END", name: "END", color: "rgba(82,120,102,0.86)" },
     ],
   });
+  renderLineChart(E.expChartRwdPun, {
+    ariaLabel: "reward punish chart",
+    rows: S.lastMetricsRows,
+    series: [
+      { key: "rwd_pun_rwd", name: "rwd", color: "rgba(21,55,45,0.92)" },
+      { key: "rwd_pun_pun", name: "pun", color: "rgba(140,59,46,0.86)" },
+      { key: "teacher_rwd", name: "teacher_rwd", color: "rgba(190,116,65,0.92)" },
+      { key: "teacher_pun", name: "teacher_pun", color: "rgba(82,120,102,0.86)" },
+    ],
+  });
   renderLineChart(E.expChartAction, {
     ariaLabel: "action chart",
     rows: S.lastMetricsRows,
@@ -671,6 +682,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     "expChartEnergy",
     "expChartCfs",
     "expChartNt",
+    "expChartRwdPun",
     "expChartAction",
   ].forEach((id) => {
     E[id] = document.getElementById(id);

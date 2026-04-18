@@ -1,0 +1,57 @@
+# -*- coding: utf-8 -*-
+# Minimal teacher/external reward-punish smoke dataset (40 ticks)
+# 用于验收：
+# - labels.teacher_rwd/teacher_pun 能被后端消费（绑定属性 + 影响 EMgr 的 rwd/pun）
+# - /experiment.html 图表能看到 rwd/pun 与 teacher 曲线
+
+dataset_id: smoke_teacher_feedback_40_v0
+seed: 20260418
+time_basis: tick
+tick_dt_ms: 100
+
+episodes:
+  - id: ep_warmup_greeting
+    tags: [warmup, structure]
+    repeat: 1
+    ticks:
+      - text: "你好"
+      - text: "你好呀!"
+      - empty: true
+      - text: "你好!"
+
+  - id: ep_teacher_reward_only
+    tags: [teacher, reward]
+    repeat: 10
+    ticks:
+      - empty: true
+        labels:
+          teacher_rwd: 0.60
+          teacher_anchor: pool_top1_total
+          teacher_anchor_ref_object_types: [st]
+          teacher_note: "reward pulse (external)"
+
+  - id: ep_teacher_punish_only
+    tags: [teacher, punish]
+    repeat: 10
+    ticks:
+      - empty: true
+        labels:
+          teacher_pun: 0.60
+          teacher_anchor: pool_top1_total
+          teacher_anchor_ref_object_types: [st]
+          teacher_note: "punish pulse (external)"
+
+  - id: ep_teacher_reward_with_context
+    tags: [teacher, tool_meta_learning, weather_query]
+    repeat: 8
+    ticks:
+      - text: "今天天气怎么样?"
+        labels:
+          should_call_weather: 1
+      - empty: true
+        labels:
+          teacher_rwd: 0.70
+          teacher_anchor: pool_top1_total
+          teacher_anchor_ref_object_types: [st]
+          teacher_note: "reward after correct tool usage (stub for later)"
+

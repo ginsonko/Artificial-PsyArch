@@ -86,6 +86,13 @@ def normalize_tick(tick: Any, *, where: str) -> dict[str, Any]:
         raise DatasetValidationError(f"{where} must have 'text' or 'empty: true'.")
 
     out = dict(tick)
+    # Optional per-tick repeat (for compact datasets, especially long empty gaps).
+    # 说明：episode.repeat 是“整段 ticks 模板”重复；tick.repeat 是“单个 tick”重复。
+    if "repeat" in out:
+        rep = _as_int(out.get("repeat", 1), where=f"{where}.repeat")
+        if rep <= 0:
+            raise DatasetValidationError(f"{where}.repeat must be >= 1.")
+        out["repeat"] = rep
     if has_empty:
         out["text"] = ""
         out["empty"] = True
@@ -175,7 +182,16 @@ def estimate_total_ticks(dataset: dict[str, Any]) -> int:
         ticks = ep.get("ticks", [])
         if not isinstance(ticks, list):
             continue
-        total += max(0, repeat) * len(ticks)
+        per_ep = 0
+        for t in ticks:
+            if isinstance(t, dict):
+                try:
+                    per_ep += max(1, int(t.get("repeat", 1) or 1))
+                except Exception:
+                    per_ep += 1
+            else:
+                per_ep += 1
+        total += max(0, repeat) * int(per_ep)
     return int(total)
 
 
@@ -196,26 +212,34 @@ def expand_dataset(dataset: dict[str, Any]) -> Iterable[dict[str, Any]]:
         ticks = ep.get("ticks", [])
         for rep_i in range(repeat):
             for j, t in enumerate(ticks):
-                text = str(t.get("text", "") or "")
-                is_empty = bool(t.get("empty", False)) or (text == "")
-                item: dict[str, Any] = {
-                    "dataset_id": dataset_id,
-                    "seed": seed,
-                    "time_basis": time_basis,
-                    "tick_dt_ms": tick_dt_ms,
-                    "tick_index": tick_index,
-                    "episode_id": ep_id,
-                    "episode_repeat_index": rep_i,
-                    "tick_in_episode_index": j,
-                    "tags": list(tags) if isinstance(tags, list) else [],
-                    "input_text": "" if is_empty else text,
-                    "input_is_empty": is_empty,
-                }
-                # Optional labels pass-through (future use).
-                labels = t.get("labels")
-                if isinstance(labels, dict) and labels:
-                    item["labels"] = labels
+                tick_repeat = 1
+                try:
+                    tick_repeat = max(1, int(t.get("repeat", 1) or 1))
+                except Exception:
+                    tick_repeat = 1
 
-                yield item
-                tick_index += 1
+                for rep_j in range(tick_repeat):
+                    text = str(t.get("text", "") or "")
+                    is_empty = bool(t.get("empty", False)) or (text == "")
+                    item: dict[str, Any] = {
+                        "dataset_id": dataset_id,
+                        "seed": seed,
+                        "time_basis": time_basis,
+                        "tick_dt_ms": tick_dt_ms,
+                        "tick_index": tick_index,
+                        "episode_id": ep_id,
+                        "episode_repeat_index": rep_i,
+                        "tick_in_episode_index": j,
+                        "tick_repeat_index": rep_j,
+                        "tags": list(tags) if isinstance(tags, list) else [],
+                        "input_text": "" if is_empty else text,
+                        "input_is_empty": is_empty,
+                    }
+                    # Optional labels pass-through (future use).
+                    labels = t.get("labels")
+                    if isinstance(labels, dict) and labels:
+                        item["labels"] = labels
+
+                    yield item
+                    tick_index += 1
 

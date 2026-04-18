@@ -1,0 +1,56 @@
+# -*- coding: utf-8 -*-
+# Classic dataset (topic: time_feeling + recall) — 1000 ticks
+# 用于论文验证维度：
+# - 时间桶（有限桶）在不同 Δt 下的命中分布与双桶赋能趋势
+# - 带参 recall 的触发与 winner 单条约束（后续加入更严格验收）
+
+dataset_id: classic_time_recall_1000_v0
+seed: 20260418
+time_basis: tick
+tick_dt_ms: 100
+
+episodes:
+  - id: ep_warmup
+    tags: [warmup, structure, time]
+    repeat: 4
+    ticks:
+      - text: "你好"
+      - text: "敲门"
+      - empty: true
+      - text: "敲门"
+      - empty: true
+      - text: "嗯"
+
+  # Gap ~0.5s (tick_dt_ms=100 => ~5 ticks)
+  - id: ep_gap_0_5s
+    tags: [time, recall, gap_0_5s]
+    repeat: 50
+    ticks:
+      - text: "敲门"
+      - empty: true
+        repeat: 4
+      - text: "敲门"
+      - empty: true
+
+  # Gap ~3s (tick_dt_ms=100 => ~30 ticks)
+  - id: ep_gap_3s
+    tags: [time, recall, gap_3s]
+    repeat: 10
+    ticks:
+      - text: "敲门"
+      - empty: true
+        repeat: 29
+      - text: "敲门"
+      - empty: true
+
+  # Gap ~10s (tick_dt_ms=100 => ~100 ticks)
+  - id: ep_gap_10s
+    tags: [time, recall, gap_10s]
+    repeat: 3
+    ticks:
+      - text: "敲门"
+      - empty: true
+        repeat: 99
+      - text: "敲门"
+      - empty: true
+
