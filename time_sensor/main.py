@@ -32,6 +32,7 @@ from __future__ import annotations
 import os
 import re
 import time
+import traceback
 from typing import Any
 
 from . import __module_name__, __schema_version__, __version__
@@ -84,8 +85,8 @@ TIME_SENSOR_DEFAULT_CONFIG: dict[str, Any] = {
         {"id": "96t", "label_zh": "约 96 tick", "min_sec": 64.0, "max_sec": 128.0, "center_sec": 96.0},
     ],
     "source_mode": "memory_activation_snapshot",
-    "memory_top_k": 16,
-    "energy_gain_ratio": 0.18,
+    "memory_top_k": 12,
+    "energy_gain_ratio": 0.14,
     # base_energy_source / 时间感受赋能的能量来源口径
     # - total_energy: 使用 MAP 条目的当前总能量（更“粘”，可能导致时间感受每 tick 都持续出现）
     # - last_delta_energy: 使用 MAP 条目的最近增量（更贴近“被重新接触/被赋能”的语义，且更不易形成回忆正反馈）
@@ -93,27 +94,27 @@ TIME_SENSOR_DEFAULT_CONFIG: dict[str, Any] = {
     "energy_key": "ev",  # "ev" (虚能量) or "er" (实能量)
     "min_bucket_energy": 0.02,
     # ---- delayed energization tasks (theory 4.2.8) / 延迟赋能任务表（理论 4.2.8）----
-    "enable_delayed_tasks": False,
+    "enable_delayed_tasks": True,
     "delayed_task_capacity": 48,
-    "delayed_task_register_min_delta_energy": 0.20,
-    "delayed_task_fatigue_ticks": 2,
+    "delayed_task_register_min_delta_energy": 0.30,
+    "delayed_task_fatigue_ticks": 4,
     "delayed_task_fatigue_ms": 800,
     "delayed_task_min_interval_sec": 0.5,
-    "delayed_task_min_interval_ticks": 1,
+    "delayed_task_min_interval_ticks": 2,
     "delayed_task_due_tolerance_sec": 0.15,
     "delayed_task_due_tolerance_ticks": 0,
     "delayed_task_energy_key": "ev",
-    "delayed_task_energy_ratio": 0.80,
+    "delayed_task_energy_ratio": 0.65,
     "delayed_task_energy_min": 0.06,
     "delayed_task_energy_max": 0.85,
     # enable_bucket_nodes / 是否写入“时间桶节点”（桶节点层）
     # Chinese: true 表示把固定数量的时间桶作为稳定 SA 写入状态池，并给其赋能（双桶分配）。
     # English: When true, write stable bucket nodes into StatePool and energize them (dual-bucket distribution).
-    "enable_bucket_nodes": None,
+    "enable_bucket_nodes": False,
     # enable_bind_attribute / 是否执行“时间感受属性绑定”（属性绑定层）
     # Chinese: true 表示把时间感受作为属性刺激元绑定到具体锚点对象上（更贴近“约束/标记”语义）。
     # English: When true, bind time-feeling as an attribute SA to peak target objects for interpretability.
-    "enable_bind_attribute": None,
+    "enable_bind_attribute": True,
     # output_mode / 旧版兼容字段（deprecated）
     # - bucket_nodes: 仅写入时间桶节点
     # - bind_attribute: 仅执行属性绑定
@@ -171,6 +172,29 @@ class TimeSensor:
         except Exception:
             pass
 
+    def clear_runtime_state(self, trace_id: str = "", reason: str = "runtime_reset") -> dict[str, Any]:
+        start = time.time()
+        result = {
+            "cleared_delayed_task_count": len(self._delayed_tasks),
+            "cleared_task_fatigue_tick_count": len(self._task_fatigue_until_tick),
+            "cleared_task_fatigue_ms_count": len(self._task_fatigue_until_ms),
+            "had_last_tick_report": self._last_tick_report is not None,
+            "tick_counter_before": int(self._tick_counter),
+        }
+        self._tick_counter = 0
+        self._last_tick_report = None
+        self._delayed_tasks.clear()
+        self._task_fatigue_until_tick.clear()
+        self._task_fatigue_until_ms.clear()
+        return self._make_response(
+            True,
+            "OK",
+            f"时间感受器运行态已清空 / Time sensor runtime cleared ({reason})",
+            data=result,
+            trace_id=trace_id,
+            elapsed_ms=self._elapsed_ms(start),
+        )
+
     def _build_config(self, config_override: dict | None = None) -> dict[str, Any]:
         config = dict(TIME_SENSOR_DEFAULT_CONFIG)
         config.update(_load_yaml_config(self._config_path))
@@ -178,21 +202,99 @@ class TimeSensor:
             config.update(config_override)
         return config
 
-    def reload_config(self, trace_id: str = "") -> dict[str, Any]:
+    def reload_config(
+        self,
+        trace_id: str = "",
+        config_path: str | None = None,
+        apply_partial: bool = True,
+    ) -> dict[str, Any]:
+        """
+        热加载配置（支持 partial patch）
+
+        说明:
+        - 自适应调参器（AutoTuner）需要在不修改仓库追踪配置文件的情况下，
+          通过临时 patch 文件热更新 TimeSensor 的少量参数。
+        - 因此这里提供与其它模块一致的 reload_config 接口:
+            reload_config(trace_id, config_path=None, apply_partial=True)
+          其中 config_path 允许指向一个只包含少量键的 YAML patch。
+        """
         start = time.time()
-        self._config = self._build_config(config_override=None)
-        self._logger.update_config(
-            log_dir=str(self._config.get("log_dir", "")),
-            max_file_bytes=int(self._config.get("log_max_file_bytes", 0) or 0),
-        )
-        return self._make_response(
-            True,
-            "OK",
-            "时间感受器配置已重载 / Time sensor config reloaded",
-            data={"config_path": self._config_path, "enabled": bool(self._config.get("enabled", True))},
-            trace_id=trace_id,
-            elapsed_ms=self._elapsed_ms(start),
-        )
+        path = str(config_path or self._config_path)
+        try:
+            new_raw = _load_yaml_config(path)
+            if not new_raw:
+                return self._make_response(
+                    False,
+                    "CONFIG_ERROR",
+                    f"配置文件加载失败或为空 / Config file failed to load or empty: {path}",
+                    data={},
+                    trace_id=trace_id,
+                    elapsed_ms=self._elapsed_ms(start),
+                )
+
+            applied: list[str] = []
+            rejected: list[dict[str, Any]] = []
+            for key, val in new_raw.items():
+                if key not in TIME_SENSOR_DEFAULT_CONFIG:
+                    rejected.append({"key": key, "reason": "未知配置项 / Unknown config key"})
+                    continue
+                expected_type = type(TIME_SENSOR_DEFAULT_CONFIG[key])
+                if isinstance(val, expected_type) or (expected_type is float and isinstance(val, (int, float))):
+                    self._config[key] = val
+                    applied.append(str(key))
+                else:
+                    rejected.append(
+                        {
+                            "key": key,
+                            "reason": f"类型不匹配 / Type mismatch: expected {expected_type.__name__}, got {type(val).__name__}",
+                        }
+                    )
+
+            self._logger.update_config(
+                log_dir=str(self._config.get("log_dir", "")),
+                max_file_bytes=int(self._config.get("log_max_file_bytes", 0) or 0),
+            )
+
+            if rejected and not apply_partial:
+                return self._make_response(
+                    False,
+                    "CONFIG_ERROR",
+                    f"部分配置项被拒绝 / Some config items rejected: {len(rejected)}",
+                    data={"applied": applied, "rejected": rejected},
+                    trace_id=trace_id,
+                    elapsed_ms=self._elapsed_ms(start),
+                )
+
+            return self._make_response(
+                True,
+                "OK",
+                f"热加载完成 / Hot reload done: {len(applied)} applied, {len(rejected)} rejected",
+                data={
+                    "config_path": path,
+                    "enabled": bool(self._config.get("enabled", True)),
+                    "applied": applied,
+                    "rejected": rejected,
+                },
+                trace_id=trace_id,
+                elapsed_ms=self._elapsed_ms(start),
+            )
+        except Exception as exc:
+            self._logger.error(
+                trace_id=trace_id,
+                tick_id="",
+                interface="reload_config",
+                code="CONFIG_ERROR",
+                message=f"热加载异常 / Hot reload exception: {exc}",
+                detail={"traceback": traceback.format_exc()},
+            )
+            return self._make_response(
+                False,
+                "CONFIG_ERROR",
+                f"热加载失败 / Hot reload failed: {exc}",
+                data={},
+                trace_id=trace_id,
+                elapsed_ms=self._elapsed_ms(start),
+            )
 
     def get_runtime_snapshot(self, trace_id: str = "") -> dict[str, Any]:
         return self._make_response(

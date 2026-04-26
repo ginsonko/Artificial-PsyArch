@@ -1,13 +1,13 @@
 ﻿# -*- coding: utf-8 -*-
 """
-AP 原型观测台（Observatory）应用
+# sanitized
 =============================
 
-本模块是原型测试与可视化的“入口壳层”：
-  - 提供 web/终端两种运行方式
-  - 驱动一次 Tick（认知滴答）闭环
-  - 汇总并导出报告（HTML/JSON）
-  - 提供配置编辑、热加载，以及先天规则编辑/校验/模拟接口
+# sanitized
+  # sanitized
+  # sanitized
+  # sanitized
+  # sanitized
 
 English (short):
   Local observatory application for AP prototype testing and monitoring.
@@ -15,6 +15,7 @@ English (short):
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import shlex
@@ -29,7 +30,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from attention import AttentionFilter
 from attention.main import _DEFAULT_CONFIG as ATTENTION_DEFAULT_CONFIG
 from cognitive_feeling import CognitiveFeelingSystem
+from cognitive_stitching import CognitiveStitchingEngine
 from cognitive_feeling.main import _DEFAULT_CONFIG as CFS_DEFAULT_CONFIG
+from cognitive_stitching.main import _DEFAULT_CONFIG as COGNITIVE_STITCHING_DEFAULT_CONFIG
 from emotion import EmotionManager
 from emotion.main import _DEFAULT_CONFIG as EMOTION_DEFAULT_CONFIG
 from hdb import HDB
@@ -75,9 +78,9 @@ DEFAULT_CONFIG = {
     "attention_stub_consume_energy": True,
     "attention_memory_energy_ratio": 0.5,
     "snapshot_top_k": 24,
-    # cfs_source_mode / 认知感受信号（CFS）来源模式
-    # - iesm: 由 IESM 规则（phase=cfs）生成（推荐，可观测/可编辑）
-    # - legacy: 由旧版 CFS 模块生成（过渡/对照）
+    # sanitized
+    # sanitized
+    # sanitized
     "cfs_source_mode": "iesm",
     "export_html": True,
     "export_json": True,
@@ -96,245 +99,21 @@ DEFAULT_CONFIG = {
     "state_pool_enable_placeholder_interfaces": False,
     "state_pool_enable_script_broadcast": False,
     "hdb_enable_background_repair": True,
+    "input_chunking_enabled": True,
+    "input_chunk_soft_limit": 12,
+    "input_chunk_hard_limit": 20,
+    "projection_fatigue_enabled": True,
+    "projection_fatigue_decay": 0.82,
+    "projection_fatigue_step": 0.28,
+    "projection_fatigue_min_effective_ev": 0.03,
+    "projection_fatigue_min_effective_er": 0.03,
 }
 
 OBSERVATORY_CONFIG_SCHEMA = {
-    "title": "观测台",
-    "description": "控制前端观测台自身的启动模式、导出与历史记录。",
-    "groups": [
-        {
-            "title": "基础",
-            "fields": {
-                "attention_top_n": "Top-N 占位注意力大小。",
-                "attention_stub_consume_energy": "形成注意记忆体时是否从状态池真实扣减能量。",
-                "attention_memory_energy_ratio": "形成注意记忆体时，从入选对象抽取的能量比例。",
-                "snapshot_top_k": "默认展示的状态池对象数量。",
-                "cfs_source_mode": "认知感受信号（CFS）来源模式：iesm（推荐，规则化）/ legacy（旧版硬编码对照）。",
-                "history_limit": "前端最近轮次历史保留数量。",
-                "export_html": "是否导出 HTML 报告。",
-                "export_json": "是否导出 JSON 报告。",
-                "auto_open_html_report": "每轮完成后是否自动打开 HTML 报告。",
-            },
-        },
-        {
-            "title": "Web 启动",
-            "fields": {
-                "default_launch_mode": "默认启动模式，建议使用 web。",
-                "web_host": "本地 Web 服务监听地址。",
-                "web_port": "本地 Web 服务端口。",
-                "web_auto_open_browser": "启动 Web 观测台时是否自动打开浏览器。",
-            },
-        },
-        {
-            "title": "运行时覆盖",
-            "fields": {
-                "sensor_default_mode": "观测台启动时覆盖 TextSensor 的默认模式。",
-                "sensor_tokenizer_backend": "观测台启动时覆盖分词后端。",
-                "sensor_enable_token_output": "观测台启动时是否强制输出 token SA。",
-                "sensor_enable_char_output": "观测台启动时是否强制输出字符级 SA。",
-                "sensor_enable_echo": "观测台启动时是否强制启用 echo。",
-                "sensor_include_echoes_in_packet": "观测台启动时是否强制把 echo 混入 stimulus_packet。",
-                "state_pool_enable_placeholder_interfaces": "观测台启动时是否启用状态池占位接口。",
-                "state_pool_enable_script_broadcast": "观测台启动时是否启用脚本广播。",
-                "hdb_enable_background_repair": "观测台启动时是否允许 HDB 后台修复。",
-            },
-        },
-    ],
+    "title": "Observatory Config",
+    "description": "Configuration schema for the observatory prototype.",
+    "groups": [],
 }
-
-TEXT_SENSOR_CONFIG_SCHEMA = {
-    "title": "文本感受器",
-    "description": "控制分词、重要性评分、残响与输入刺激生成策略。",
-    "groups": [
-        {
-            "title": "输入模式",
-            "fields": {
-                "default_mode": "默认切分模式：simple / advanced / hybrid。",
-                "enable_char_output": "是否输出字符级 SA。",
-                "enable_token_output": "是否输出词元级 SA。",
-                "enable_csa_output": "是否输出 CSA。",
-                "tokenizer_backend": "分词器后端。",
-                "tokenizer_fallback_to_char": "分词失败时是否回退到字符级。",
-            },
-        },
-        {
-            "title": "刺激量",
-            "fields": {
-                "char_base_er": "字符基础实能量。",
-                "token_base_er": "词元基础实能量。",
-                "enable_stimulus_intensity_attribute_sa": "是否生成 stimulus_intensity 数值属性刺激元（属性 SA）。默认关闭以提升可读性。",
-                "attribute_er_ratio": "属性 SA 的 ER 比例。",
-                "attribute_ev_ratio": "属性 SA 的 EV 比例。",
-            },
-        },
-        {
-            "title": "残响",
-            "fields": {
-                "enable_echo": "是否启用 echo 残响。",
-                "echo_decay_mode": "残响衰减模式。",
-                "echo_round_decay_factor": "轮次衰减因子。",
-                "echo_min_energy_threshold": "低于该阈值的残响被淘汰。",
-                "echo_pool_max_frames": "残响池最大帧数。",
-                "include_echoes_in_stimulus_packet_objects": "是否将历史 echo 混入 stimulus_packet。",
-            },
-        },
-        {
-            "title": "刺激疲劳",
-            "fields": {
-                "enable_stimulus_fatigue": "是否启用重复输入的刺激疲劳。",
-                "stimulus_fatigue_window_rounds": "刺激疲劳统计窗口轮次。",
-                "stimulus_fatigue_threshold_count": "窗口内出现次数达到该值后开始疲劳。",
-                "stimulus_fatigue_max_suppression": "刺激疲劳的最大 ER 抑制比例。",
-            },
-        },
-    ],
-}
-
-STATE_POOL_CONFIG_SCHEMA = {
-    "title": "状态池",
-    "description": "控制运行态对象的衰减、中和、合并、淘汰与广播。",
-    "groups": [
-        {
-            "title": "容量与衰减",
-            "fields": {
-                "pool_max_items": "状态池对象总上限。",
-                "default_er_decay_ratio": "每 Tick ER 衰减比例。",
-                "default_ev_decay_ratio": "每 Tick EV 衰减比例。",
-                "er_elimination_threshold": "ER 淘汰阈值。",
-                "ev_elimination_threshold": "EV 淘汰阈值。",
-            },
-        },
-        {
-            "title": "近因增益与疲劳",
-            "fields": {
-                "recency_gain_peak": "新建或重新激活时写入的近因峰值；默认配置为 10x。",
-                "recency_gain_hold_ticks": "近因增益在峰值段保持的 Tick 数。",
-                "recency_gain_decay_ratio": "保持期后每 Tick 的近因增益保留系数；默认值约对应 10x 在 100 万 Tick 量级回到 1x。",
-                "fatigue_window_ticks": "统计短时重复激活的疲劳窗口。",
-                "fatigue_threshold_count": "窗口内激活次数达到该值后开始疲劳。",
-                "fatigue_max_value": "状态池运行疲劳的上限。",
-            },
-        },
-        {
-            "title": "中和与合并",
-            "fields": {
-                "enable_neutralization": "是否启用中和逻辑。",
-                "neutralization_mode": "中和模式。",
-                "merge_duplicate_items": "是否合并重复对象。",
-                "enable_semantic_same_object_merge": "是否启用语义同一对象合并。",
-                "aggregate_same_semantic_incoming_objects": "同包内语义同一对象是否先聚合。",
-            },
-        },
-        {
-            "title": "广播与占位",
-            "fields": {
-                "enable_script_broadcast": "是否广播状态变化到脚本占位接口。",
-                "enable_placeholder_interfaces": "是否启用各类占位接口。",
-            },
-        },
-    ],
-}
-
-HDB_CONFIG_SCHEMA = {
-    "title": "HDB",
-    "description": "控制结构级与刺激级查存、赋能、指针 fallback、自检与修复。",
-    "groups": [
-        {
-            "title": "查存一体",
-            "fields": {
-                "stimulus_level_max_rounds": "刺激级查存最大轮次。",
-                "structure_level_max_rounds": "结构级查存最大轮次。",
-                "top_n_attention_stub_default": "Top-N 占位默认大小。",
-                "stimulus_match_transfer_ratio": "刺激级命中后，从被覆盖刺激转移到结构的能量比例。",
-                "stimulus_residual_min_energy": "剩余刺激总能量低于该值时停止下一轮刺激级查存。",
-                "min_cut_common_length": "最小共同切割长度。",
-                "diff_table_soft_limit": "diff_table 软上限。",
-                "group_table_soft_limit": "group_table 软上限。",
-            },
-        },
-        {
-            "title": "感应赋能",
-            "fields": {
-                "ev_propagation_threshold": "虚能量传播阈值。",
-                "er_induction_threshold": "实能量诱发阈值。",
-                "ev_propagation_ratio": "EV 传播预算比例。",
-                "er_induction_ratio": "ER 诱发预算比例。",
-                "induction_target_top_k": "赋能目标 Top-K。",
-                "memory_activation_decay_round_ratio_ev": "记忆赋能池每轮 EV 衰减比例。",
-                "memory_activation_prune_threshold_ev": "记忆赋能池裁剪阈值。",
-                "memory_activation_event_history_limit": "每个记忆赋能条目保留的事件历史数量。",
-            },
-        },
-        {
-            "title": "权重与保护",
-            "fields": {
-                "base_weight_er_gain": "实验证增强基础权重。",
-                "base_weight_ev_wear": "虚循环磨损基础权重。",
-                "recency_gain_boost": "近因增益提升量。",
-                "recency_gain_peak": "近因增益峰值上限；默认配置为 10x。",
-                "recency_gain_hold_rounds": "近因峰值保持的轮数。",
-                "recency_gain_refresh_floor": "弱命中刷新近因时使用的最低强度地板。",
-                "recency_gain_decay_ratio": "按轮次衰减时的近因保留系数；默认值约对应 10x 在 100 万 Tick 量级回到 1x。",
-                "fatigue_cap": "疲劳上限。",
-                "fatigue_increase_per_match": "每次命中增加的疲劳。",
-                "fatigue_decay_per_tick": "每 Tick 的疲劳保留系数。",
-                "enable_pointer_fallback": "是否启用指针 fallback。",
-                "fallback_lookup_max_candidates": "fallback 候选上限。",
-            },
-        },
-        {
-            "title": "修复治理",
-            "fields": {
-                "self_check_default_scope": "默认自检范围。",
-                "repair_batch_limit": "每批修复处理上限。",
-                "repair_sleep_ms_between_batches": "修复批次间休眠。",
-                "allow_delete_unrecoverable": "是否允许删除不可恢复数据。",
-                "enable_background_repair": "是否启用后台修复。",
-            },
-        },
-    ],
-}
-
-
-def _parse_simple_yaml_scalar(raw: str) -> Any:
-    text = raw.strip()
-    if not text:
-        return ""
-    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"\"", "'"}:
-        return text[1:-1]
-    lowered = text.lower()
-    if lowered in {"true", "false"}:
-        return lowered == "true"
-    if lowered in {"null", "none", "~"}:
-        return None
-    try:
-        if any(marker in text for marker in (".", "e", "E")):
-            return float(text)
-        return int(text)
-    except ValueError:
-        return text
-
-
-def _load_simple_yaml_config(path: str) -> dict:
-    if not os.path.exists(path):
-        return {}
-    data: dict[str, Any] = {}
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            for raw_line in fh:
-                line = raw_line.strip()
-                if not line or line.startswith("#") or ":" not in raw_line:
-                    continue
-                key, raw_value = raw_line.split(":", 1)
-                key = key.strip()
-                if not key:
-                    continue
-                value_text = raw_value.split("#", 1)[0].strip()
-                data[key] = _parse_simple_yaml_scalar(value_text)
-    except Exception:
-        return {}
-    return data
-
 
 def _load_yaml_config(path: str) -> dict:
     return load_yaml_dict(path)
@@ -403,8 +182,8 @@ class ObservatoryApp:
         self.sensor = TextSensor(
             config_override=self._sensor_config_override()
         )
-        # 时间感受器（Time Sensor）
-        # 对齐理论 4.2.6~4.2.8：生成“时间桶节点”，供 IESM 规则触发回忆等行动。
+        # sanitized
+        # sanitized
         self.time_sensor = TimeSensor()
         self.pool = StatePool(
             config_override=self._state_pool_config_override()
@@ -414,28 +193,34 @@ class ObservatoryApp:
             config_override=self._attention_config_override()
         )
         self.cfs = CognitiveFeelingSystem()
+        self.cognitive_stitching = CognitiveStitchingEngine()
         self.emotion = EmotionManager()
         self.iesm = InnateScriptManager()
-        # Step 9 行动管理模块（Action/Drive, 驱动力）
-        # 注意：行动模块不是“直接回答”，而是对齐理论中的 Drive 竞争与消耗机制，
-        # 用于把注意力聚焦/发散/回忆等“内在行动器”纳入可解释闭环。
+        # sanitized
+        # sanitized
+        # sanitized
         self.action = ActionManager()
-        # 实虚能量平衡控制器（EBC）
-        # 对齐你提出的“ER:EV 是否可稳定收敛到 1:1”的验收需求：
-        # - 这是一个可插拔闭环模块，默认可关闭；
-        # - 它读取本 tick 的全局 ER_total/EV_total，并输出下一 tick 的 HDB 调制 scale；
-        # - scale 会与 EMgr/Action 的 scale 以“相乘”的方式合并（不是互相覆盖）。
+        # sanitized
+        # sanitized
+        # sanitized
+        # sanitized
+        # sanitized
         self.energy_balance = EnergyBalanceController()
-        self.cut_engine = CutEngine()
+        self.cut_engine = CutEngine(config=self._cut_engine_config_override())
         self.tick_counter = 0
         self._last_report: dict[str, Any] | None = None
         self._report_history: list[dict[str, Any]] = []
         self._started_at = int(time.time() * 1000)
         self._pending_focus_directives: list[dict[str, Any]] = []
         self._last_modulation: dict[str, Any] = {}
-        # HDB 基准配置快照（用于“情绪调制 -> HDB 参数”时避免累计漂移）
-        # 说明：每 tick 会按该基准值 * scale 计算 effective 配置值。
+        self._pending_external_text_chunks: list[str] = []
+        self._current_external_source_text: str = ""
+        self._projection_fatigue: dict[str, float] = {}
+        # sanitized
+        # sanitized
         self._hdb_config_base: dict[str, Any] = dict(self.hdb._config)
+        self.cut_engine.update_config(self._cut_engine_config_override())
+        self.cut_engine.update_config(self._cut_engine_config_override())
         self._silence_jieba_logs()
 
     def close(self) -> None:
@@ -445,10 +230,95 @@ class ObservatoryApp:
         self.hdb.close()
         self.attention.close()
         self.cfs.close()
+        self.cognitive_stitching.close()
         self.emotion.close()
         self.iesm.close()
         self.action.close()
         self.energy_balance.close()
+
+    def _split_input_text_for_ticks(self, text: str) -> list[str]:
+        raw = str(text or "")
+        if not raw:
+            return []
+        if not bool(self._config.get("input_chunking_enabled", True)):
+            return [raw]
+        soft_limit = max(4, int(self._config.get("input_chunk_soft_limit", 12) or 12))
+        hard_limit = max(soft_limit, int(self._config.get("input_chunk_hard_limit", 20) or 20))
+        chunks: list[str] = []
+        current = ""
+        natural_breaks = set("。！？!?；;，,、\n\r")
+        for ch in raw:
+            current += ch
+            if len(current) >= hard_limit:
+                chunks.append(current)
+                current = ""
+                continue
+            if len(current) >= soft_limit and ch in natural_breaks:
+                chunks.append(current)
+                current = ""
+        if current:
+            chunks.append(current)
+        return [c for c in chunks if str(c).strip()]
+
+    def _enqueue_external_text(self, text: str) -> list[str]:
+        chunks = self._split_input_text_for_ticks(text)
+        if chunks:
+            self._current_external_source_text = str(text or "")
+        self._pending_external_text_chunks.extend(chunks)
+        return chunks
+
+    def _dequeue_external_text_for_tick(self) -> str | None:
+        if not self._pending_external_text_chunks:
+            self._current_external_source_text = ""
+            return None
+        chunk = self._pending_external_text_chunks.pop(0)
+        if not self._pending_external_text_chunks:
+            # Keep source text visible for the current tick; clear on next empty dequeue.
+            pass
+        return chunk
+
+    def _decay_projection_fatigue(self) -> None:
+        decay = max(0.0, min(1.0, float(self._config.get("projection_fatigue_decay", 0.82) or 0.82)))
+        next_state: dict[str, float] = {}
+        for key, value in self._projection_fatigue.items():
+            v = max(0.0, float(value) * decay)
+            if v >= 1e-6:
+                next_state[key] = v
+        self._projection_fatigue = next_state
+
+    def _projection_fatigue_key(self, item: dict) -> str:
+        projection_kind = str(item.get("projection_kind", "structure") or "structure")
+        memory_id = str(item.get("memory_id", "") or "")
+        structure_id = str(item.get("structure_id", item.get("target_structure_id", "")) or "")
+        backing_structure_id = str(item.get("backing_structure_id", "") or "")
+        display_text = str(item.get("display_text", item.get("grouped_display_text", "")) or "").strip()
+        reason = str(item.get("reason", "") or "")
+        stable_ref = backing_structure_id or structure_id or display_text or memory_id
+        return "|".join([projection_kind, stable_ref, reason])
+
+    def _apply_projection_fatigue_to_item(self, item: dict) -> dict | None:
+        if not bool(self._config.get("projection_fatigue_enabled", True)):
+            return dict(item)
+        key = self._projection_fatigue_key(item)
+        fatigue = max(0.0, float(self._projection_fatigue.get(key, 0.0) or 0.0))
+        effective = dict(item)
+        effective_er = max(0.0, float(item.get("er", 0.0) or 0.0)) / (1.0 + fatigue)
+        effective_ev = max(0.0, float(item.get("ev", 0.0) or 0.0)) / (1.0 + fatigue)
+        effective["er"] = round(float(effective_er), 8)
+        effective["ev"] = round(float(effective_ev), 8)
+        effective["projection_fatigue"] = round(float(fatigue), 8)
+        min_er = max(0.0, float(self._config.get("projection_fatigue_min_effective_er", 0.03) or 0.03))
+        min_ev = max(0.0, float(self._config.get("projection_fatigue_min_effective_ev", 0.03) or 0.03))
+        if effective_er < min_er and effective_ev < min_ev:
+            return None
+        return effective
+
+    def _mark_projection_fatigue(self, item: dict) -> None:
+        if not bool(self._config.get("projection_fatigue_enabled", True)):
+            return
+        key = self._projection_fatigue_key(item)
+        step = max(0.0, float(self._config.get("projection_fatigue_step", 0.28) or 0.28))
+        self._projection_fatigue[key] = round(float(self._projection_fatigue.get(key, 0.0) or 0.0) + step, 8)
 
     def next_trace(self, prefix: str = "cycle") -> str:
         self.tick_counter += 1
@@ -461,15 +331,16 @@ class ObservatoryApp:
     def run_cycle(self, text: str | None = None, *, labels: dict[str, Any] | None = None) -> dict:
         trace_id = self.next_trace("cycle")
         tick_id = trace_id
-        # Timing / 耗时统计（用于“找茬式验收”与性能排查）
-        # - 只做观测，不影响逻辑。
-        # - 统计口径：ms（毫秒）
+        self._decay_projection_fatigue()
+        # sanitized
+        # sanitized
+        # sanitized
         cycle_t0 = time.perf_counter()
         timing_steps_ms: dict[str, int] = {}
         report: dict[str, Any] = {
             "trace_id": trace_id,
-            # tick_id：用于跨模块/前端对齐“本轮 tick”的统一标识。
-            # 说明：当前原型里 tick_id 与 trace_id 一致，但仍保留字段，便于未来做并行/多子流程时扩展。
+            # sanitized
+            # sanitized
             "tick_id": tick_id,
             "started_at": int(time.time() * 1000),
             "observatory": {
@@ -480,32 +351,53 @@ class ObservatoryApp:
         }
 
         # Optional per-tick labels (experiment/teacher signals).
-        # 说明：
-        # - 默认 None，不影响原有观测台调用口径；
-        # - 实验跑批可通过 labels 注入“教师信号/外置奖惩/离线评估标签”等。
+        # sanitized
+        # sanitized
+        # sanitized
         tick_labels = labels if isinstance(labels, dict) else {}
         report["tick_labels"] = dict(tick_labels) if tick_labels else {}
 
         external_packet = None
         sensor_result = None
-        if text is not None:
+        queued_chunks: list[str] = []
+        if text is not None and str(text).strip():
+            queued_chunks = self._enqueue_external_text(str(text))
+        tick_text = self._dequeue_external_text_for_tick()
+        report["input_queue"] = {
+            "queued_from_new_input_count": len(queued_chunks),
+            "pending_count_after_dequeue": len(self._pending_external_text_chunks),
+            "tick_text": tick_text or "",
+            "source_text": str(self._current_external_source_text or ""),
+            "queued_preview": queued_chunks[:8],
+        }
+        if tick_text is not None:
             t0 = time.perf_counter()
-            sensor_result = self.sensor.ingest_text(text=text, trace_id=trace_id, tick_id=tick_id)
-            # 注意：文本感受器可能因输入校验失败而返回 success=False（例如空字符串）。
-            # 为了让“空输入”也能作为一个 tick 被观测与验收，这里做防御式处理：
-            # - 传感器成功：取出 stimulus_packet 作为 external_packet
-            # - 传感器失败：external_packet 置空，后续按“空 Tick”继续跑闭环，但 report 会保留错误信息
+            sensor_result = self.sensor.ingest_text(text=tick_text, trace_id=trace_id, tick_id=tick_id)
+            # sanitized
+            # sanitized
+            # sanitized
+            # sanitized
             try:
                 if isinstance(sensor_result, dict) and bool(sensor_result.get("success", False)):
                     data = sensor_result.get("data", {}) if isinstance(sensor_result.get("data", {}), dict) else {}
                     if isinstance(data.get("stimulus_packet"), dict):
-                        external_packet = data.get("stimulus_packet")
+                        external_packet = copy.deepcopy(data.get("stimulus_packet"))
             except Exception:
                 external_packet = None
-            report["sensor"] = self._build_sensor_report(text, sensor_result)
+            report["sensor"] = self._build_sensor_report(tick_text, sensor_result)
             timing_steps_ms["sensor_ms"] = int((time.perf_counter() - t0) * 1000)
         else:
-            report["sensor"] = {}
+            report["sensor"] = {
+                "success": False,
+                "code": "INPUT_VALIDATION_ERROR",
+                "message": "当前 tick 没有可供文本感受器处理的输入。",
+                "input_text": "",
+                "feature_sa_count": 0,
+                "attribute_sa_count": 0,
+                "csa_bundle_count": 0,
+                "echo_pool_size": int(getattr(self.sensor, "_echo_pool_size", 0) or 0) if getattr(self, "sensor", None) is not None else 0,
+                "echo_current_round": int(getattr(self.sensor, "_echo_current_round", 0) or 0) if getattr(self, "sensor", None) is not None else 0,
+            }
             timing_steps_ms["sensor_ms"] = 0
 
         t0 = time.perf_counter()
@@ -542,7 +434,7 @@ class ObservatoryApp:
             },
         }
 
-        # 上一 tick 的调制/聚焦指令输入（本 tick 生效）
+        # sanitized
         modulation_in = self._last_modulation.get("attention", {}) if isinstance(self._last_modulation, dict) else {}
         focus_directives_in: list[dict[str, Any]] = []
         for directive in self._pending_focus_directives:
@@ -556,8 +448,8 @@ class ObservatoryApp:
             "focus_directives": [dict(item) for item in focus_directives_in[:16]],
         }
 
-        # HDB 调制输入（上一 tick 生效到本 tick）
-        # 对齐理论 3.9.2：情绪递质不仅调制注意力，也应调制学习力度与能量传播系数等 HDB 参数。
+        # sanitized
+        # sanitized
         hdb_mod_in = self._last_modulation.get("hdb", {}) if isinstance(self._last_modulation, dict) else {}
         hdb_mod_apply = self._apply_hdb_modulation_for_tick(
             modulation=hdb_mod_in if isinstance(hdb_mod_in, dict) else {},
@@ -577,7 +469,7 @@ class ObservatoryApp:
         report["attention"] = attention_report
         timing_steps_ms["attention_ms"] = int((time.perf_counter() - t0) * 1000)
 
-        # 指令衰减：被消费过的 focus directives TTL-1（新生成指令在本 tick 末尾加入）
+        # sanitized
         decayed: list[dict[str, Any]] = []
         for directive in self._pending_focus_directives:
             if not isinstance(directive, dict):
@@ -594,28 +486,53 @@ class ObservatoryApp:
             state_snapshot=attention_snapshot,
             trace_id=trace_id,
             tick_id=tick_id,
-            # 结构级输入应以“当前 CAM（注意力记忆体）快照”为准，而不是固化配置的 Top-N。
-            # 这里把 top_n 作为安全上限：默认使用 CAM 内结构数量（ST count）。
+            # sanitized
+            # sanitized
             attention_mode="cam_snapshot",
             top_n=max(
                 1,
                 sum(1 for it in (attention_snapshot.get("top_items", []) or []) if str(it.get("ref_object_type", "")) == "st"),
             ),
+            enable_storage=bool(self._config.get("enable_structure_level_retrieval_storage", False)),
+            max_rounds=(None if bool(self._config.get("enable_structure_level_retrieval_storage", False)) else 0),
         )
-        structure_data = structure_result["data"]
+        structure_data = (structure_result.get("data", {}) or {}) if isinstance(structure_result, dict) else {}
+        internal_fragments = list(structure_data.get("internal_stimulus_fragments", []) or [])
+        if (not internal_fragments) and (not bool(self._config.get("enable_structure_level_retrieval_storage", False))):
+            try:
+                cam_only = self.hdb._structure_retrieval._run_cam_internal_stimulus_only(
+                    items=list((attention_snapshot or {}).get("top_items", []) or []),
+                    trace_id=trace_id,
+                    tick_id=tick_id,
+                    cut_engine=self.cut_engine,
+                )
+                if isinstance(cam_only, dict):
+                    internal_fragments = list(cam_only.get("internal_stimulus_fragments", []) or [])
+                    if internal_fragments:
+                        structure_data["internal_stimulus_fragments"] = internal_fragments
+                        structure_data["internal_resolution"] = dict(cam_only.get("internal_resolution", {}) or {})
+                        structure_data.setdefault("debug", {})
+                        if isinstance(structure_data.get("debug", {}), dict):
+                            structure_data["debug"]["cam_internal_only"] = dict(cam_only.get("debug", {}) or {})
+            except Exception as exc:
+                structure_data.setdefault("debug", {})
+                if isinstance(structure_data.get("debug", {}), dict):
+                    structure_data["debug"]["cam_internal_only_error"] = str(exc)
         internal_packet = self.hdb.build_internal_stimulus_packet(
-            structure_data.get("internal_stimulus_fragments", []),
+            internal_fragments,
             trace_id=trace_id,
             tick_id=tick_id,
         )
         combined_packet = self.hdb.merge_stimulus_packets(external_packet, internal_packet, trace_id=trace_id, tick_id=tick_id)
         report["structure_level"] = {"result": structure_data}
+        report["internal_stimulus_raw"] = internal_packet
+        report["merged_stimulus_raw"] = combined_packet
         report["merged_stimulus"] = self._describe_stimulus_packet(combined_packet)
         timing_steps_ms["structure_level_ms"] = int((time.perf_counter() - t0) * 1000)
 
         t0 = time.perf_counter()
         structure_bias_projection = self._project_runtime_structures(
-            structure_result["data"].get("bias_projections", []),
+            structure_data.get("bias_projections", []),
             trace_id=trace_id,
             tick_id=tick_id,
         )
@@ -668,6 +585,20 @@ class ObservatoryApp:
         report["pool_apply"]["landed_packet"] = self._describe_stimulus_packet(landed_packet)
         report["pool_apply"]["runtime_projection"] = runtime_projection
         timing_steps_ms["pool_apply_ms"] = int((time.perf_counter() - t0) * 1000)
+
+        t0 = time.perf_counter()
+        try:
+            cs_result = self.cognitive_stitching.run(
+                pool=self.pool,
+                hdb=self.hdb,
+                trace_id=trace_id,
+                tick_id=tick_id,
+            )
+            cs_data = (cs_result.get("data", {}) or {}) if isinstance(cs_result, dict) else {}
+        except Exception as exc:
+            cs_data = {"enabled": bool(self._config.get("enable_cognitive_stitching", False)), "reason": "exception", "error": {"message": str(exc)}}
+        report["cognitive_stitching"] = cs_data
+        timing_steps_ms["cognitive_stitching_ms"] = int((time.perf_counter() - t0) * 1000)
 
         t0 = time.perf_counter()
         induction_snapshot = self.pool.get_state_snapshot(
@@ -729,13 +660,13 @@ class ObservatoryApp:
         timing_steps_ms["induction_and_memory_ms"] = int((time.perf_counter() - t0) * 1000)
 
         # =============================================================== #
-        # Time Sensor（时间感受器）: 生成时间感受（桶节点 + 属性绑定）并写入状态池（SP） #
+        # sanitized
         # =============================================================== #
-        # 对齐理论 4.2.6~4.2.7：
-        # - 当记忆被重新接触（MAP 赋能）时，依据“当前时间戳 - 记忆时间戳”生成时间感受；
-        # - 用有限数量的时间桶承载连续时间尺度（双桶赋能/匹配）；
-        # - 同时可把时间感受作为“属性刺激元”绑定到能量波峰对象上，便于形成结构与解释；
-        # - 后续由 IESM（先天规则）观察“时间桶节点获得能量/变化”并触发回忆行动（recall）。
+        # sanitized
+        # sanitized
+        # sanitized
+        # sanitized
+        # sanitized
         t0 = time.perf_counter()
         try:
             ts_res = self.time_sensor.run_time_feeling_tick(
@@ -752,12 +683,12 @@ class ObservatoryApp:
         timing_steps_ms["time_sensor_ms"] = int((time.perf_counter() - t0) * 1000)
 
         # =============================================================== #
-        # Teacher Feedback（教师信号/外置奖惩）                              #
+        # sanitized
         # =============================================================== #
-        # 说明：
-        # - 用于论文实验与元学习验证：数据集可在每个 tick 附带 labels.teacher_rwd/pun 等字段；
-        # - 教师信号既应进入“状态池可审计的属性绑定”（供记忆材料补全），
-        #   也应进入 EMgr 的 rwd/pun 汇总（供递质通道调制），但不应破坏原有闭环。
+        # sanitized
+        # sanitized
+        # sanitized
+        # sanitized
         t0 = time.perf_counter()
         try:
             report["teacher_feedback"] = self._apply_teacher_feedback(
@@ -771,15 +702,15 @@ class ObservatoryApp:
         timing_steps_ms["teacher_feedback_ms"] = int((time.perf_counter() - t0) * 1000)
 
         # =============================================================== #
-        # Step 7/8/IESM: CFS（认知感受信号）-> IESM（先天规则）-> Emotion    #
+        # sanitized
         # =============================================================== #
-        # 说明：对齐理论（3.10/3.12）中“先天脚本可管理情绪脚本（NT）”的口径。
-        # 因此这里把 IESM（先天规则）放在 EMgr（情绪递质）之前，
-        # 让 emotion_update 能在同一 tick 生效（而不是拖到下一 tick）。
+        # sanitized
+        # sanitized
+        # sanitized
         #
-        # 重要：认知感受信号（CFS）来源可切换（observatory_config.yaml: cfs_source_mode）：
-        # - iesm（推荐）：由 IESM 规则（phase=cfs）生成，规则可观测、可编辑（避免硬编码散落）。
-        # - legacy：沿用旧版 CFS 模块的硬编码计算（仅作为过渡/对照实验）。
+        # sanitized
+        # sanitized
+        # sanitized
 
         cfs_source_mode = str(self._config.get("cfs_source_mode", "iesm") or "iesm").strip().lower() or "iesm"
         t0 = time.perf_counter()
@@ -788,7 +719,7 @@ class ObservatoryApp:
 
         if cfs_source_mode in {"legacy", "module", "cfs"}:
             # Legacy CFS module path (transition / comparison only).
-            # 旧版 CFS 模块路径（仅过渡/对照用）：其内部包含硬编码触发逻辑。
+            # sanitized
             cfs_snapshot = self.pool.get_state_snapshot(
                 trace_id=f"{trace_id}_cfs_snapshot",
                 tick_id=tick_id,
@@ -813,7 +744,7 @@ class ObservatoryApp:
             cfs_signals = list(cfs_data.get("cfs_signals", []) or [])
         else:
             # Preferred path: IESM rules generate CFS signals.
-            # 推荐路径：由 IESM 规则生成认知感受信号（CFS），这里先放一个占位，后面用 IESM 输出回填。
+            # sanitized
             cfs_data = {
                 "cfs_signals": [],
                 "writes": {"runtime_nodes": [], "attribute_bindings": []},
@@ -833,7 +764,7 @@ class ObservatoryApp:
         maint_packet: dict[str, Any] = {}
         apply_packet: dict[str, Any] = {}
         try:
-            # 维护窗口
+            # sanitized
             maint_packet = self.pool._snapshot.build_script_check_packet(
                 events=report.get("maintenance", {}).get("events", []),
                 pool_store=self.pool._store,
@@ -848,7 +779,7 @@ class ObservatoryApp:
             innate_script_report["state_window_checks"].append({"stage": "maintenance", "error": "packet_build_failed"})
 
         try:
-            # 落地窗口（刺激回写）
+            # sanitized
             apply_events = report.get("pool_apply", {}).get("events", [])
             apply_packet = self.pool._snapshot.build_script_check_packet(
                 events=apply_events,
@@ -863,7 +794,7 @@ class ObservatoryApp:
         except Exception:
             innate_script_report["state_window_checks"].append({"stage": "pool_apply", "error": "packet_build_failed"})
 
-        # 构造 IESM 规则引擎所需的运行态上下文（供 metric 条件使用）。
+        # sanitized
         # Build runtime context for IESM metric predicates.
         innate_rules_context = self._build_innate_rules_context(
             report=report,
@@ -874,7 +805,7 @@ class ObservatoryApp:
             tick_id=tick_id,
         )
 
-        # 规则引擎：同时接入 CFS + 两个状态窗口（maintenance / pool_apply），允许组合触发条件（any/all）。
+        # sanitized
         tick_rules_result = self.iesm.run_tick_rules(
             trace_id=trace_id,
             tick_id=tick_id,
@@ -891,8 +822,8 @@ class ObservatoryApp:
         directives = tick_rules_data.get("directives", {}) or {}
 
         # If CFS is sourced from IESM rules, treat directives.cfs_signals as canonical.
-        # 如果认知感受信号来源选择为 IESM（推荐），则以规则引擎输出的 cfs_signals 作为本 tick 的“官方”CFS 列表，
-        # 并回填到 report["cognitive_feeling"]，供后续 EMgr/Action/前端展示使用。
+        # sanitized
+        # sanitized
         if cfs_source_mode not in {"legacy", "module", "cfs"}:
             cfs_signals = list(directives.get("cfs_signals", []) or [])
             report["cognitive_feeling"] = {
@@ -904,7 +835,7 @@ class ObservatoryApp:
         pool_effect_apply = {}
         if pool_effects:
             # Apply pool effects immediately so the same tick can affect later steps/snapshots.
-            # 立即应用状态池效果：让同一 tick 的后续步骤/快照能看到变化。
+            # sanitized
             pool_effect_apply = self._apply_innate_pool_effects(
                 effects=pool_effects,
                 context=innate_rules_context,
@@ -913,8 +844,8 @@ class ObservatoryApp:
             )
 
         # Enrich episodic memory material with runtime-bound attributes (CFS/time-feeling/rwd/pun tags).
-        # 把“运行态绑定属性（CFS/时间感受/奖惩信号等）”补写进本 tick 的情景记忆材料：
-        # - 让属性刺激元能进入记忆并被回忆反哺带回 SP，从而支持“期待/压力”等通道成立。
+        # sanitized
+        # sanitized
         try:
             enrich_res = self._enrich_tick_episodic_memory_with_bound_attributes(report=report, trace_id=trace_id, tick_id=tick_id)
         except Exception as exc:
@@ -926,7 +857,7 @@ class ObservatoryApp:
         except Exception:
             pass
         focus_data = {
-            # 规则引擎输出的“运行态 CFS 信号列表”（包含输入 + 本 tick 新生成）。
+            # sanitized
             # Note: This is the rule-engine output list, not necessarily the legacy CFS module output.
             "cfs_signals": list(directives.get("cfs_signals", []) or []),
             "focus_directives": list(directives.get("focus_directives", []) or []),
@@ -951,12 +882,12 @@ class ObservatoryApp:
         new_directives = list(focus_data.get("focus_directives", []) or [])
         new_action_triggers = list(focus_data.get("action_triggers", []) or [])
         if new_directives:
-            # 说明：在理论中，IESM（先天脚本）应当“触发行动节点”而非直接强制修改注意力。
-            # 因此当行动模块启用时，IESM 的 focus_directives 会作为 Step 9 的行动触发源；
-            # 只有在行动模块禁用时，才直接把指令加入 pending（下一 tick 生效）。
+            # sanitized
+            # sanitized
+            # sanitized
             action_enabled = bool(getattr(self, "action", None) and getattr(self.action, "_config", {}).get("enabled", True))
             if not action_enabled:
-                # 合并到 pending（下一 tick 生效）；按 directive_id 去重
+                # sanitized
                 existing_by_id = {
                     str(item.get("directive_id", "")): item
                     for item in self._pending_focus_directives
@@ -975,13 +906,13 @@ class ObservatoryApp:
         timing_steps_ms["iesm_ms"] = int((time.perf_counter() - t_iesm0) * 1000)
 
         # =============================================================== #
-        # Step 8: EMgr（情绪管理器/递质通道 NT）                            #
+        # sanitized
         # =============================================================== #
-        # 输入：CFS + IESM 的 emotion_update（脚本化增量）
+        # sanitized
         t0 = time.perf_counter()
         # Compute rwd/pun override from the *current* pool (after IESM/time-sensor binding).
-        # 从“当前状态池（已包含时间感受/IESM绑定属性）”计算本 tick 的奖惩汇总，传给 EMgr：
-        # - 这样 EMgr 前端卡片里显示的 rwd/pun 就是“自然汇总”的结果，而不是旧版 CFS 硬映射。
+        # sanitized
+        # sanitized
         rwd_pun_override = None
         try:
             rows = []
@@ -996,7 +927,7 @@ class ObservatoryApp:
             rwd_pun_override = None
 
         # External teacher reward/punish can add on top of pool aggregation.
-        # 外置奖惩注入：在不破坏“池内自然汇总”的前提下，把教师信号作为附加分量叠加进 rwd/pun。
+        # sanitized
         try:
             tfb = report.get("teacher_feedback", {}) if isinstance(report.get("teacher_feedback", {}), dict) else {}
             teacher_rwd = float(tfb.get("teacher_rwd", 0.0) or 0.0)
@@ -1038,19 +969,19 @@ class ObservatoryApp:
         emotion_data = emotion_result.get("data", {}) or {}
         report["emotion"] = emotion_data
         timing_steps_ms["emotion_ms"] = int((time.perf_counter() - t0) * 1000)
-        # 下一 tick 的调制输入（本 tick 末尾确定）：
-        # 先取 EMgr（情绪管理器）的调制，再在 Step 9 叠加行动模块（Action/Drive）输出。
+        # sanitized
+        # sanitized
         next_modulation: dict[str, Any] = dict(emotion_data.get("modulation", {}) or {})
 
         # =============================================================== #
-        # Step 9: Action/Drive（行动模块：驱动力竞争与消耗）                 #
+        # sanitized
         # =============================================================== #
 
-        # 行动模块输入：
-        #  - CFS（认知感受信号）
-        #  - EMgr（情绪递质）输出（用于未来调制 drive/threshold；当前先透传）
-        #  - IESM focus_directives（作为“先天触发源”）
-        #  - MAP（记忆赋能池）快照（用于回忆行动）
+        # sanitized
+        # sanitized
+        # sanitized
+        # sanitized
+        # sanitized
         t0 = time.perf_counter()
         action_result = self.action.run_action_cycle(
             trace_id=trace_id,
@@ -1066,10 +997,10 @@ class ObservatoryApp:
         report["action"] = action_data
         timing_steps_ms["action_ms"] = int((time.perf_counter() - t0) * 1000)
 
-        # Step 9 输出 1：行动模块可生成“下一 tick 生效”的注意力聚焦指令。
+        # sanitized
         focus_directives_out = list(action_data.get("focus_directives_out", []) or [])
         if focus_directives_out:
-            # 合并到 pending（下一 tick 生效）；按 directive_id 去重
+            # sanitized
             existing_by_id = {
                 str(item.get("directive_id", "")): item
                 for item in self._pending_focus_directives
@@ -1084,7 +1015,7 @@ class ObservatoryApp:
                 existing_by_id[did] = directive
             self._pending_focus_directives = list(existing_by_id.values())
 
-        # Step 9 输出 2：行动模块可输出注意力调制（如 top_n），与 EMgr 的调制合并后作为下一 tick 输入。
+        # sanitized
         action_mod_out = action_data.get("modulation_out", {}) or {}
         if isinstance(action_mod_out, dict):
             for key, value in action_mod_out.items():
@@ -1092,21 +1023,21 @@ class ObservatoryApp:
                     next_modulation[key] = {**dict(next_modulation.get(key) or {}), **dict(value)}
                 else:
                     next_modulation[key] = value
-        # 注意：此处先不要立刻写入 self._last_modulation。
-        # 我们会在本 tick 结束时（final snapshot 之后）再叠加 EBC（能量平衡控制器）的输出，
-        # 并一次性写入“下一 tick 的调制包”（避免遗漏与覆盖问题）。
+        # sanitized
+        # sanitized
+        # sanitized
 
         # =============================================================== #
-        # Step 9.5: Recall Side Effects（回忆副作用闭环）                    #
+        # sanitized
         # =============================================================== #
-        # 对齐理论核心 4.2.7.2 回忆流程：
-        # - 回忆行动执行后，应把命中的记忆赋能进入 MAP（记忆赋能池，Memory Activation Pool）
-        # - 并执行默认的记忆反哺（memory_feedback），把记忆内容以结构/刺激元形式投影回 SP（状态池）。
+        # sanitized
+        # sanitized
+        # sanitized
         #
-        # 设计约束：
-        # - ActionManager（行动模块）只输出“recall_requests_out”（结构化请求），不直接操作 HDB/SP，
-        #   这样更可审计、更容易测试，也避免模块之间循环依赖。
-        # - 因此这里由主流程统一执行副作用，并把结果写入 report 供前端观测。
+        # sanitized
+        # sanitized
+        # sanitized
+        # sanitized
         t0 = time.perf_counter()
         recall_requests = [x for x in (action_data.get("recall_requests_out", []) or []) if isinstance(x, dict)]
         recall_apply_results: list[dict[str, Any]] = []
@@ -1128,8 +1059,8 @@ class ObservatoryApp:
             recall_apply_results.append(apply_data)
 
             # NOTE:
-            # - 这里复用主流程的默认记忆反哺逻辑，保证回忆结果能以“可观察的状态池写入”形式出现。
-            # - 如果未来你希望“回忆”只投影结构而不生成 SA/CSA，可在 memory_feedback 侧做更精细的策略配置。
+            # sanitized
+            # sanitized
             fb_data = self._apply_memory_feedback(
                 memory_items=list(apply_data.get("items", []) or []),
                 trace_id=f"{trace_id}_recall_feedback",
@@ -1156,7 +1087,7 @@ class ObservatoryApp:
                 "feedback_results": recall_feedback_results,
                 "memory_snapshot_after": recall_memory_snapshot_after,
             }
-            # 同时把“回忆后”的 MAP 快照也挂到 memory_activation 下面，便于前端对比。
+            # sanitized
             report.setdefault("memory_activation", {})
             report["memory_activation"]["snapshot_after_action"] = recall_memory_snapshot_after
 
@@ -1177,12 +1108,12 @@ class ObservatoryApp:
         timing_steps_ms["final_snapshot_ms"] = int((time.perf_counter() - t0) * 1000)
 
         # =============================================================== #
-        # Step 9.6: Energy Balance Controller（EBC 实虚能量平衡控制器）      #
+        # sanitized
         # =============================================================== #
-        # 目的：回答“系统能否在任意 ER 输入频次下，长期稳定收敛到 EV:ER≈1:1？”的验收问题。
-        # - EBC 读取本 tick 的全局 ER_total/EV_total（最终快照口径）
-        # - 输出下一 tick 的 HDB scale（如 ev_propagation_ratio_scale / er_induction_ratio_scale）
-        # - 与 EMgr/Action 的 HDB scale 以“相乘”方式合并（避免互相覆盖）
+        # sanitized
+        # sanitized
+        # sanitized
+        # sanitized
         t0 = time.perf_counter()
         ebc_data: dict[str, Any] = {}
         try:
@@ -1204,7 +1135,7 @@ class ObservatoryApp:
         timing_steps_ms["energy_balance_ms"] = int((time.perf_counter() - t0) * 1000)
 
         # Merge EBC HDB scales into next_modulation (multiplicative).
-        # 把 EBC 的 HDB scales 合并进 next_modulation（相乘合并，避免覆盖）。
+        # sanitized
         try:
             hdb_scales = ebc_data.get("hdb_scales_out", {}) if isinstance(ebc_data, dict) else {}
             if isinstance(hdb_scales, dict) and hdb_scales:
@@ -1230,10 +1161,10 @@ class ObservatoryApp:
             pass
 
         # Commit the final merged modulation for the next tick.
-        # 最终写入下一 tick 调制包（已包含 Emotion + Action + EBC 的合并结果）。
+        # sanitized
         self._last_modulation = dict(next_modulation)
 
-        # 总耗时（不含导出）：让导出的 JSON/HTML 报告也能携带“过程耗时”信息，便于找性能问题。
+        # sanitized
         total_logic_ms = int((time.perf_counter() - cycle_t0) * 1000)
         timing_steps_ms["total_logic_ms"] = int(total_logic_ms)
         report["timing"] = {
@@ -1278,7 +1209,7 @@ class ObservatoryApp:
     def open_report(self, target: str = "latest", *, open_browser: bool = True) -> str:
         html_path = self.output_dir / ("latest.html" if target in {"", "latest"} else f"{target}.html")
         if not html_path.exists():
-            return f"报告不存在 / Report not found: {html_path}"
+            return f"未找到报告 / Report not found: {html_path}"
         opened = False
         if open_browser:
             try:
@@ -1415,7 +1346,7 @@ class ObservatoryApp:
         hdb_snapshot = self.hdb.get_hdb_snapshot(trace_id="dashboard_hdb", top_k=snapshot_top_k)["data"]
         sensor_runtime = self.sensor.get_runtime_snapshot(trace_id="dashboard_sensor")["data"]
         time_sensor_runtime = self.time_sensor.get_runtime_snapshot(trace_id="dashboard_time_sensor")["data"]
-        # EBC runtime snapshot / 实虚能量平衡控制器运行态（用于前端实时展示）
+        # sanitized
         energy_balance_runtime = {}
         try:
             energy_balance_runtime = self.energy_balance.get_runtime_snapshot(trace_id="dashboard_energy_balance")  # type: ignore[attr-defined]
@@ -1456,7 +1387,7 @@ class ObservatoryApp:
     def get_action_runtime_data(self) -> dict[str, Any]:
         """
         Action runtime snapshot for real-time monitoring.
-        行动模块运行态快照：用于前端实时监控“已注册行动器/行动节点/阈值/驱动力”等。
+        # sanitized
         """
         if not getattr(self, "action", None):
             return {"enabled": False, "message": "行动模块未初始化 / action module not initialized", "data": {}}
@@ -1473,7 +1404,7 @@ class ObservatoryApp:
     ) -> dict[str, Any]:
         """
         Stop/cancel action nodes (exposed to Web UI).
-        行动停止/取消接口（供前端观测台调用）。
+        # sanitized
         """
         if not getattr(self, "action", None):
             return {"success": False, "code": "STATE_ERROR", "message": "行动模块未初始化 / action not initialized", "data": {}}
@@ -1550,6 +1481,22 @@ class ObservatoryApp:
         self.sensor.clear_echo_pool(trace_id="cmd_clear_sensor")
         self.pool.clear_state_pool(trace_id="cmd_clear_pool", reason="interactive_reset", operator="researcher")
         result = self.hdb.clear_hdb(trace_id="cmd_clear_all", reason="interactive_reset", operator="researcher")
+        try:
+            self.time_sensor.clear_runtime_state(trace_id="cmd_clear_time_sensor", reason="interactive_reset")
+        except Exception:
+            pass
+        try:
+            self.action.clear_runtime_state(trace_id="cmd_clear_action", reason="interactive_reset")
+        except Exception:
+            pass
+        try:
+            self.attention.clear_runtime_state(trace_id="cmd_clear_attention", reason="interactive_reset")
+        except Exception:
+            pass
+        try:
+            self.cognitive_stitching.clear_runtime_state(trace_id="cmd_clear_cognitive_stitching", reason="interactive_reset")
+        except Exception:
+            pass
         self._last_report = None
         self._report_history = []
         return json.dumps(result["data"], ensure_ascii=False, indent=2)
@@ -1659,11 +1606,22 @@ class ObservatoryApp:
         return config
 
     def _sensor_config_override(self) -> dict[str, Any]:
+        goal_b_char_sa_string_mode = bool(self._config.get("enable_goal_b_char_sa_string_mode", False))
+        default_mode = self._config.get("sensor_default_mode", "advanced")
+        tokenizer_backend = self._config.get("sensor_tokenizer_backend", "jieba")
+        enable_token_output = bool(self._config.get("sensor_enable_token_output", True))
+        enable_char_output = bool(self._config.get("sensor_enable_char_output", False))
+        if goal_b_char_sa_string_mode:
+            default_mode = "simple"
+            tokenizer_backend = "none"
+            enable_token_output = False
+            enable_char_output = True
         return {
-            "default_mode": self._config.get("sensor_default_mode", "advanced"),
-            "tokenizer_backend": self._config.get("sensor_tokenizer_backend", "jieba"),
-            "enable_token_output": bool(self._config.get("sensor_enable_token_output", True)),
-            "enable_char_output": bool(self._config.get("sensor_enable_char_output", False)),
+            "default_mode": default_mode,
+            "tokenizer_backend": tokenizer_backend,
+            "enable_goal_b_char_sa_string_mode": goal_b_char_sa_string_mode,
+            "enable_token_output": enable_token_output,
+            "enable_char_output": enable_char_output,
             "enable_echo": bool(self._config.get("sensor_enable_echo", True)),
             "include_echoes_in_stimulus_packet_objects": bool(self._config.get("sensor_include_echoes_in_packet", True)),
         }
@@ -1677,6 +1635,7 @@ class ObservatoryApp:
     def _hdb_config_override(self) -> dict[str, Any]:
         override = {
             "enable_background_repair": bool(self._config.get("hdb_enable_background_repair", True)),
+            "enable_goal_b_char_sa_string_mode": bool(self._config.get("enable_goal_b_char_sa_string_mode", False)),
         }
         if self._config.get("hdb_data_dir"):
             override["data_dir"] = self._config.get("hdb_data_dir")
@@ -1691,13 +1650,13 @@ class ObservatoryApp:
     ) -> dict[str, Any]:
         """
         Apply HDB modulation scales for the current tick (best-effort).
-        应用本 tick 的 HDB 调制缩放系数（尽力而为，不影响主流程）。
+        # sanitized
 
-        Design / 设计要点：
-        - modulation 来自上一 tick 的 EMgr/Action 输出（self._last_modulation["hdb"]）。
-        - 为避免“缩放累积漂移”，我们会先把目标字段重置回基准值（self._hdb_config_base），
-          然后再按 scale 计算 effective 值。
-        - 返回 applied 详情供前端审计/验收（你可以在观测台直接看到 base/scale/effective）。
+        Design / 闁荤姳鐒﹀畷姗€顢橀崫銉﹀暫濞达絽鎼禒顖炴煥?
+        - modulation 闂佸搫顦崕鎾吹濠婂嫮鈻斿┑鐘辫兌椤?tick 闂?EMgr/Action 闁哄鐗婇幐鎼佸吹椤撱垺鏅柛褏娅漧f._last_modulation["hdb"]闂佹寧绋戦ˇ顓㈠焵?
+        # sanitized
+          闂佺粯甯熷▔娑㈠箖濡ゅ懎绀冪€广儱妫楅惁?scale 闁荤姳绶ょ槐鏇㈡偩?effective 闂佺锕﹂鏇㈠焵?
+        # sanitized
         """
         mod = modulation if isinstance(modulation, dict) else {}
         base = getattr(self, "_hdb_config_base", None)
@@ -1736,17 +1695,17 @@ class ObservatoryApp:
                     "scale_key": scale_key,
                 }
 
-        # Weight / 学习力度
+        # sanitized
         apply_scale("base_weight_er_gain_scale", "base_weight_er_gain", min_value=0.0)
         apply_scale("base_weight_ev_wear_scale", "base_weight_ev_wear", min_value=0.0)
-        # Induction / 传播与诱发
+        # sanitized
         apply_scale("ev_propagation_threshold_scale", "ev_propagation_threshold", min_value=0.0)
         apply_scale("ev_propagation_ratio_scale", "ev_propagation_ratio", min_value=0.0)
         apply_scale("er_induction_ratio_scale", "er_induction_ratio", min_value=0.0)
 
         try:
             # Update only the affected engines (fast enough for prototype).
-            # 只更新受影响的引擎（原型阶段足够快）。
+            # sanitized
             self.hdb._weight.update_config(self.hdb._config)
             self.hdb._stimulus.update_config(self.hdb._config)
             self.hdb._structure_retrieval.update_config(self.hdb._config)
@@ -1757,15 +1716,16 @@ class ObservatoryApp:
         return {"applied": applied, "base_refreshed": True, "tick_id": tick_id, "trace_id": trace_id}
 
     def _attention_config_override(self) -> dict[str, Any]:
-        """
-        观测台对注意力模块的运行时覆盖。
-
-        注意：观测台历史配置中仍保留 attention_stub_* 命名，本函数将其映射为正式模块字段。
-        """
+        """Runtime overrides for the attention module."""
         return {
             "top_n": int(self._config.get("attention_top_n", 16)),
             "consume_energy": bool(self._config.get("attention_stub_consume_energy", True)),
             "memory_energy_ratio": float(self._config.get("attention_memory_energy_ratio", 0.5)),
+        }
+
+    def _cut_engine_config_override(self) -> dict[str, Any]:
+        return {
+            "enable_goal_b_char_sa_string_mode": bool(self._config.get("enable_goal_b_char_sa_string_mode", False)),
         }
 
     def _apply_runtime_overrides(self) -> None:
@@ -1801,6 +1761,7 @@ class ObservatoryApp:
         self.hdb._pointer_index.update_config(self.hdb._config)
         self.hdb._maintenance.update_config(self.hdb._config)
         self.hdb._snapshot.update_config(self.hdb._config)
+        self.hdb._cut.update_config(self.hdb._config)
         self.hdb._stimulus.update_config(self.hdb._config)
         self.hdb._structure_retrieval.update_config(self.hdb._config)
         self.hdb._induction.update_config(self.hdb._config)
@@ -1813,9 +1774,11 @@ class ObservatoryApp:
             max_file_bytes=int(self.hdb._config.get("log_max_file_bytes", 0)),
         )
         # Refresh baseline after config changes (avoid drift in per-tick modulation).
-        # 配置发生变化后刷新 HDB 基准配置（避免 per-tick 调制出现累计漂移）。
+        # sanitized
+        self.cut_engine.update_config(self._cut_engine_config_override())
         self._hdb_config_base = dict(self.hdb._config)
 
+        self.cut_engine.update_config(self._cut_engine_config_override())
         attention_override = self._attention_config_override()
         self.attention._config.update(attention_override)
         self.attention._logger.update_config(
@@ -1860,6 +1823,12 @@ class ObservatoryApp:
                 "defaults": dict(ATTENTION_DEFAULT_CONFIG),
                 "effective": lambda: dict(self.attention._config),
                 "runtime_override": self._attention_config_override,
+            },
+            "cognitive_stitching": {
+                "path": self.cognitive_stitching._config_path,
+                "defaults": dict(COGNITIVE_STITCHING_DEFAULT_CONFIG),
+                "effective": lambda: dict(self.cognitive_stitching._config),
+                "runtime_override": lambda: {},
             },
             "cognitive_feeling": {
                 "path": self.cfs._config_path,
@@ -1929,15 +1898,15 @@ class ObservatoryApp:
         }
 
     # =============================================================== #
-    # Innate Rules UI API / 先天规则前端 API                           #
+    # sanitized
     # =============================================================== #
 
     def get_innate_rules_data(self) -> dict[str, Any]:
-        """Expose IESM rules bundle for the web UI / 给前端展示规则文件信息。"""
+        """Expose IESM rules bundle for the web UI."""
         return self.iesm.get_rules_bundle(trace_id="api_innate_rules", include_file_yaml=True)["data"]
 
     def validate_innate_rules(self, *, doc: dict[str, Any] | None = None, yaml_text: str | None = None) -> dict[str, Any]:
-        """Validate doc/yaml and return normalized preview / 校验并返回规范化预览。"""
+        """Validate innate rules doc/yaml and return normalized preview."""
         result = self.iesm.validate_rules(trace_id="api_innate_rules_validate", doc=doc, yaml_text=yaml_text)
         data = result.get("data", {}) or {}
         return {
@@ -1951,7 +1920,7 @@ class ObservatoryApp:
         }
 
     def save_innate_rules(self, *, doc: dict[str, Any] | None = None, yaml_text: str | None = None) -> dict[str, Any]:
-        """Validate + save + reload / 校验+保存+热加载。"""
+        """doc"""
         result = self.iesm.save_rules(trace_id="api_innate_rules_save", doc=doc, yaml_text=yaml_text)
         return {
             "saved": bool(result.get("success", False)),
@@ -1962,7 +1931,7 @@ class ObservatoryApp:
         }
 
     def reload_innate_rules(self) -> dict[str, Any]:
-        """Reload rules from disk / 从磁盘热加载规则文件。"""
+        """Reload innate rules from disk."""
         result = self.iesm.reload_rules(trace_id="api_innate_rules_reload")
         return {
             "reloaded_ok": bool(result.get("success", False)),
@@ -1972,12 +1941,9 @@ class ObservatoryApp:
         }
 
     def simulate_innate_rules(self) -> dict[str, Any]:
-        """
-        Simulate rules on the last report context (dry-run).
-        用最近一轮 report 上下文做规则模拟（dry-run，不修改冷却记账）。
-        """
+        """Simulate rules on the last report context (dry-run)."""
         if not self._last_report:
-            return {"ok": False, "message": "no last report yet / 暂无最近轮次报告"}
+            return {"ok": False, "message": "no last report yet"}
         trace_id = str(self._last_report.get("trace_id", "latest") or "latest")
         tick_id = trace_id
 
@@ -2005,7 +1971,7 @@ class ObservatoryApp:
             apply_packet = {}
 
         # Build context from the last report (prefer report snapshots), so metric predicates can work in simulate.
-        # 用最近一轮 report 构造上下文（优先使用 report 快照），以便 metric 条件在模拟里也能工作。
+        # sanitized
         pool_snapshot = (self._last_report.get("final_state", {}) or {}).get("state_snapshot") or {}
         emotion_state = self._last_report.get("emotion", {}) or {}
         sim_context = self._build_innate_rules_context(
@@ -2021,7 +1987,7 @@ class ObservatoryApp:
             trace_id=trace_id,
             tick_id=tick_id,
             # Provide a real tick_index so delta/avg_rate metrics can use history (dry-run won't mutate runtime_state).
-            # 提供真实 tick_index：让 delta/avg_rate 指标能使用历史（dry-run 不会修改运行态记账）。
+            # sanitized
             tick_index=int(self.tick_counter),
             cfs_signals=cfs_signals,
             state_windows=[
@@ -2035,7 +2001,7 @@ class ObservatoryApp:
 
     # ================================================================== #
     # Innate Rules Context + Pool Effects                                 #
-    # 先天规则：上下文构造 + 状态池效果落地                                 #
+    # sanitized
     # ================================================================== #
 
     def _build_innate_rules_context(
@@ -2050,21 +2016,21 @@ class ObservatoryApp:
     ) -> dict[str, Any]:
         """
         Build the runtime context for IESM metric predicates.
-        构造 IESM metric 条件所需的运行态上下文。
+        # sanitized
 
-        Context shape (subset, MVP) / 上下文结构（子集，原型阶段）：
+        # sanitized
           - pool: total_er/total_ev/total_cp_delta/total_cp_abs/energy_concentration/effective_peak_count/complexity_score
           - pool_items: list of item summaries (selectors use display/attrs/etc.)
-          - cam: size/energy_concentration (当前注意记忆体摘要)
-          - memory_activation: item_count/total_ev (记忆赋能池摘要)
+          - cam: size/energy_concentration (閻熸粎澧楅幐鍛婃櫠閻樻祴鏋栭柕濠忕畱婢瑰牓鎮规担瑙勭凡缂佽鍊归幏鍛村箻鐎涙ê鏋€闁?
+          - memory_activation: item_count/total_ev (闁荤姳鐒﹀妯兼崲閸屾粍灏庨悗锝庡幖閸樺瓨鎱ㄩ崷顓炐ｉ柟鎻掔－閹?
           - emotion: {nt:{}, rwd, pun}
           - stimulus: {residual_ratio}
           - retrieval: {stimulus:{best_match_score, grasp_score}}
 
-        Notes / 注意：
+        Notes / 说明:
         - IESM runs before EMgr update in run_cycle, so emotion_state may be None.
-          在 run_cycle 中 IESM 早于 EMgr 更新，因此 emotion_state 可能为空；此时使用“上一轮情绪快照”
-          + “基于本 tick CFS 的 rwd/pun 即时估计”。
+          # sanitized
+          # sanitized
         """
         report = report if isinstance(report, dict) else {}
         cfs_signals = list(cfs_signals or [])
@@ -2077,7 +2043,7 @@ class ObservatoryApp:
                     pool_items.append(dict(row))
         else:
             # Use live pool store (no sort) to avoid heavy snapshots during tick runtime.
-            # 使用 live store（不排序），避免 tick 运行时做重快照。
+            # sanitized
             try:
                 all_items = list(self.pool._store.get_all())
             except Exception:
@@ -2093,7 +2059,32 @@ class ObservatoryApp:
                     continue
 
         # Ensure total_energy is available for selector.top_n.
-        # 确保 total_energy 存在，供 selector.top_n 使用。
+        # sanitized
+        input_queue = report.get("input_queue", {}) if isinstance(report.get("input_queue", {}), dict) else {}
+        input_source_text = str(input_queue.get("source_text", "") or report.get("sensor", {}).get("input_text", "") or "")
+        input_tick_text = str(input_queue.get("tick_text", "") or report.get("sensor", {}).get("input_text", "") or "")
+        if input_source_text or input_tick_text:
+            input_display = input_source_text or input_tick_text
+            input_detail = input_tick_text if input_tick_text and input_tick_text != input_display else ""
+            pool_items.append(
+                {
+                    "item_id": "ctx_input_current",
+                    "ref_object_id": "ctx_input_current",
+                    "ref_object_type": "input",
+                    "display": input_display,
+                    "display_text": input_display,
+                    "display_detail": input_detail,
+                    "attribute_displays": [],
+                    "feature_displays": [input_tick_text] if input_tick_text else [],
+                    "bound_attribute_displays": [],
+                    "er": 0.0,
+                    "ev": 0.0,
+                    "cp_delta": 0.0,
+                    "cp_abs": 0.0,
+                    "total_energy": 0.0,
+                }
+            )
+
         for row in pool_items:
             try:
                 er = float(row.get("er", 0.0) or 0.0)
@@ -2108,9 +2099,9 @@ class ObservatoryApp:
         total_cp_abs = round(sum(float(r.get("cp_abs", 0.0) or 0.0) for r in pool_items), 8)
 
         # Energy concentration (Herfindahl index on (er+ev)).
-        # 能量聚集度（Herfindahl 指数，基于 er+ev 归一化平方和）：
-        # - 越接近 1：能量越集中于少数对象（波峰更少）
-        # - 越接近 1/N：能量越均匀分散（波峰更多）
+        # sanitized
+        # sanitized
+        # sanitized
         energies = [max(0.0, float(r.get("total_energy", 0.0) or 0.0)) for r in pool_items]
         e_sum = float(sum(energies))
         if e_sum > 1e-12:
@@ -2119,17 +2110,17 @@ class ObservatoryApp:
             energy_concentration = 0.0
 
         # Effective peak count (inverse Herfindahl), roughly interpretable as "number of peaks".
-        # 有效波峰数量（Herfindahl 逆）：可粗略理解为“波峰个数”。
+        # sanitized
         #
-        # - energy_concentration ≈ 1   => effective_peak_count ≈ 1（能量集中在极少数对象）
-        # - energy_concentration ≈ 1/N => effective_peak_count ≈ N（能量更均匀分散）
+        # sanitized
+        # sanitized
         if float(energy_concentration) > 1e-12:
             effective_peak_count = float(round(1.0 / float(energy_concentration), 8))
         else:
             effective_peak_count = 0.0
 
         # ---- CAM (Current Attention Memory) ----
-        # CAM 指标（当前注意记忆体）：用于“繁/简（复杂度）”等规则触发与行动调制。
+        # sanitized
         cam_size = 0
         cam_concentration = 0.0
         try:
@@ -2141,7 +2132,7 @@ class ObservatoryApp:
                 if not isinstance(it, dict):
                     continue
                 # Prefer extracted memory energy if available; fall back to current er/ev.
-                # 优先用“抽取到 CAM 的能量”字段；否则用当前 er/ev。
+                # sanitized
                 er = float(it.get("memory_er", it.get("er", 0.0)) or 0.0)
                 ev = float(it.get("memory_ev", it.get("ev", 0.0)) or 0.0)
                 cam_energies.append(max(0.0, er) + max(0.0, ev))
@@ -2154,17 +2145,17 @@ class ObservatoryApp:
             cam_size = 0
             cam_concentration = 0.0
 
-        # ---- Derived: complexity_score (繁/简综合复杂度，0~1) ----
-        # 对齐理论 3.8.3：
-        # - “繁/简”不仅与 CAM（当前注意记忆体）大小有关，也与状态池能量波峰数量有关；
-        # - 因此这里构造一个可解释的综合分：complexity_score ∈ [0,1]
-        #   - size_norm：CAM size 归一化（默认 6~24）
-        #   - peak_norm：有效波峰数量（1/Herfindahl）归一化（默认 1~12）
+        # sanitized
+        # sanitized
+        # sanitized
+        # sanitized
+        # sanitized
+        # sanitized
         #
-        # 注意：
-        # - 这里是“指标构造”，阈值与触发策略仍由 IESM 规则文件决定；
-        # - 数值范围选取与归一化口径可在后续按验收数据再调参；
-        # - effective_peak_count 来源于 pool_items（通常是状态池 top_k 摘要），属于“可解释近似”。
+        # sanitized
+        # sanitized
+        # sanitized
+        # sanitized
         try:
             size_min = 6.0
             size_max = 24.0
@@ -2180,7 +2171,7 @@ class ObservatoryApp:
             peak_norm = (float(effective_peak_count) - peak_min) / (peak_max - peak_min)
             peak_norm = max(0.0, min(1.0, float(peak_norm)))
 
-            # Weighted sum / 加权求和（可解释、可调参）
+            # sanitized
             complexity_score = 0.55 * size_norm + 0.45 * peak_norm
             complexity_score = max(0.0, min(1.0, float(complexity_score)))
             complexity_score = float(round(complexity_score, 8))
@@ -2188,7 +2179,7 @@ class ObservatoryApp:
             complexity_score = 0.0
 
         # ---- Memory Activation Pool (MAP) ----
-        # MAP 指标（记忆赋能池）：用于回忆行动等规则触发的“有无候选”门控。
+        # sanitized
         map_item_count = 0
         map_total_ev = 0.0
         try:
@@ -2202,7 +2193,7 @@ class ObservatoryApp:
 
         # ---- stimulus metrics ----
         # Residual ratio: (after stimulus retrieval) / (before stimulus retrieval).
-        # 刺激级剩余能量比例：(刺激级查存结束后残余) / (刺激级查存开始前残余)。
+        # sanitized
         residual_ratio = 0.0
         try:
             before = report.get("cache_neutralization", {}).get("residual_packet", {}) or {}
@@ -2236,7 +2227,7 @@ class ObservatoryApp:
                 best_match_score = max(best_match_score, score)
 
                 # Per-target match score map (best-effort).
-                # 匹配分数（按目标映射，尽力而为）：用于“查存一体过程匹配分数（带目标对象）”类条件。
+                # sanitized
                 sid = str(
                     sm.get("structure_id", "")
                     or sm.get("structure_db_id", "")
@@ -2250,7 +2241,7 @@ class ObservatoryApp:
                 best_match_target_id = max(match_scores.items(), key=lambda kv: float(kv[1] or 0.0))[0]
 
             # Best-effort: resolve display text for retrieval targets (st_*).
-            # 尽力补全“检索目标”的可读展示（主要是 st_* 结构ID）。
+            # sanitized
             try:
                 # Helper: structure_id -> display_text
                 def _st_display(sid: str) -> str:
@@ -2279,12 +2270,12 @@ class ObservatoryApp:
             match_displays = {}
 
         # ---- structure-level retrieval metrics ----
-        # 结构级查存一体匹配分数（按“结构组 group_id”统计）
+        # sanitized
         #
-        # 说明：
-        # - 刺激级查存的目标通常是 structure_id（st_*）
-        # - 结构级查存的目标通常是 group_id（sg_*）
-        # - 两者都支持作为 IESM metric 条件的输入（例如“置信度/把握感”）。
+        # sanitized
+        # sanitized
+        # sanitized
+        # sanitized
         structure_best_match_score = 0.0
         structure_match_scores: dict[str, float] = {}
         structure_best_match_target_id = ""
@@ -2302,7 +2293,7 @@ class ObservatoryApp:
                 if not isinstance(rd, dict):
                     continue
                 # Current HDB structure-level debug uses "selected_group" as the main selected record.
-                # 当前 HDB 结构级 debug 使用 selected_group 作为“本轮命中结果”的主要字段。
+                # sanitized
                 sel = rd.get("selected_group") or rd.get("selected_match") or {}
                 if not isinstance(sel, dict):
                     continue
@@ -2324,7 +2315,7 @@ class ObservatoryApp:
 
             # Best-effort display for group ids (sg_*). GroupStore has no direct display_text,
             # so we keep a readable fallback: "sg_xxx" (future: derive from required structures).
-            # 结构组显示兜底：GroupStore 没有直接的 display_text，因此先用可读 fallback（后续可由 required_structures 派生）。
+            # sanitized
             if structure_best_match_target_id:
                 structure_best_match_target_display = str(structure_best_match_target_id)
             for gid in list(structure_match_scores.keys()):
@@ -2337,23 +2328,23 @@ class ObservatoryApp:
             structure_best_match_target_display = ""
             structure_match_displays = {}
 
-        # ---- Derived: grasp_score（把握感/置信度综合得分，0~1） ----
-        # 对齐理论 3.8.3（把握感/置信度口径要点）：
-        # - 虚能量稳定性（EV 稳定）：预测图景是否稳定不乱跳
-        # - 关键结构的虚能量覆盖程度（EV 覆盖）：预测是否集中在关键对象上（而不是过度发散）
-        # - 认知压下降趋势（|CP| 下降）：偏差是否在收敛（更“对得上”）
-        # - 匹配质量与残余比例：过程层面的直接证据
+        # sanitized
+        # sanitized
+        # sanitized
+        # sanitized
+        # sanitized
+        # sanitized
         #
-        # 原型阶段落地为一个“可解释、可调参”的组合分数：
-        # - match_norm：刺激级 best_match_score 归一化
-        # - residual_complement：1 - residual_ratio（残余越少，表示本轮越“对得上”）
-        # - structure_norm：结构级 best_match_score 归一化（若结构级未跑起来，不作为惩罚项）
-        # - ev_stability：关键对象 EV 相对变化率越小越稳定
-        # - ev_coverage：关键对象 EV / pool_total_ev（越高越集中）
-        # - cp_relief：关键对象 |CP| 下降速度越快越好（用 cp_abs_rate 的负值近似）
+        # sanitized
+        # sanitized
+        # sanitized
+        # sanitized
+        # sanitized
+        # sanitized
+        # sanitized
         try:
-            # best_match_score 当前实现通常在 0~1（越高越匹配）。
-            # 为避免“几乎总是 1.0”的饱和，先做一个可调参的线性归一化区间。
+            # sanitized
+            # sanitized
             m_lo = 0.40
             m_hi = 0.95
             if m_hi <= m_lo:
@@ -2365,10 +2356,10 @@ class ObservatoryApp:
             rr = max(0.0, min(1.0, rr))
             residual_complement = 1.0 - rr
 
-            # 结构级匹配分数：如果当前没有结构级匹配候选，就不把它当作惩罚项，
-            # 避免“结构级流程尚未跑起来”时把 grasp 全部压低。
+            # sanitized
+            # sanitized
             #
-            # 若未来结构级匹配常态化，可进一步提高其权重。
+            # sanitized
             has_structure = bool(structure_match_scores) or float(structure_best_match_score) > 1e-9
             if has_structure:
                 s_lo = 0.20
@@ -2380,10 +2371,10 @@ class ObservatoryApp:
             else:
                 structure_norm = 0.0
 
-            # ---- 关键对象（best_match_target）上的 EV 稳定性 / 覆盖 / CP 下降 ----
-            # 说明：
-            # - best_match_target_id 典型是 st_*（结构ID）；但状态池对象可能是 SA/ST 合并后以 st_* 为主身份，
-            #   因此这里用 ref_alias_ids 做一次兜底匹配。
+            # sanitized
+            # sanitized
+            # sanitized
+            # sanitized
             best_row: dict[str, Any] | None = None
             if best_match_target_id:
                 for row in pool_items:
@@ -2402,20 +2393,20 @@ class ObservatoryApp:
             ev_coverage = 0.0
             cp_relief = 0.0
             if best_row:
-                # EV stability / 虚能量稳定性：相对变化率越小越稳定
+                # sanitized
                 best_ev = float(best_row.get("ev", 0.0) or 0.0)
                 best_ev_rate = float(best_row.get("ev_change_rate", best_row.get("delta_ev", 0.0)) or 0.0)
                 rel = abs(best_ev_rate) / max(1e-6, abs(best_ev))
-                k_rel = 0.35  # 半衰尺度：rel=k 时稳定性≈0.5（可后续按验收数据调参）
+                k_rel = 0.35  # 闂佸憡顨呴敃銊╁灳濠婂懍鐒婇柛婵嗗椤斿﹪鏌ㄥ☉娆樺姇el=k 闂佸搫鍟晶搴ゅ綂闁诲氦顫夌喊宥夊焵椤戭兘鍋撳?.5闂佹寧绋戦悧鍡氥亹閺屻儱瑙﹂幖杈剧悼閺侀箖鏌熺粙娆炬█闁绘稒鐟╁銊╂嚋閸偅顔嶉梺纭咁嚃閸犳盯鎯冮悢鐓庣煑闁稿矉濡囩粈?
                 ev_stability = 1.0 / (1.0 + (rel / max(1e-9, k_rel)))
                 ev_stability = max(0.0, min(1.0, float(ev_stability)))
 
-                # EV coverage / 覆盖度：关键对象 EV 在全局 EV 中的占比（越高越集中）
+                # sanitized
                 ev_sum = max(1e-9, float(total_ev))
                 ev_coverage = float(best_ev) / float(ev_sum)
                 ev_coverage = max(0.0, min(1.0, float(ev_coverage)))
 
-                # CP relief / 认知压下降趋势：cp_abs_rate 为负代表 |CP| 在下降
+                # sanitized
                 cp_abs_rate = float(best_row.get("cp_abs_rate", best_row.get("delta_cp_abs", 0.0)) or 0.0)
                 relief = max(0.0, -cp_abs_rate)
                 # Softcap to (0,1): relief/(relief+k)
@@ -2423,10 +2414,10 @@ class ObservatoryApp:
                 cp_relief = float(relief / (relief + max(1e-9, k_relief))) if relief > 0.0 else 0.0
                 cp_relief = max(0.0, min(1.0, float(cp_relief)))
 
-            # ---- Final weighted score / 最终加权 ----
-            # 权重设计原则：
-            # - 过程证据（match/residual）占主导
-            # - 理论新增项（EV稳定/覆盖/CP下降）提供“额外可解释支撑”，避免过度简化
+            # sanitized
+            # sanitized
+            # sanitized
+            # sanitized
             if has_structure:
                 grasp_score = (
                     0.30 * match_norm
@@ -2451,7 +2442,7 @@ class ObservatoryApp:
             grasp_score = 0.0
 
         # Also store these metrics into report for observability (best-effort).
-        # 同时把这些指标写回 report，便于前端观测（尽力而为，不影响主流程）。
+        # sanitized
         try:
             stim_res = (report.get("stimulus_level", {}) or {}).get("result", {})
             if isinstance(stim_res, dict):
@@ -2466,7 +2457,7 @@ class ObservatoryApp:
             pass
 
         # Also store structure-level match metrics for observability (best-effort).
-        # 同时把结构级匹配指标写回 report，便于前端观测（尽力而为，不影响主流程）。
+        # sanitized
         try:
             st_res = (report.get("structure_level", {}) or {}).get("result", {})
             if isinstance(st_res, dict):
@@ -2497,9 +2488,9 @@ class ObservatoryApp:
                 nt_state = {}
 
         # Expand NT aliases for readability (Chinese-first).
-        # 扩展递质通道别名（中文优先可读性）：
-        # - 允许在 IESM metric 里写 emotion.nt.多巴胺 / emotion.nt.多巴胺（DA）等
-        # - 仍保留稳定缩写 key（DA/ADR/...），便于与行动模块阈值调制对齐
+        # sanitized
+        # sanitized
+        # sanitized
         try:
             snap = self.emotion.get_emotion_snapshot(trace_id=f"{trace_id}_emotion_labels_for_rules").get("data", {}) or {}
             labels = snap.get("nt_channel_labels", {}) if isinstance(snap.get("nt_channel_labels", {}), dict) else {}
@@ -2508,25 +2499,25 @@ class ObservatoryApp:
                     lab = str(labels.get(ch, "") or "").strip()
                     if not lab:
                         continue
-                    # Full label (e.g. "多巴胺（DA）")
+                    # sanitized
                     if lab not in nt_state:
                         nt_state[lab] = float(v)
-                    # Short Chinese label (e.g. "多巴胺")
-                    short = lab.split("（", 1)[0].strip()
+                    # sanitized
+                    short = lab.split("(", 1)[0].strip()
                     if short and short not in nt_state:
                         nt_state[short] = float(v)
         except Exception:
             pass
 
-        # Reward/Punish（Rwd/Pun）/ 奖励-惩罚信号（全局汇总）
+        # sanitized
         # ----------------------------------------------------
-        # 理论核心口径（3.8.2/3.9）：
-        # - reward_signal / punish_signal 作为“属性刺激元”绑定在对象（CSA 锚点）上；
-        # - 当这些对象具有预测能量（EV）时，形成期待/压力（CFS）；
-        # - 同时，系统需要一个全局汇总信号（Rwd/Pun）供 EMgr/Drive 进一步调制。
+        # sanitized
+        # sanitized
+        # sanitized
+        # sanitized
         #
-        # 推荐实现：从状态池对象的绑定属性 + EV/ER 关系自然汇总（更贴近理论），
-        # 而不是只依赖 “CFS -> rwd/pun” 的硬映射（那更像过渡/对照）。
+        # sanitized
+        # sanitized
         rwd_pun_pool = self._estimate_rwd_pun_from_pool_items(pool_items, trace_id=trace_id, tick_id=tick_id)
         rwd = float(rwd_pun_pool.get("rwd", 0.0) or 0.0)
         pun = float(rwd_pun_pool.get("pun", 0.0) or 0.0)
@@ -2561,7 +2552,7 @@ class ObservatoryApp:
                     "best_match_target_id": str(best_match_target_id or ""),
                     "best_match_target_display": str(best_match_target_display or ""),
                     # match_scores: {target_id -> score}. Target id is typically structure_id/st_*.
-                    # match_scores: {目标ID -> 分数}。目标ID通常为 structure_id/st_*。
+                    # sanitized
                     "match_scores": dict(match_scores),
                     "match_displays": dict(match_displays),
                 }
@@ -2571,7 +2562,7 @@ class ObservatoryApp:
                     "best_match_target_id": str(structure_best_match_target_id or ""),
                     "best_match_target_display": str(structure_best_match_target_display or ""),
                     # match_scores: {group_id -> score}. Target id is typically sg_*.
-                    # match_scores: {结构组ID -> 分数}。目标ID通常为 sg_*。
+                    # sanitized
                     "match_scores": dict(structure_match_scores),
                     "match_displays": dict(structure_match_displays),
                 },
@@ -2581,7 +2572,7 @@ class ObservatoryApp:
 
     # ================================================================== #
     # Reward/Punish Aggregation                                            #
-    # 奖励/惩罚（Rwd/Pun）汇总估计                                           #
+    # sanitized
     # ================================================================== #
 
     @staticmethod
@@ -2596,7 +2587,7 @@ class ObservatoryApp:
     def _softcap(x: float, *, k: float) -> float:
         """
         Soft-saturating mapping x -> x/(x+k).
-        软饱和映射：把无界正数映射到 (0,1)（越大越接近 1，但永远到不了 1）。
+        # sanitized
         """
         try:
             v = float(x)
@@ -2609,7 +2600,7 @@ class ObservatoryApp:
 
     @staticmethod
     def _row_has_bound_attribute(row: dict[str, Any], attr_name: str) -> bool:
-        """Check stable key list first; fall back to display text. / 先查稳定键，再兜底文本。"""
+        """doc"""
         if not isinstance(row, dict) or not attr_name:
             return False
         names = row.get("bound_attribute_names", [])
@@ -2620,7 +2611,7 @@ class ObservatoryApp:
 
     # ================================================================== #
     # Teacher Feedback (External Reward/Punish)                           #
-    # 教师信号/外置奖惩（实验输入）                                         #
+    # sanitized
     # ================================================================== #
 
     def _apply_teacher_feedback(
@@ -2634,12 +2625,12 @@ class ObservatoryApp:
         """
         Apply external teacher feedback to the runtime StatePool.
 
-        Goals / 目标：
-        - 让“外置奖惩”能够被实验数据集注入（labels），并以“属性刺激元绑定”的形式进入可审计运行态；
-        - 不强依赖特定 action/tool，实现上尽量保守且不影响原有闭环；
-        - 允许空 tick 也能注入（例如奖励/惩罚在下一 tick 才到达）。
+        Goals / 闂佺儵鏅╅崰妤呮偉閿濆鏅?
+        # sanitized
+        # sanitized
+        # sanitized
 
-        Supported label keys / 支持的字段（最小口径，未来可扩展）：
+        # sanitized
         - teacher_rwd / teacher_pun: float in [0,1]
         - teacher_anchor: cam_top1 | pool_top1_total | pool_top1_total_any | specific_item | specific_ref | none
         - teacher_anchor_item_id / teacher_anchor_ref_object_id / teacher_anchor_ref_object_type
@@ -2892,9 +2883,9 @@ class ObservatoryApp:
             )
 
         if teacher_rwd > 0.0:
-            bind_attr(attr_name="teacher_reward_signal", attr_value=teacher_rwd, display="外置奖励信号:教师")
+            bind_attr(attr_name="teacher_reward_signal", attr_value=teacher_rwd, display="teacher_reward_signal")
         if teacher_pun > 0.0:
-            bind_attr(attr_name="teacher_punish_signal", attr_value=teacher_pun, display="外置惩罚信号:教师")
+            bind_attr(attr_name="teacher_punish_signal", attr_value=teacher_pun, display="teacher_punish_signal")
 
         return {
             "ok": True,
@@ -2917,16 +2908,16 @@ class ObservatoryApp:
     def _estimate_rwd_pun_from_pool_items(self, pool_items: list[dict[str, Any]], *, trace_id: str, tick_id: str) -> dict[str, Any]:
         """
         Estimate global reward/punish signals from pool_items.
-        从状态池对象（pool_items 摘要）估计全局奖励/惩罚信号（Rwd/Pun）。
+        # sanitized
 
-        对齐理论核心（3.8.2/3.9）的直观口径：
-        - reward_signal/punish_signal 是绑定在“对象（CSA 锚点）”上的属性刺激元；
-        - 当这些对象的 EV（虚能量/预测能量）高，代表它们“被预测/被期待/被担忧”；这应贡献全局 rwd/pun 状态；
-        - 当这些对象获得 ER（实能量）上升，代表“预测被现实验证”（奖励/惩罚体验被证实）；这也应贡献全局 rwd/pun。
+        # sanitized
+        # sanitized
+        # sanitized
+        # sanitized
 
-        返回值：
-        - rwd/pun: 0~1 的软饱和值（便于 UI 与后续调制接口）
-        - detail: 中间统计，便于验收与找茬
+        # sanitized
+        # sanitized
+        # sanitized
         """
         cfg = getattr(self.emotion, "_config", {}) or {}
         agg = cfg.get("rwd_pun_pool_aggregation", {}) if isinstance(cfg.get("rwd_pun_pool_aggregation", {}), dict) else {}
@@ -2988,13 +2979,13 @@ class ObservatoryApp:
 
     # ================================================================== #
     # Episodic Memory Enrichment                                          #
-    # 回合记忆材料补全：把运行态绑定属性写入 episodic memory_material         #
+    # sanitized
     # ================================================================== #
 
     def _enrich_tick_episodic_memory_with_bound_attributes(self, *, report: dict[str, Any], trace_id: str, tick_id: str) -> dict[str, Any]:
         """
         Enrich current tick episodic memory material with runtime bound attributes.
-        把本 tick 的运行态绑定属性（CFS/时间感受/奖惩信号等）补写进该 tick 的情景记忆材料。
+        # sanitized
         """
         try:
             stim_res = (report.get("stimulus_level", {}) or {}).get("result", {}) or {}
@@ -3002,30 +2993,29 @@ class ObservatoryApp:
         except Exception:
             memory_id = ""
         if not memory_id:
-            return {"ok": False, "code": "NO_MEMORY_ID", "message": "本 tick 无 stimulus_level episodic_memory_id。"}
+            return {"ok": False, "code": "NO_MEMORY_ID", "message": "No episodic_memory_id in this tick stimulus_level result."}
 
         try:
             episodic_obj = self.hdb._episodic_store.get(memory_id)  # type: ignore[attr-defined]
         except Exception:
             episodic_obj = None
         if not isinstance(episodic_obj, dict):
-            return {"ok": False, "code": "MEMORY_NOT_FOUND", "message": f"未找到 episodic memory: {memory_id}"}
+            return {"ok": False, "code": "MEMORY_NOT_FOUND", "message": f"未找到情景记忆 / episodic memory not found: {memory_id}"}
 
         meta = episodic_obj.get("meta", {}) if isinstance(episodic_obj.get("meta", {}), dict) else {}
         ext = meta.get("ext", {}) if isinstance(meta.get("ext", {}), dict) else {}
         mm = ext.get("memory_material", {}) if isinstance(ext.get("memory_material", {}), dict) else {}
         if str(mm.get("memory_kind", "")) != "stimulus_packet":
-            return {"ok": False, "code": "SKIP_KIND", "message": f"跳过：memory_kind={mm.get('memory_kind')}"}
-
+            return {"ok": False, "code": "SKIP_KIND", "message": "跳过当前记忆类型 / skip memory_kind=" + str(mm.get("memory_kind"))}
         enrich_meta = mm.get("runtime_enrichment", {}) if isinstance(mm.get("runtime_enrichment", {}), dict) else {}
         if enrich_meta.get("bound_attributes_included") is True:
-            return {"ok": True, "code": "OK_ALREADY", "message": "已补写（runtime_enrichment 标记已存在）。", "data": enrich_meta}
+            return {"ok": True, "code": "OK_ALREADY", "message": "runtime_enrichment already contains bound attributes", "data": enrich_meta}
 
         seq_groups = list(mm.get("sequence_groups", []) or [])
         if not seq_groups:
-            return {"ok": False, "code": "EMPTY_MATERIAL", "message": "memory_material.sequence_groups 为空。"}
+            return {"ok": False, "code": "EMPTY_MATERIAL", "message": "memory_material.sequence_groups is empty"}
 
-        include_exact = {"reward_signal", "punish_signal", "时间感受"}
+        include_exact = {"reward_signal", "punish_signal", "teacher_reward_signal", "teacher_punish_signal"}
         max_attrs_per_anchor = 6
         added_unit_count = 0
         added_bundle_count = 0
@@ -3104,7 +3094,7 @@ class ObservatoryApp:
                     display = str(content.get("display", "") or raw or attr_unit_id)
                     token = display
                     if attr_name and attr_name not in token:
-                        token = f"{token}（{attr_name}）"
+                        token = f"{token}闂佹寧绋戝鏈紅tr_name闂?"
                     attribute_value = content.get("attribute_value")
                     value_type = str(content.get("value_type", "numerical" if attribute_value is not None else "discrete") or "discrete")
                     units.append(
@@ -3163,9 +3153,9 @@ class ObservatoryApp:
         try:
             self.hdb._episodic_store.update(episodic_obj)  # type: ignore[attr-defined]
         except Exception as exc:
-            return {"ok": False, "code": "UPDATE_FAILED", "message": f"episodic_store.update 失败: {exc}"}
+            return {"ok": False, "code": "UPDATE_FAILED", "message": f"更新情景记忆失败 / episodic_store.update failed: {exc}"}
 
-        return {"ok": True, "code": "OK", "message": "已补写运行态绑定属性到情景记忆材料。", "data": dict(mm.get("runtime_enrichment", {}) or {})}
+        return {"ok": True, "code": "OK", "message": "已将绑定属性写回情景记忆 / runtime enrichment written back to episodic memory", "data": dict(mm.get("runtime_enrichment", {}) or {})}
 
     def _apply_innate_pool_effects(
         self,
@@ -3177,12 +3167,12 @@ class ObservatoryApp:
     ) -> dict[str, Any]:
         """
         Apply IESM pool_effects to StatePool (safe executor).
-        将 IESM 输出的 pool_effects 通过“安全执行器”落地到 StatePool。
+        # sanitized
 
-        Safety / 安全策略：
-        - 只支持白名单 effect_type（pool_energy / pool_bind_attribute）
-        - 不执行任意代码
-        - 单 tick 设上限，避免规则误配置导致大量写入
+        Safety / 闁诲海鎳撻ˇ顖炲矗韫囨洜椹抽柡宥庡亝濞堬綁鏌?
+        - 闂佸憡鐟禍婵嬪极椤曗偓楠炴劖鎷呴悜姗嗕槐闂佸憡鑹剧粔鏉戠暦?effect_type闂佹寧绋戝绌檕l_energy / pool_bind_attribute闂?
+        # sanitized
+        # sanitized
         """
         effects = [e for e in (effects or []) if isinstance(e, dict)]
         pool_items = list(context.get("pool_items", []) or [])
@@ -3252,7 +3242,7 @@ class ObservatoryApp:
         applied: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
 
-        cap = 64  # single tick cap / 单 tick 上限
+        cap = 64  # single tick cap / 闂?tick 婵炴垶鎸搁敃顏勵瀶?
         for eff in effects[:cap]:
             et = str(eff.get("effect_type", "") or "")
             spec = eff.get("spec") if isinstance(eff.get("spec"), dict) else {}
@@ -3400,7 +3390,7 @@ class ObservatoryApp:
                     if not tid:
                         continue
                     # Stable attribute id for deduplication on the same target+name.
-                    # 同一目标+同名属性用稳定 id，便于去重（避免 runtime_attrs 爆炸）。
+                    # sanitized
                     target_ref_id = str(t.get("ref_object_id", "") or tid)
                     attr_id = f"sa_iesm_attr_{attr_name}_{target_ref_id}"
                     attribute_sa = {
@@ -3416,7 +3406,7 @@ class ObservatoryApp:
                         "stimulus": {"role": "attribute", "modality": modality},
                         "energy": {"er": float(er), "ev": float(ev)},
                         # meta.ext: keep minimal provenance for observability and downstream memory enrichment.
-                        # meta.ext：保留最小溯源信息，便于前端解释与“记忆材料补全”（把属性随记忆写入 HDB）。
+                        # sanitized
                         "meta": {
                             "ext": {
                                 "bound_from": "iesm_pool_bind_attribute",
@@ -3466,40 +3456,40 @@ class ObservatoryApp:
             {
                 "module": "attention",
                 "title": "注意力模块",
-                "status": "MVP 已接入",
-                "description": "已接入注意力过滤器（AF）生成注意力记忆体（CAM）；当前策略仍为 Top-N（前 N）+ 预算扣能，后续将补齐聚焦/调制接口。",
+                "status": "MVP 可用",
+                # sanitized
             },
             {
                 "module": "cognitive_feeling",
                 "title": "认知感受模块",
-                "status": "规则化实现（推荐）",
-                "description": "默认由先天规则（IESM，phase=cfs）生成认知感受信号（违和/正确/期待/压力/置信度等），规则可在「先天规则」页面直接观测与编辑。旧版硬编码 CFS 模块仅用于对照实验（observatory_config.yaml: cfs_source_mode=legacy）。",
+                "status": "规划中",
+                # sanitized
             },
             {
                 "module": "emotion",
                 "title": "情绪模块",
-                "status": "已接入",
-                "description": "已接入情绪递质管理器（NT 递质通道）维护递质通道，并输出调制参数（当前先对注意力过滤器（AF）生效）。",
+                "status": "规划中",
+                # sanitized
             },
             {
                 "module": "innate_script",
-                "title": "先天脚本管理模块",
-                "status": "已接入",
-                "description": "已接入先天编码脚本管理器（IESM）执行状态窗口检查，并通过声明式规则系统输出认知感受信号（phase=cfs）、聚焦指令、情绪增量与行动触发（下一步进入行动模块竞争）。",
+                "title": "先天脚本模块",
+                "status": "规划中",
+                # sanitized
             },
             {
                 "module": "action",
                 "title": "行动模块",
-                "status": "MVP 已接入",
-                "description": "已接入行动管理模块（Action/Drive，驱动力）用于驱动力竞争与消耗；当前先落地内在行动器（注意力聚焦/发散模式、回忆行动）。",
+                "status": "MVP 可用",
+                # sanitized
             },
         ]
 
     def _build_sensor_report(self, text: str, sensor_result: dict) -> dict:
-        # 防御式：感受器可能返回 success=False（例如空字符串输入），此时 data 可能为空/None。
-        # 观测台要能把“失败”也作为可验收的输出展示出来，而不是直接崩溃。
+        # sanitized
+        # sanitized
         if not isinstance(sensor_result, dict):
-            return {"input_text": text, "success": False, "code": "SENSOR_RESULT_INVALID", "message": "sensor_result 非 dict"}
+            return {"input_text": text, "success": False, "code": "SENSOR_RESULT_INVALID", "message": "sensor_result 不是 dict / sensor_result is not a dict"}
         if not bool(sensor_result.get("success", False)):
             return {
                 "input_text": text,
@@ -3507,7 +3497,7 @@ class ObservatoryApp:
                 "code": str(sensor_result.get("code", "") or ""),
                 "message": str(sensor_result.get("message", "") or ""),
                 "error": sensor_result.get("error", {}) if isinstance(sensor_result.get("error", {}), dict) else {},
-                "note": "文本感受器校验失败时，本轮按“空 Tick”继续跑闭环（便于验收其它模块）。",
+                # sanitized
             }
 
         data = sensor_result.get("data", {}) if isinstance(sensor_result.get("data", {}), dict) else {}
@@ -3517,11 +3507,13 @@ class ObservatoryApp:
         runtime_snapshot = self.sensor.get_runtime_snapshot(trace_id=f"{trace_id}_sensor_runtime")["data"]
         unit_rows = self._describe_packet_units(packet)
         groups = self._describe_packet_groups(packet)
-        # 重要口径说明（避免前端误解）：
-        # - packet.csa_items 是“CSA item 列表”（可能包含仅有锚点成员的 trivial CSA）。
-        # - cut_engine 会把 CSA 归一化为 csa_bundles（只保留“包含属性成员”的有效 bundle）。
-        #   因此“包里 CSA item 数”与“有效 bundle 数”可能不同（例如关闭 stimulus_intensity 属性 SA 时）。
+        # sanitized
+        # sanitized
+        # sanitized
+        # sanitized
         csa_bundle_count = sum(int(g.get("csa_count", 0) or 0) for g in groups if isinstance(g, dict))
+        feature_sa_count = sum(1 for row in unit_rows if str(row.get("role", "") or "") != "attribute")
+        attribute_sa_count = sum(1 for row in unit_rows if str(row.get("role", "") or "") == "attribute")
         return {
             "input_text": text,
             "success": True,
@@ -3532,6 +3524,8 @@ class ObservatoryApp:
             "tokenizer_fallback": data.get("tokenization_summary", {}).get("tokenizer_fallback", False),
             "sa_count": len(packet.get("sa_items", [])),
             "csa_count": len(packet.get("csa_items", [])),
+            "feature_sa_count": feature_sa_count,
+            "attribute_sa_count": attribute_sa_count,
             "csa_bundle_count": csa_bundle_count,
             "groups": groups,
             "units": unit_rows,
@@ -3755,15 +3749,15 @@ class ObservatoryApp:
         def _is_attribute_only_structure(structure_block: dict) -> bool:
             """
             Detect attribute-only structures (should NOT become standalone StatePool objects).
-            检测“纯属性结构”（不应作为独立对象进入状态池）。
+            # sanitized
 
-            Why / 为什么：
-              用户验收口径要求：属性刺激元/属性结构应作为“约束信息”绑定在锚点对象上，
-              而不是在 SP（状态池）里出现大量类似 {stimulus_intensity:1.1} 的噪音对象。
+            Why / 婵炴垶鎹佸銊у垝閸喓鈻曢柛顐墰缁?
+              # sanitized
+              # sanitized
 
-            Rule / 规则（MVP）：
-              - 若结构的 sequence_groups.units 中存在任意 unit_role != attribute 的 token，则认为不是纯属性结构；
-              - 若存在 token 且全部为 attribute，则视作纯属性结构。
+            Rule / 闁荤喐鐟ョ€氼剟宕归鐐存櫖闁革富鎽怭闂佹寧绋戦¨鈧紒?
+              - 闂佸吋鐪归崕宕囧垝閵娾晛鍑犻柛鏇ㄥ幗閻?sequence_groups.units 婵炴垶鎼╅崢濂告偤閵娾晛鎹堕柕濞垮€栧畷鏌ユ煙?unit_role != attribute 闂?token闂佹寧绋戦懟顖炲垂椤栨粍濯奸柕鍫濆缁€瀣槈閹惧磭校婵℃彃鎽滈惀顏堫敍濮樿鲸鍓戦梺璇″劯閸涱垱灏濋梺鍝勵儏鐎氬摜妲?
+              # sanitized
             """
             if not isinstance(structure_block, dict):
                 return False
@@ -3788,11 +3782,11 @@ class ObservatoryApp:
                                 feature_seen += 1
                     else:
                         # Legacy fallback: if no units, treat tokens as features (cannot decide attribute-only).
-                        # 旧格式兜底：没有 units 时无法可靠判断，默认不当作纯属性。
+                        # sanitized
                         return False
             else:
                 # No groups: fallback to flat_tokens, assume not attribute-only.
-                # 没有分组信息：无法可靠判断，默认不当作纯属性。
+                # sanitized
                 return False
             return tokens_seen > 0 and feature_seen == 0
 
@@ -3817,11 +3811,12 @@ class ObservatoryApp:
                 )
                 continue
 
-            # Skip attribute-only structures to keep StatePool clean.
-            # 跳过“纯属性结构”，避免状态池出现 {stimulus_intensity:1.1} 这类噪音对象。
+            # Skip structures that should not become ordinary StatePool anchors.
             try:
                 st_obj = self.hdb._structure_store.get(structure_id)  # type: ignore[attr-defined]
                 st_block = (st_obj or {}).get("structure", {}) if isinstance(st_obj, dict) else {}
+                st_sub_type = str((st_obj or {}).get("sub_type", "") or "") if isinstance(st_obj, dict) else ""
+                st_signature = str((st_block or {}).get("content_signature", "") or "") if isinstance(st_block, dict) else ""
                 if _is_attribute_only_structure(st_block):
                     results.append(
                         {
@@ -3839,9 +3834,25 @@ class ObservatoryApp:
                         }
                     )
                     continue
+                if st_sub_type == "cognitive_stitching_event_structure" or st_signature.startswith("cs_event::"):
+                    results.append(
+                        {
+                            "projection_kind": projection_kind,
+                            "memory_id": memory_id,
+                            "structure_id": structure_id,
+                            "target_item_id": "",
+                            "target_ref_object_id": structure_id,
+                            "target_ref_object_type": "st",
+                            "display_text": (st_block.get("display_text") if isinstance(st_block, dict) else "") or structure_id,
+                            "er": round(float(item.get("er", 0.0)), 8),
+                            "ev": round(float(item.get("ev", 0.0)), 8),
+                            "reason": item.get("reason", ""),
+                            "result": "skipped_cognitive_stitching_event_structure",
+                        }
+                    )
+                    continue
             except Exception:
                 # Best-effort: if detection fails, do not block projection.
-                # 尽力而为：检测失败时不阻断投影。
                 pass
 
             runtime_object = self.hdb.make_runtime_structure_object(
@@ -3861,7 +3872,7 @@ class ObservatoryApp:
             )
             # For observability: carry the resulting StatePool item_id so other modules
             # (e.g. TimeSensor binding, IESM scripts) can reference the exact runtime anchor.
-            # 可观测性：带回 StatePool 的 item_id，便于后续模块（例如时间感受绑定、IESM 规则）精确引用锚点。
+            # sanitized
             ir_data = insert_result.get("data", {}) if isinstance(insert_result, dict) else {}
             target_item_id = ""
             if isinstance(ir_data, dict):
@@ -3881,6 +3892,10 @@ class ObservatoryApp:
                     "result": insert_result.get("message", ""),
                 }
             )
+            try:
+                self._mark_projection_fatigue(item)
+            except Exception:
+                pass
         return results
 
     def _collect_memory_activation_seed_targets(self, report: dict) -> list[dict]:
@@ -3983,11 +3998,31 @@ class ObservatoryApp:
                         "modes": ["residual_storage_seed"],
                     }
                 )
-        return seed_targets
+        filtered_targets: list[dict] = []
+        for item in seed_targets:
+            projection_probe = {
+                "projection_kind": "memory",
+                "memory_id": item.get("memory_id", ""),
+                "structure_id": item.get("backing_structure_id", ""),
+                "backing_structure_id": item.get("backing_structure_id", ""),
+                "display_text": item.get("target_display_text", ""),
+                "er": 0.0,
+                "ev": float(item.get("delta_ev", 0.0) or 0.0),
+                "reason": "memory_seed_target",
+            }
+            effective = self._apply_projection_fatigue_to_item(projection_probe)
+            if effective is None:
+                continue
+            next_item = dict(item)
+            next_item["delta_ev"] = round(float(effective.get("ev", item.get("delta_ev", 0.0)) or 0.0), 8)
+            next_item["projection_fatigue"] = round(float(effective.get("projection_fatigue", 0.0) or 0.0), 8)
+            filtered_targets.append(next_item)
+        return filtered_targets
 
     def _apply_memory_feedback(self, *, memory_items: list[dict], trace_id: str, tick_id: str) -> dict:
         feedback_items: list[dict] = []
         feedback_results: list[dict] = []
+        feedback_bucket_counts: dict[str, int] = {}
 
         for item in memory_items or []:
             memory_id = str(item.get("memory_id", ""))
@@ -4005,6 +4040,28 @@ class ObservatoryApp:
             memory_material = dict(episodic_obj.get("meta", {}).get("ext", {}).get("memory_material", {}) or {})
             memory_kind = str(memory_material.get("memory_kind", ""))
             if memory_kind == "stimulus_packet":
+                feedback_bucket_key = str(memory_material.get("grouped_display_text", "") or item.get("display_text", memory_id) or memory_id)
+                bucket_seen = int(feedback_bucket_counts.get(feedback_bucket_key, 0) or 0)
+                projection_probe = {
+                    "projection_kind": "memory_feedback_packet",
+                    "memory_id": memory_id,
+                    "display_text": str(memory_material.get("grouped_display_text", "") or item.get("display_text", memory_id)),
+                    "grouped_display_text": str(memory_material.get("grouped_display_text", "") or ""),
+                    "er": delta_er,
+                    "ev": delta_ev,
+                    "reason": "memory_feedback_stimulus_packet",
+                }
+                effective_feedback = self._apply_projection_fatigue_to_item(projection_probe)
+                if effective_feedback is None:
+                    continue
+                delta_er = round(max(0.0, float(effective_feedback.get("er", delta_er) or 0.0)), 8)
+                delta_ev = round(max(0.0, float(effective_feedback.get("ev", delta_ev) or 0.0)), 8)
+                if bucket_seen > 0:
+                    crowd_ratio = 1.0 / float(1 + bucket_seen)
+                    delta_er = round(delta_er * crowd_ratio, 8)
+                    delta_ev = round(delta_ev * crowd_ratio, 8)
+                if delta_er <= 0.0 and delta_ev <= 0.0:
+                    continue
                 packet_result = self._build_memory_feedback_stimulus_packet(
                     memory_id=memory_id,
                     memory_material=memory_material,
@@ -4042,6 +4099,8 @@ class ObservatoryApp:
                         "grouped_display_text": str(memory_material.get("grouped_display_text", "")),
                         "delta_er": delta_er,
                         "delta_ev": delta_ev,
+                        "same_tick_bucket_rank": int(bucket_seen + 1),
+                        "projection_fatigue": round(float(effective_feedback.get("projection_fatigue", 0.0) or 0.0), 8),
                         "target_count": len(target_texts),
                         "target_display_texts": target_texts,
                         "packet": self._describe_stimulus_packet(packet),
@@ -4050,6 +4109,8 @@ class ObservatoryApp:
                         "events": events,
                     }
                 )
+                feedback_bucket_counts[feedback_bucket_key] = bucket_seen + 1
+                self._mark_projection_fatigue(projection_probe)
                 continue
 
             if memory_kind == "structure_group":
@@ -4061,14 +4122,24 @@ class ObservatoryApp:
                 )
                 if not projections:
                     continue
+                effective_projections: list[dict] = []
+                skipped_projection_count = 0
+                for projection in projections:
+                    effective = self._apply_projection_fatigue_to_item(projection)
+                    if effective is None:
+                        skipped_projection_count += 1
+                        continue
+                    effective_projections.append(effective)
+                if not effective_projections:
+                    continue
                 projection_results = self._project_runtime_structures(
-                    projections,
+                    effective_projections,
                     trace_id=f"{trace_id}_memory_feedback",
                     tick_id=tick_id,
                 )
                 target_texts = [
                     str(projection.get("display_text", projection.get("structure_id", "")))
-                    for projection in projections
+                    for projection in effective_projections
                     if str(projection.get("structure_id", ""))
                 ]
                 feedback_items.append(
@@ -4080,6 +4151,7 @@ class ObservatoryApp:
                         "target_count": len(target_texts),
                         "grouped_display_text": str(memory_material.get("grouped_display_text", "")),
                         "target_display_texts": target_texts,
+                        "skipped_projection_count": skipped_projection_count,
                     }
                 )
                 feedback_results.append(
@@ -4092,6 +4164,7 @@ class ObservatoryApp:
                         "delta_ev": delta_ev,
                         "target_count": len(target_texts),
                         "target_display_texts": target_texts,
+                        "skipped_projection_count": skipped_projection_count,
                         "projections": projection_results,
                     }
                 )
@@ -4220,8 +4293,15 @@ class ObservatoryApp:
                 original_unit_id = str(unit.get("unit_id", ""))
                 if not original_unit_id:
                     continue
+                token = str(unit.get("token", unit.get("display_text", "")) or "")
+                if (
+                    token.startswith("{") and token.endswith("}")
+                    and not bool(group.get("order_sensitive", False))
+                    and str(group.get("string_unit_kind", "") or "") != "char_sequence"
+                ):
+                    # Goal B safety: do not replay presentation-wrapped structure tokens back into SA.
+                    continue
                 sa_id = next_id("sa_memfb")
-                token = str(unit.get("token", unit.get("display_text", "")))
                 unit_role = str(unit.get("unit_role", unit.get("role", "feature")))
                 attribute_name = str(unit.get("attribute_name", ""))
                 attribute_value = unit.get("attribute_value")
@@ -4250,6 +4330,9 @@ class ObservatoryApp:
                     "round_created": 0,
                     "decay_count": 0,
                     "sequence_index": packet_sequence_index,
+                    "order_sensitive": bool(group.get("order_sensitive", False)),
+                    "string_unit_kind": str(group.get("string_unit_kind", "") or ""),
+                    "string_token_text": str(group.get("string_token_text", "") or ""),
                 }
                 sa_obj = {
                     "id": sa_id,
@@ -4258,6 +4341,9 @@ class ObservatoryApp:
                     "stimulus": {
                         "role": unit_role,
                         "modality": "memory_feedback",
+                        "order_sensitive": bool(group.get("order_sensitive", False)),
+                        "string_unit_kind": str(group.get("string_unit_kind", "") or ""),
+                        "string_token_text": str(group.get("string_token_text", "") or ""),
                     },
                     "energy": {
                         "er": round(float(er_allocations.get(original_unit_id, 0.0)), 8),
@@ -4345,6 +4431,9 @@ class ObservatoryApp:
                     "sa_ids": group_sa_ids,
                     "csa_ids": group_csa_ids,
                     "source_group_index": source_group_index,
+                    "order_sensitive": bool(group.get("order_sensitive", False)),
+                    "string_unit_kind": str(group.get("string_unit_kind", "") or ""),
+                    "string_token_text": str(group.get("string_token_text", "") or ""),
                 }
             )
 
@@ -4435,18 +4524,19 @@ class ObservatoryApp:
     def _apply_induction_targets(self, targets: list[dict], trace_id: str, tick_id: str) -> list[dict]:
         projections = []
         for target in targets:
-            projections.append(
-                {
-                    "projection_kind": target.get("projection_kind", "structure"),
-                    "memory_id": target.get("memory_id", ""),
-                    "structure_id": target.get("target_structure_id", ""),
-                    "backing_structure_id": target.get("backing_structure_id", target.get("target_structure_id", "")),
-                    "display_text": target.get("target_display_text", ""),
-                    "er": 0.0,
-                    "ev": float(target.get("delta_ev", 0.0)),
-                    "reason": "induction_target",
-                }
-            )
+            item = {
+                "projection_kind": target.get("projection_kind", "structure"),
+                "memory_id": target.get("memory_id", ""),
+                "structure_id": target.get("target_structure_id", ""),
+                "backing_structure_id": target.get("backing_structure_id", target.get("target_structure_id", "")),
+                "display_text": target.get("target_display_text", ""),
+                "er": 0.0,
+                "ev": float(target.get("delta_ev", 0.0)),
+                "reason": "induction_target",
+            }
+            effective = self._apply_projection_fatigue_to_item(item)
+            if effective is not None:
+                projections.append(effective)
         return self._project_runtime_structures(projections, trace_id, tick_id)
 
     def _apply_induction_source_consumptions(self, consumptions: list[dict], trace_id: str, tick_id: str) -> list[dict]:
@@ -4526,7 +4616,14 @@ class ObservatoryApp:
     def _describe_packet_groups(self, packet: dict, *, profile: dict | None = None) -> list[dict]:
         profile = profile or self.cut_engine.build_sequence_profile_from_stimulus_packet(packet)
         groups = []
+        packet_groups_by_index = {
+            int(group.get("group_index", -1) or -1): dict(group)
+            for group in (packet.get("grouped_sa_sequences", []) or [])
+            if isinstance(group, dict)
+        }
         for group in profile.get("sequence_groups", []):
+            raw_group = packet_groups_by_index.get(int(group.get("group_index", -1) or -1), {})
+            raw_ext = dict(raw_group.get("ext", {}) or {}) if isinstance(raw_group, dict) else {}
             units = sorted(group.get("units", []), key=lambda item: int(item.get("sequence_index", 0)))
             total_er = round(sum(float(item.get("er", 0.0)) for item in units), 8)
             total_ev = round(sum(float(item.get("ev", 0.0)) for item in units), 8)
@@ -4547,6 +4644,9 @@ class ObservatoryApp:
                     "group_index": group.get("group_index", 0),
                     "source_type": group.get("source_type", ""),
                     "origin_frame_id": group.get("origin_frame_id", ""),
+                    "contains_internal_group": bool(raw_ext.get("contains_internal_group", False)),
+                    "internal_merge_mode": str(raw_ext.get("internal_merge_mode", "") or ""),
+                    "internal_string_group_count": len((raw_ext.get("internal_string_groups", []) or [])),
                     "display_text": self._format_group_display(group),
                     "semantic_display_text": format_semantic_group_display(cloned_group, context="stimulus"),
                     "token_text": " / ".join(all_tokens),
@@ -4625,6 +4725,23 @@ class ObservatoryApp:
         return displays
 
     def _format_group_display(self, group: dict) -> str:
+        ext = group.get("ext", {}) if isinstance(group.get("ext", {}), dict) else {}
+        string_groups = ext.get("string_groups", []) if isinstance(ext.get("string_groups", []), list) else []
+        if string_groups:
+            rendered_parts = []
+            for sg in string_groups:
+                if not isinstance(sg, dict):
+                    continue
+                part_text = str(sg.get("string_token_text", "") or "")
+                if not part_text:
+                    part_text = format_semantic_group_display(dict(sg), context="stimulus") or format_group_display(sg.get("units", []), sg.get("csa_bundles", []))
+                part_text = str(part_text or "").strip()
+                if part_text.startswith("{") and part_text.endswith("}"):
+                    part_text = part_text[1:-1]
+                if part_text:
+                    rendered_parts.append(part_text)
+            if rendered_parts:
+                return "{" + " / ".join(rendered_parts) + "}"
         return format_group_display(group.get("units", []), group.get("csa_bundles", []))
 
     def _map_group_unit_bundles(self, group: dict) -> dict[str, str]:
@@ -4706,6 +4823,25 @@ class ObservatoryApp:
             enriched["target_ref_object_id"] = ""
             enriched["target_ref_object_type"] = ""
         return enriched
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

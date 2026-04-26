@@ -8,16 +8,21 @@ from __future__ import annotations
 import time
 from collections import Counter
 
+from ._display_semantics import is_display_only_token
 from ._id_generator import next_id
 from ._sequence_display import format_group_display, format_sequence_groups
 
 
 class CutEngine:
-    def __init__(self):
+    def __init__(self, config: dict | None = None):
+        self._config = dict(config or {})
         self._pointer_index = None
 
     def set_pointer_index(self, pointer_index) -> None:
         self._pointer_index = pointer_index
+
+    def update_config(self, config: dict) -> None:
+        self._config = dict(config or {})
 
     def build_sequence_profile_from_stimulus_packet(self, stimulus_packet: dict) -> dict:
         sa_index = {
@@ -31,6 +36,29 @@ class CutEngine:
             if isinstance(item, dict) and item.get("id")
         }
 
+        # Best-effort grouping recovery:
+        # Some upstream builders only list anchor SA ids in grouped_sa_sequences, while
+        # attribute SA may only carry packet_context metadata (source_type/origin/source_group_index).
+        # If we don't include them here, attribute SA will silently disappear from profiles,
+        # which breaks "属性刺激元可被最大共同结构切分并脱锚成为长期结构" 的理论预期。
+        sa_ids_by_ctx: dict[tuple[str, str, int], list[str]] = {}
+        for sa_id, obj in sa_index.items():
+            try:
+                ctx = (obj.get("ext", {}) or {}).get("packet_context", {})
+                if not isinstance(ctx, dict):
+                    continue
+                ctx_source_type = str(ctx.get("source_type", "") or "")
+                ctx_origin = str(ctx.get("origin_frame_id", "") or "")
+                try:
+                    ctx_sgi = int(ctx.get("source_group_index", ctx.get("group_index", -1)))
+                except Exception:
+                    ctx_sgi = -1
+                if not ctx_source_type and not ctx_origin and ctx_sgi < 0:
+                    continue
+                sa_ids_by_ctx.setdefault((ctx_source_type, ctx_origin, ctx_sgi), []).append(str(sa_id))
+            except Exception:
+                continue
+
         groups = []
         member_refs: list[str] = []
 
@@ -38,8 +66,71 @@ class CutEngine:
             source_type = str(group.get("source_type", "current"))
             origin_frame_id = str(group.get("origin_frame_id", ""))
             source_group_index = int(group.get("source_group_index", group.get("group_index", order_index)))
+            group_ext = group.get("ext", {}) if isinstance(group.get("ext", {}), dict) else {}
+
+            if (
+                bool(self._config.get("enable_goal_b_char_sa_string_mode", False))
+                and source_type == "internal"
+                and bool(group_ext.get("contains_string_groups", False))
+                and isinstance(group_ext.get("string_groups", []), list)
+                and group_ext.get("string_groups")
+            ):
+                for restored_index, restored_group in enumerate(group_ext.get("string_groups", [])):
+                    if not isinstance(restored_group, dict):
+                        continue
+                    if not (bool(restored_group.get("order_sensitive", False)) and str(restored_group.get("string_unit_kind", "") or "") == "char_sequence"):
+                        continue
+                    restored_source_type = str(restored_group.get("source_type", "internal") or "internal")
+                    restored_origin = str(restored_group.get("origin_frame_id", origin_frame_id) or origin_frame_id)
+                    restored_sgi = int(restored_group.get("source_group_index", restored_group.get("group_index", restored_index)))
+                    restored_sa_ids = [str(sa_id) for sa_id in restored_group.get("sa_ids", []) if str(sa_id)]
+                    restored_csa_members = [csa_index.get(csa_id) for csa_id in restored_group.get("csa_ids", []) if csa_index.get(csa_id)]
+                    restored_csa_members.sort(key=lambda item: item.get("ext", {}).get("packet_context", {}).get("sequence_index", 0))
+                    for csa in restored_csa_members:
+                        for member_id in csa.get("member_sa_ids", []):
+                            member_text = str(member_id)
+                            if member_text:
+                                restored_sa_ids.append(member_text)
+                    restored_ordered_sa_ids = self._dedupe_preserve_order(restored_sa_ids)
+                    restored_sa_members = [sa_index.get(sa_id) for sa_id in restored_ordered_sa_ids if sa_index.get(sa_id)]
+                    restored_sa_members.sort(key=lambda item: item.get("ext", {}).get("packet_context", {}).get("sequence_index", 0))
+                    restored_units = [
+                        self._build_unit_from_packet_object(
+                            obj=sa,
+                            group_index=len(groups),
+                            source_group_index=restored_sgi,
+                            source_type=restored_source_type,
+                            origin_frame_id=restored_origin,
+                        )
+                        for sa in restored_sa_members
+                    ]
+                    restored_units = [unit for unit in restored_units if unit]
+                    if not restored_units:
+                        continue
+                    raw_restored_group = {
+                        "group_index": len(groups),
+                        "source_type": restored_source_type,
+                        "origin_frame_id": restored_origin,
+                        "source_group_index": restored_sgi,
+                        "units": restored_units,
+                        "csa_bundles": [],
+                        "order_sensitive": bool(restored_group.get("order_sensitive", False)),
+                        "string_unit_kind": str(restored_group.get("string_unit_kind", "") or ""),
+                        "string_token_text": str(restored_group.get("string_token_text", "") or ""),
+                    }
+                    normalized_restored = self._normalize_sequence_group(raw_restored_group, order_index=len(groups))
+                    if not normalized_restored.get("units"):
+                        continue
+                    groups.append(normalized_restored)
+                    member_refs.extend(str(unit.get("unit_id", "")) for unit in normalized_restored.get("units", []) if str(unit.get("unit_id", "")))
+                continue
 
             referenced_sa_ids: list[str] = [str(sa_id) for sa_id in group.get("sa_ids", []) if str(sa_id)]
+            # Include implicit members that belong to the same packet-context group.
+            # 说明：这让 “attribute SA 不在 sa_ids 列表里” 仍能被 profile 收集到。
+            implicit = sa_ids_by_ctx.get((source_type, origin_frame_id, int(source_group_index)), [])
+            if implicit:
+                referenced_sa_ids.extend(implicit)
             csa_members = [csa_index.get(csa_id) for csa_id in group.get("csa_ids", []) if csa_index.get(csa_id)]
             csa_members.sort(key=lambda item: item.get("ext", {}).get("packet_context", {}).get("sequence_index", 0))
             for csa in csa_members:
@@ -82,15 +173,20 @@ class CutEngine:
                     if synthetic:
                         units.append(synthetic)
 
+            raw_group = {
+                "group_index": order_index,
+                "source_type": source_type,
+                "origin_frame_id": origin_frame_id,
+                "source_group_index": source_group_index,
+                "units": units,
+                "csa_bundles": csa_bundles,
+            }
+            if bool(self._config.get("enable_goal_b_char_sa_string_mode", False)):
+                raw_group["order_sensitive"] = bool(group.get("order_sensitive", source_type in {"current", "echo"}))
+                raw_group["string_token_text"] = str(group.get("string_token_text", "") or "")
+                raw_group["string_unit_kind"] = str(group.get("string_unit_kind", "") or "")
             normalized_group = self._normalize_sequence_group(
-                {
-                    "group_index": order_index,
-                    "source_type": source_type,
-                    "origin_frame_id": origin_frame_id,
-                    "source_group_index": source_group_index,
-                    "units": units,
-                    "csa_bundles": csa_bundles,
-                },
+                raw_group,
                 order_index=order_index,
             )
             if not normalized_group.get("units"):
@@ -341,6 +437,9 @@ class CutEngine:
         if not existing_units or not incoming_units:
             return 0
 
+        if self._group_requires_order_sensitive_match(existing_group) or self._group_requires_order_sensitive_match(incoming_group):
+            return len(self._ordered_exact_pair_records(existing_units=existing_units, incoming_units=incoming_units))
+
         available_existing: dict[str, list[dict]] = {}
         for unit in existing_units:
             available_existing.setdefault(str(unit.get("unit_signature", "")), []).append(unit)
@@ -538,10 +637,10 @@ class CutEngine:
         csa_items = []
         grouped_sequences = []
         packet_sequence_index = 0
-        internal_group_sa_ids: list[str] = []
-        internal_group_csa_ids: list[str] = []
 
         for fragment in fragments:
+            fragment_ext = fragment.get("ext", {}) if isinstance(fragment.get("ext", {}), dict) else {}
+            skip_display_only_tokens = bool(fragment_ext.get("display_fallback_char_split", False))
             sequence_groups = fragment.get("sequence_groups") or [
                 {
                     "group_index": 0,
@@ -551,6 +650,48 @@ class CutEngine:
                 }
             ]
             normalized_groups = self._normalize_sequence_groups(sequence_groups)
+            if skip_display_only_tokens:
+                filtered_groups: list[dict] = []
+                for group in normalized_groups:
+                    allowed_units = [
+                        dict(unit)
+                        for unit in (group.get("units", []) or [])
+                        if not is_display_only_token(str(unit.get("token", "")))
+                    ]
+                    if not allowed_units:
+                        continue
+                    allowed_unit_ids = {
+                        str(unit.get("unit_id", ""))
+                        for unit in allowed_units
+                        if str(unit.get("unit_id", ""))
+                    }
+                    filtered_bundles = []
+                    for bundle in group.get("csa_bundles", []) or []:
+                        if not isinstance(bundle, dict):
+                            continue
+                        anchor_unit_id = str(bundle.get("anchor_unit_id", ""))
+                        member_unit_ids = [
+                            str(member_id)
+                            for member_id in bundle.get("member_unit_ids", []) or []
+                            if str(member_id) in allowed_unit_ids
+                        ]
+                        if anchor_unit_id not in allowed_unit_ids or len(member_unit_ids) < 2:
+                            continue
+                        filtered_bundle = dict(bundle)
+                        filtered_bundle["member_unit_ids"] = member_unit_ids
+                        filtered_bundles.append(filtered_bundle)
+
+                    filtered_group = dict(group)
+                    filtered_group["units"] = allowed_units
+                    filtered_group["csa_bundles"] = filtered_bundles
+                    filtered_group["tokens"] = [
+                        str(unit.get("token", ""))
+                        for unit in allowed_units
+                        if str(unit.get("token", ""))
+                    ]
+                    filtered_groups.append(filtered_group)
+                normalized_groups = filtered_groups
+
             unit_count = sum(len(group.get("units", [])) for group in normalized_groups)
             if unit_count <= 0:
                 continue
@@ -565,8 +706,15 @@ class CutEngine:
                     continue
                 group_unit_id_map: dict[str, str] = {}
                 created_sa_items: list[dict] = []
+                created_csa_items: list[dict] = []
 
                 for unit in units:
+                    if bool(self._config.get("enable_goal_b_char_sa_string_mode", False)):
+                        token_preview = str(unit.get("token", "") or unit.get("display_text", "") or "")
+                        if str(unit.get("object_type", "sa") or "sa") in {"st", "sg"}:
+                            continue
+                        if bool(unit.get("is_placeholder", False)) or token_preview.startswith("SELF["):
+                            continue
                     sa_id = next_id("sa_internal")
                     token = str(unit.get("token", ""))
                     attribute_name = str(unit.get("attribute_name", ""))
@@ -597,6 +745,9 @@ class CutEngine:
                         "round_created": 0,
                         "decay_count": 0,
                         "sequence_index": packet_sequence_index,
+                        "order_sensitive": bool(unit.get("order_sensitive", source_group.get("order_sensitive", False))),
+                        "string_unit_kind": str(unit.get("string_unit_kind", source_group.get("string_unit_kind", "")) or ""),
+                        "string_token_text": str(unit.get("string_token_text", source_group.get("string_token_text", "")) or ""),
                     }
                     role = str(unit.get("unit_role", "feature"))
                     sa_obj = {
@@ -619,7 +770,6 @@ class CutEngine:
                     group_unit_id_map[str(unit.get("unit_id", ""))] = sa_id
                     created_sa_items.append(sa_obj)
                     sa_items.append(sa_obj)
-                    internal_group_sa_ids.append(sa_id)
                     packet_sequence_index += 1
 
                 created_sa_by_id = {item["id"]: item for item in created_sa_items}
@@ -670,7 +820,7 @@ class CutEngine:
                         "updated_at": now_ms,
                     }
                     csa_items.append(csa_obj)
-                    internal_group_csa_ids.append(csa_id)
+                    created_csa_items.append(csa_obj)
                     for member_id in member_ids:
                         sa_obj = created_sa_by_id.get(member_id)
                         if not sa_obj:
@@ -679,19 +829,19 @@ class CutEngine:
                             sa_obj.setdefault("source", {}).setdefault("parent_ids", [])
                             sa_obj["source"]["parent_ids"] = [anchor_id]
 
-        if internal_group_sa_ids or internal_group_csa_ids:
-            # Internal stimulus is a co-occurrence packet: it carries SA/CSA only,
-            # without reintroducing structure-level temporal groups.
-            grouped_sequences.append(
-                {
-                    "group_index": 0,
-                    "source_type": "internal",
-                    "origin_frame_id": packet_id,
-                    "sa_ids": self._dedupe_preserve_order(internal_group_sa_ids),
-                    "csa_ids": self._dedupe_preserve_order(internal_group_csa_ids),
-                    "source_group_index": 0,
-                }
-            )
+                grouped_sequences.append(
+                    {
+                        "group_index": len(grouped_sequences),
+                        "source_type": "internal",
+                        "origin_frame_id": source_group.get("origin_frame_id", fragment.get("fragment_id", packet_id)),
+                        "sa_ids": self._dedupe_preserve_order([item.get("id", "") for item in created_sa_items if item.get("id")]),
+                        "csa_ids": self._dedupe_preserve_order([item.get("id", "") for item in created_csa_items if item.get("id")]),
+                        "source_group_index": int(source_group.get("source_group_index", source_group.get("group_index", len(grouped_sequences)))),
+                        "order_sensitive": bool(source_group.get("order_sensitive", False)),
+                        "string_unit_kind": str(source_group.get("string_unit_kind", "") or ""),
+                        "string_token_text": str(source_group.get("string_token_text", "") or ""),
+                    }
+                )
 
         total_er = round(sum(item.get("energy", {}).get("er", 0.0) for item in sa_items), 6)
         total_ev = round(sum(item.get("energy", {}).get("ev", 0.0) for item in sa_items), 6)
@@ -744,6 +894,68 @@ class CutEngine:
             return self.build_internal_stimulus_packet([], trace_id=trace_id, tick_id=tick_id)
 
         now_ms = int(time.time() * 1000)
+
+        # When we merge "internal co-occurrence stimulus" into the last external sequence group,
+        # we must ensure the internal units do not interleave with external units in display/order.
+        #
+        # Important:
+        # - Internal stimulus is order-relaxed (bag/co-occurrence) by design.
+        # - External stimulus keeps strict group order.
+        # - In our profile builder, units within a group are sorted by packet_context.sequence_index.
+        #   If internal items keep sequence_index starting from 0, they may appear *before* external tokens
+        #   in the merged last group, which looks like "时序结构混乱" in the UI.
+        #
+        # Fix (best-effort, low-risk):
+        # - Rebase internal SA/CSA packet_context.sequence_index to (max external sequence_index + 1),
+        #   so merged ordering is stable and external-first.
+        def _extract_seq(obj: dict) -> int:
+            ctx = (obj.get("ext", {}) or {}).get("packet_context", {})
+            if isinstance(ctx, dict):
+                try:
+                    if ctx.get("sequence_index", None) is not None:
+                        return int(ctx.get("sequence_index", 0))
+                except Exception:
+                    pass
+            try:
+                return int((obj.get("stimulus", {}) or {}).get("global_sequence_index", 0) or 0)
+            except Exception:
+                return 0
+
+        external_max_seq = 0
+        try:
+            for item in list(external_packet.get("sa_items", []) or []):
+                if not isinstance(item, dict):
+                    continue
+                external_max_seq = max(external_max_seq, _extract_seq(item))
+            for item in list(external_packet.get("csa_items", []) or []):
+                if not isinstance(item, dict):
+                    continue
+                external_max_seq = max(external_max_seq, _extract_seq(item))
+        except Exception:
+            external_max_seq = 0
+
+        def _rebase_internal_obj(obj: dict) -> dict:
+            cloned = dict(obj)
+            ext = dict(cloned.get("ext", {}) or {})
+            ctx = dict(ext.get("packet_context", {}) or {})
+            ctx["sequence_index"] = int(external_max_seq) + 1
+            ext["packet_context"] = ctx
+            cloned["ext"] = ext
+            return cloned
+
+        external_sa_items = [item for item in list(external_packet.get("sa_items", []) or []) if isinstance(item, dict)]
+        external_csa_items = [item for item in list(external_packet.get("csa_items", []) or []) if isinstance(item, dict)]
+        internal_sa_items = [
+            _rebase_internal_obj(item)
+            for item in list(internal_packet.get("sa_items", []) or [])
+            if isinstance(item, dict)
+        ]
+        internal_csa_items = [
+            _rebase_internal_obj(item)
+            for item in list(internal_packet.get("csa_items", []) or [])
+            if isinstance(item, dict)
+        ]
+
         merged = {
             "id": next_id("spkt_merge"),
             "object_type": "stimulus_packet",
@@ -752,8 +964,8 @@ class CutEngine:
             "packet_type": "merged",
             "current_frame_id": external_packet.get("current_frame_id", external_packet.get("id", "")),
             "echo_frame_ids": list(external_packet.get("echo_frame_ids", [])),
-            "sa_items": list(external_packet.get("sa_items", [])) + list(internal_packet.get("sa_items", [])),
-            "csa_items": list(external_packet.get("csa_items", [])) + list(internal_packet.get("csa_items", [])),
+            "sa_items": list(external_sa_items) + list(internal_sa_items),
+            "csa_items": list(external_csa_items) + list(internal_csa_items),
             "echo_frames": list(external_packet.get("echo_frames", [])),
             "grouped_sa_sequences": [],
             "trace_id": trace_id,
@@ -791,19 +1003,107 @@ class CutEngine:
         if not internal_csa_ids:
             internal_csa_ids = [str(item.get("id", "")) for item in internal_packet.get("csa_items", []) if str(item.get("id", ""))]
 
-        if external_groups:
-            merged_groups = external_groups
-            last_group = dict(merged_groups[-1])
-            last_group["sa_ids"] = self._dedupe_preserve_order(
-                [str(sa_id) for sa_id in last_group.get("sa_ids", []) if str(sa_id)] + internal_sa_ids
-            )
-            last_group["csa_ids"] = self._dedupe_preserve_order(
-                [str(csa_id) for csa_id in last_group.get("csa_ids", []) if str(csa_id)] + internal_csa_ids
-            )
-            merged_groups[-1] = last_group
-        else:
-            merged_groups = internal_groups
-            if not merged_groups and (internal_sa_ids or internal_csa_ids):
+        if bool(self._config.get("enable_goal_b_char_sa_string_mode", False)) and internal_groups:
+            string_texts = {
+                str(group.get("string_token_text", "") or "").strip()
+                for group in internal_groups
+                if isinstance(group, dict)
+                and bool(group.get("order_sensitive", False))
+                and str(group.get("string_unit_kind", "") or "") == "char_sequence"
+                and str(group.get("string_token_text", "") or "").strip()
+            }
+            filtered_internal_sa_ids = []
+            for sa_id in self._dedupe_preserve_order(internal_sa_ids):
+                sa_obj = next((item for item in internal_sa_items if str(item.get("id", "")) == str(sa_id)), None)
+                if not isinstance(sa_obj, dict):
+                    filtered_internal_sa_ids.append(sa_id)
+                    continue
+                ctx = ((sa_obj.get("ext", {}) or {}).get("packet_context", {}) or {})
+                token_text = str(((sa_obj.get("content", {}) or {}).get("raw", (sa_obj.get("content", {}) or {}).get("display", "")) or "").strip())
+                if (
+                    token_text in string_texts
+                    and not bool(ctx.get("order_sensitive", False))
+                    and str(ctx.get("string_unit_kind", "") or "") != "char_sequence"
+                ):
+                    continue
+                filtered_internal_sa_ids.append(sa_id)
+            string_group_payload = [dict(group) for group in internal_groups if isinstance(group, dict)]
+            if external_groups:
+                merged_groups = [dict(group) for group in external_groups]
+                last_group = dict(merged_groups[-1])
+                last_group["sa_ids"] = self._dedupe_preserve_order(
+                    list(last_group.get("sa_ids", []) or []) + list(filtered_internal_sa_ids)
+                )
+                last_group["csa_ids"] = self._dedupe_preserve_order(
+                    list(last_group.get("csa_ids", []) or []) + list(internal_csa_ids)
+                )
+                last_ext = dict(last_group.get("ext", {}) or {})
+                last_ext["contains_internal_group"] = True
+                last_ext["internal_merge_mode"] = "append_to_last_external_group"
+                last_ext["internal_source_packet_id"] = str(internal_packet.get("id", "") or "")
+                last_ext["internal_string_groups"] = string_group_payload
+                last_group["ext"] = last_ext
+                merged_groups[-1] = last_group
+            else:
+                merged_internal_group = {
+                    "group_index": 0,
+                    "source_type": "internal",
+                    "origin_frame_id": internal_packet.get("id", ""),
+                    "sa_ids": filtered_internal_sa_ids,
+                    "csa_ids": self._dedupe_preserve_order(internal_csa_ids),
+                    "source_group_index": 0,
+                    "order_sensitive": False,
+                    "string_unit_kind": "",
+                    "string_token_text": "",
+                    "ext": {
+                        "contains_string_groups": True,
+                        "contains_internal_group": True,
+                        "internal_merge_mode": "internal_only_packet",
+                        "internal_string_groups": string_group_payload,
+                    },
+                }
+                merged_groups = [merged_internal_group]
+        elif internal_groups:
+            if external_groups:
+                merged_groups = [dict(group) for group in external_groups]
+                last_group = dict(merged_groups[-1])
+                appended_sa_ids = [
+                    str(sa_id) for group in internal_groups for sa_id in (group.get("sa_ids", []) or []) if str(sa_id)
+                ]
+                appended_csa_ids = [
+                    str(csa_id) for group in internal_groups for csa_id in (group.get("csa_ids", []) or []) if str(csa_id)
+                ]
+                last_group["sa_ids"] = self._dedupe_preserve_order(
+                    list(last_group.get("sa_ids", []) or []) + appended_sa_ids
+                )
+                last_group["csa_ids"] = self._dedupe_preserve_order(
+                    list(last_group.get("csa_ids", []) or []) + appended_csa_ids
+                )
+                last_ext = dict(last_group.get("ext", {}) or {})
+                last_ext["contains_internal_group"] = True
+                last_ext["internal_merge_mode"] = "append_to_last_external_group"
+                last_ext["internal_groups"] = [dict(group) for group in internal_groups if isinstance(group, dict)]
+                last_group["ext"] = last_ext
+                merged_groups[-1] = last_group
+            else:
+                merged_groups = list(internal_groups)
+        elif internal_sa_ids or internal_csa_ids:
+            if external_groups:
+                merged_groups = [dict(group) for group in external_groups]
+                last_group = dict(merged_groups[-1])
+                last_group["sa_ids"] = self._dedupe_preserve_order(
+                    list(last_group.get("sa_ids", []) or []) + list(internal_sa_ids)
+                )
+                last_group["csa_ids"] = self._dedupe_preserve_order(
+                    list(last_group.get("csa_ids", []) or []) + list(internal_csa_ids)
+                )
+                last_ext = dict(last_group.get("ext", {}) or {})
+                last_ext["contains_internal_group"] = True
+                last_ext["internal_merge_mode"] = "append_to_last_external_group"
+                last_ext["internal_source_packet_id"] = str(internal_packet.get("id", "") or "")
+                last_group["ext"] = last_ext
+                merged_groups[-1] = last_group
+            else:
                 merged_groups = [
                     {
                         "group_index": 0,
@@ -812,9 +1112,58 @@ class CutEngine:
                         "sa_ids": self._dedupe_preserve_order(internal_sa_ids),
                         "csa_ids": self._dedupe_preserve_order(internal_csa_ids),
                         "source_group_index": 0,
+                        "ext": {
+                            "contains_internal_group": True,
+                            "internal_merge_mode": "internal_only_packet",
+                        },
                     }
                 ]
+        else:
+            merged_groups = list(external_groups)
 
+        if bool(self._config.get("enable_goal_b_char_sa_string_mode", False)):
+            string_group_signatures: list[tuple[str, ...]] = []
+            for group in merged_groups:
+                if not isinstance(group, dict):
+                    continue
+                if not bool(group.get("order_sensitive", False)):
+                    continue
+                if str(group.get("string_unit_kind", "") or "") != "char_sequence":
+                    continue
+                group_sa = [
+                    item for item in merged.get("sa_items", [])
+                    if isinstance(item, dict) and str(((item.get("ext", {}) or {}).get("packet_context", {}) or {}).get("group_index", "")) == str(group.get("group_index", ""))
+                ]
+                tokens = [
+                    str(((item.get("content", {}) or {}).get("raw", (item.get("content", {}) or {}).get("display", "")) or ""))
+                    for item in group_sa
+                    if str(((item.get("stimulus", {}) or {}).get("role", "feature") or "feature")) == "feature"
+                ]
+                tokens = [t for t in tokens if t]
+                if len(tokens) >= 2:
+                    string_group_signatures.append(tuple(tokens))
+            if string_group_signatures:
+                filtered_groups = []
+                for group in merged_groups:
+                    if not isinstance(group, dict):
+                        continue
+                    if bool(group.get("order_sensitive", False)) and str(group.get("string_unit_kind", "") or "") == "char_sequence":
+                        filtered_groups.append(group)
+                        continue
+                    group_sa = [
+                        item for item in merged.get("sa_items", [])
+                        if isinstance(item, dict) and str(((item.get("ext", {}) or {}).get("packet_context", {}) or {}).get("group_index", "")) == str(group.get("group_index", ""))
+                    ]
+                    feature_tokens = [
+                        str(((item.get("content", {}) or {}).get("raw", (item.get("content", {}) or {}).get("display", "")) or ""))
+                        for item in group_sa
+                        if str(((item.get("stimulus", {}) or {}).get("role", "feature") or "feature")) == "feature"
+                    ]
+                    feature_tokens = [t for t in feature_tokens if t]
+                    if len(feature_tokens) == 1 and any(feature_tokens[0] in sig for sig in string_group_signatures):
+                        continue
+                    filtered_groups.append(group)
+                merged_groups = filtered_groups
         for index, group in enumerate(merged_groups):
             group["group_index"] = index
         merged["grouped_sa_sequences"] = merged_groups
@@ -902,6 +1251,9 @@ class CutEngine:
                     source_type=str(group.get("source_type", "")),
                     origin_frame_id=str(group.get("origin_frame_id", "")),
                     source_group_index=int(group.get("source_group_index", group.get("group_index", order_index))),
+                    group_order_sensitive=bool(group.get("order_sensitive", False)),
+                    group_string_kind=str(group.get("string_unit_kind", "") or ""),
+                    group_string_text=str(group.get("string_token_text", "") or ""),
                 )
                 for index, unit in enumerate(raw_units)
             ]
@@ -920,6 +1272,9 @@ class CutEngine:
                     source_type=str(group.get("source_type", "")),
                     origin_frame_id=str(group.get("origin_frame_id", "")),
                     source_group_index=int(group.get("source_group_index", group.get("group_index", order_index))),
+                    group_order_sensitive=bool(group.get("order_sensitive", False)),
+                    group_string_kind=str(group.get("string_unit_kind", "") or ""),
+                    group_string_text=str(group.get("string_token_text", "") or ""),
                 )
                 for index, token in enumerate(group.get("tokens", []))
                 if str(token)
@@ -941,20 +1296,71 @@ class CutEngine:
         if not tokens:
             tokens = [str(unit.get("token", "")) for unit in units if str(unit.get("token", ""))]
 
+        order_sensitive = bool(group.get("order_sensitive", False))
+        string_token_text = str(group.get("string_token_text", "") or "")
+        if order_sensitive and not string_token_text:
+            string_token_text = "".join(tokens)
+
         return {
             "group_index": order_index,
             "source_type": str(group.get("source_type", "")),
             "origin_frame_id": str(group.get("origin_frame_id", "")),
             "tokens": tokens,
-            "display_text": format_group_display(units, bundles) or "".join(tokens),
-            "group_signature": self._compose_group_signature(units, bundles),
+            "display_text": format_group_display({**group, "units": units, "csa_bundles": bundles}) or "".join(tokens),
+            "group_signature": self._compose_group_signature(units, bundles, order_sensitive=order_sensitive),
             "source_group_index": int(group.get("source_group_index", group.get("group_index", order_index))),
             "source_sequence_index": int(group.get("source_sequence_index", 0)),
+            "order_sensitive": order_sensitive,
+            "string_unit_kind": str(group.get("string_unit_kind", "") or ""),
+            "string_token_text": string_token_text,
             "units": units,
             "unit_signatures": [str(unit.get("unit_signature", "")) for unit in units if str(unit.get("unit_signature", ""))],
             "csa_bundles": bundles,
             "bundle_signatures": [str(bundle.get("bundle_signature", "")) for bundle in bundles if str(bundle.get("bundle_signature", ""))],
         }
+
+    def _group_requires_order_sensitive_match(self, group: dict) -> bool:
+        return bool(group.get("order_sensitive", False))
+
+    def _ordered_exact_pair_records(self, *, existing_units: list[dict], incoming_units: list[dict]) -> list[dict]:
+        """Return exact-signature LCS pairs for groups whose internal SA order is semantic."""
+        rows = len(existing_units) + 1
+        cols = len(incoming_units) + 1
+        dp = [[0 for _ in range(cols)] for _ in range(rows)]
+        for i in range(1, rows):
+            existing_signature = str(existing_units[i - 1].get("unit_signature", ""))
+            for j in range(1, cols):
+                incoming_signature = str(incoming_units[j - 1].get("unit_signature", ""))
+                if existing_signature and existing_signature == incoming_signature:
+                    dp[i][j] = dp[i - 1][j - 1] + 1
+                else:
+                    dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
+
+        pair_records: list[dict] = []
+        i = len(existing_units)
+        j = len(incoming_units)
+        while i > 0 and j > 0:
+            existing_unit = existing_units[i - 1]
+            incoming_unit = incoming_units[j - 1]
+            existing_signature = str(existing_unit.get("unit_signature", ""))
+            incoming_signature = str(incoming_unit.get("unit_signature", ""))
+            if existing_signature and existing_signature == incoming_signature:
+                pair_records.append(
+                    {
+                        "existing_unit": dict(existing_unit),
+                        "incoming_unit": dict(incoming_unit),
+                        "common_unit": dict(incoming_unit),
+                        "similarity": 1.0,
+                    }
+                )
+                i -= 1
+                j -= 1
+            elif dp[i - 1][j] >= dp[i][j - 1]:
+                i -= 1
+            else:
+                j -= 1
+        pair_records.reverse()
+        return pair_records
 
     def _maximum_common_group(self, *, existing_group: dict, incoming_group: dict) -> dict:
         existing_units = list(existing_group.get("units", []))
@@ -971,25 +1377,33 @@ class CutEngine:
                 "matched_incoming_unit_count": 0,
             }
 
-        available_existing: dict[str, list[dict]] = {}
-        for unit in existing_units:
-            available_existing.setdefault(str(unit.get("unit_signature", "")), []).append(dict(unit))
+        order_sensitive_match = bool(
+            self._group_requires_order_sensitive_match(existing_group)
+            or self._group_requires_order_sensitive_match(incoming_group)
+        )
 
-        pair_records = []
-        for incoming_unit in incoming_units:
-            signature = str(incoming_unit.get("unit_signature", ""))
-            bucket = available_existing.get(signature, [])
-            if not bucket:
-                continue
-            matched_existing = bucket.pop(0)
-            pair_records.append(
-                {
-                    "existing_unit": matched_existing,
-                    "incoming_unit": dict(incoming_unit),
-                    "common_unit": dict(incoming_unit),
-                    "similarity": 1.0,
-                }
-            )
+        if order_sensitive_match:
+            pair_records = self._ordered_exact_pair_records(existing_units=existing_units, incoming_units=incoming_units)
+        else:
+            available_existing: dict[str, list[dict]] = {}
+            for unit in existing_units:
+                available_existing.setdefault(str(unit.get("unit_signature", "")), []).append(dict(unit))
+
+            pair_records = []
+            for incoming_unit in incoming_units:
+                signature = str(incoming_unit.get("unit_signature", ""))
+                bucket = available_existing.get(signature, [])
+                if not bucket:
+                    continue
+                matched_existing = bucket.pop(0)
+                pair_records.append(
+                    {
+                        "existing_unit": matched_existing,
+                        "incoming_unit": dict(incoming_unit),
+                        "common_unit": dict(incoming_unit),
+                        "similarity": 1.0,
+                    }
+                )
 
         matched_existing_units = [dict(item.get("existing_unit", {})) for item in pair_records]
         matched_incoming_units = [dict(item.get("incoming_unit", {})) for item in pair_records]
@@ -1000,93 +1414,94 @@ class CutEngine:
         residual_existing_units = [dict(unit) for unit in existing_units if str(unit.get("unit_id", "")) not in matched_existing_ids]
         residual_incoming_units = [dict(unit) for unit in incoming_units if str(unit.get("unit_id", "")) not in matched_incoming_ids]
 
-        still_existing = [dict(unit) for unit in residual_existing_units]
-        still_incoming = [dict(unit) for unit in residual_incoming_units]
-        residual_existing_units = []
-        residual_incoming_units = []
-        for incoming_unit in still_incoming:
-            best_index = -1
-            best_existing = None
-            best_match = None
-            best_key = None
-            for index, existing_unit in enumerate(still_existing):
-                numeric_match = self._numeric_unit_match(existing_unit=existing_unit, incoming_unit=incoming_unit)
-                if not numeric_match:
+        if not order_sensitive_match:
+            still_existing = [dict(unit) for unit in residual_existing_units]
+            still_incoming = [dict(unit) for unit in residual_incoming_units]
+            residual_existing_units = []
+            residual_incoming_units = []
+            for incoming_unit in still_incoming:
+                best_index = -1
+                best_existing = None
+                best_match = None
+                best_key = None
+                for index, existing_unit in enumerate(still_existing):
+                    numeric_match = self._numeric_unit_match(existing_unit=existing_unit, incoming_unit=incoming_unit)
+                    if not numeric_match:
+                        continue
+                    candidate_key = (
+                        float(numeric_match.get("similarity", 0.0)),
+                        -float(numeric_match.get("distance", 0.0)),
+                        -abs(int(existing_unit.get("sequence_index", 0)) - int(incoming_unit.get("sequence_index", 0))),
+                    )
+                    if best_key is None or candidate_key > best_key:
+                        best_key = candidate_key
+                        best_index = index
+                        best_existing = dict(existing_unit)
+                        best_match = dict(numeric_match)
+                if best_index < 0 or best_existing is None or best_match is None:
+                    residual_incoming_units.append(dict(incoming_unit))
                     continue
-                candidate_key = (
-                    float(numeric_match.get("similarity", 0.0)),
-                    -float(numeric_match.get("distance", 0.0)),
-                    -abs(int(existing_unit.get("sequence_index", 0)) - int(incoming_unit.get("sequence_index", 0))),
+                common_unit = self._generalize_numeric_common_unit(
+                    existing_unit=best_existing,
+                    incoming_unit=incoming_unit,
+                    numeric_match=best_match,
                 )
-                if best_key is None or candidate_key > best_key:
-                    best_key = candidate_key
-                    best_index = index
-                    best_existing = dict(existing_unit)
-                    best_match = dict(numeric_match)
-            if best_index < 0 or best_existing is None or best_match is None:
-                residual_incoming_units.append(dict(incoming_unit))
-                continue
-            common_unit = self._generalize_numeric_common_unit(
-                existing_unit=best_existing,
-                incoming_unit=incoming_unit,
-                numeric_match=best_match,
-            )
-            matched_existing_units.append(best_existing)
-            matched_incoming_units.append(dict(incoming_unit))
-            common_units.append(common_unit)
-            pair_records.append(
-                {
-                    "existing_unit": best_existing,
-                    "incoming_unit": dict(incoming_unit),
-                    "common_unit": dict(common_unit),
-                    "similarity": float(best_match.get("similarity", 1.0)),
-                }
-            )
-            still_existing.pop(best_index)
+                matched_existing_units.append(best_existing)
+                matched_incoming_units.append(dict(incoming_unit))
+                common_units.append(common_unit)
+                pair_records.append(
+                    {
+                        "existing_unit": best_existing,
+                        "incoming_unit": dict(incoming_unit),
+                        "common_unit": dict(common_unit),
+                        "similarity": float(best_match.get("similarity", 1.0)),
+                    }
+                )
+                still_existing.pop(best_index)
 
-        remaining_existing = [dict(unit) for unit in still_existing]
-        still_existing = []
-        still_incoming = [dict(unit) for unit in residual_incoming_units]
-        residual_incoming_units = []
-        for incoming_unit in still_incoming:
-            best_index = -1
-            best_existing = None
-            best_match = None
-            best_key = None
-            for index, existing_unit in enumerate(remaining_existing):
-                structure_match = self._structure_unit_match(existing_unit=existing_unit, incoming_unit=incoming_unit)
-                if not structure_match:
+            remaining_existing = [dict(unit) for unit in still_existing]
+            still_existing = []
+            still_incoming = [dict(unit) for unit in residual_incoming_units]
+            residual_incoming_units = []
+            for incoming_unit in still_incoming:
+                best_index = -1
+                best_existing = None
+                best_match = None
+                best_key = None
+                for index, existing_unit in enumerate(remaining_existing):
+                    structure_match = self._structure_unit_match(existing_unit=existing_unit, incoming_unit=incoming_unit)
+                    if not structure_match:
+                        continue
+                    candidate_key = (
+                        float(structure_match.get("similarity", 0.0)),
+                        -abs(int(existing_unit.get("sequence_index", 0)) - int(incoming_unit.get("sequence_index", 0))),
+                    )
+                    if best_key is None or candidate_key > best_key:
+                        best_key = candidate_key
+                        best_index = index
+                        best_existing = dict(existing_unit)
+                        best_match = dict(structure_match)
+                if best_index < 0 or best_existing is None or best_match is None:
+                    residual_incoming_units.append(dict(incoming_unit))
                     continue
-                candidate_key = (
-                    float(structure_match.get("similarity", 0.0)),
-                    -abs(int(existing_unit.get("sequence_index", 0)) - int(incoming_unit.get("sequence_index", 0))),
+                common_unit = self._generalize_structure_common_unit(
+                    existing_unit=best_existing,
+                    incoming_unit=incoming_unit,
+                    structure_match=best_match,
                 )
-                if best_key is None or candidate_key > best_key:
-                    best_key = candidate_key
-                    best_index = index
-                    best_existing = dict(existing_unit)
-                    best_match = dict(structure_match)
-            if best_index < 0 or best_existing is None or best_match is None:
-                residual_incoming_units.append(dict(incoming_unit))
-                continue
-            common_unit = self._generalize_structure_common_unit(
-                existing_unit=best_existing,
-                incoming_unit=incoming_unit,
-                structure_match=best_match,
-            )
-            matched_existing_units.append(best_existing)
-            matched_incoming_units.append(dict(incoming_unit))
-            common_units.append(common_unit)
-            pair_records.append(
-                {
-                    "existing_unit": best_existing,
-                    "incoming_unit": dict(incoming_unit),
-                    "common_unit": dict(common_unit),
-                    "similarity": float(best_match.get("similarity", 1.0)),
-                }
-            )
-            remaining_existing.pop(best_index)
-        residual_existing_units.extend(dict(unit) for unit in remaining_existing)
+                matched_existing_units.append(best_existing)
+                matched_incoming_units.append(dict(incoming_unit))
+                common_units.append(common_unit)
+                pair_records.append(
+                    {
+                        "existing_unit": best_existing,
+                        "incoming_unit": dict(incoming_unit),
+                        "common_unit": dict(common_unit),
+                        "similarity": float(best_match.get("similarity", 1.0)),
+                    }
+                )
+                remaining_existing.pop(best_index)
+            residual_existing_units.extend(dict(unit) for unit in remaining_existing)
 
         common_bundles = self._build_common_raw_bundles(
             existing_group=existing_group,
@@ -1170,6 +1585,9 @@ class CutEngine:
             "origin_frame_id": template_group.get("origin_frame_id", ""),
             "source_group_index": int(template_group.get("source_group_index", template_group.get("group_index", order_index))),
             "source_sequence_index": int(template_group.get("source_sequence_index", 0)),
+            "order_sensitive": bool(template_group.get("order_sensitive", False)),
+            "string_unit_kind": str(template_group.get("string_unit_kind", "") or ""),
+            "string_token_text": str(template_group.get("string_token_text", "") or ""),
             "units": [dict(unit) for unit in units if isinstance(unit, dict)],
         }
         if raw_bundles is not None:
@@ -1194,6 +1612,9 @@ class CutEngine:
             "origin_frame_id": normalized.get("origin_frame_id", ""),
             "source_group_index": int(normalized.get("source_group_index", order_index)),
             "source_sequence_index": int(normalized.get("source_sequence_index", 0)),
+            "order_sensitive": bool(normalized.get("order_sensitive", False)),
+            "string_unit_kind": str(normalized.get("string_unit_kind", "") or ""),
+            "string_token_text": str(normalized.get("string_token_text", "") or ""),
             "units": stripped_units,
             "csa_bundles": [
                 {
@@ -1218,6 +1639,9 @@ class CutEngine:
         source_type: str,
         origin_frame_id: str,
         source_group_index: int,
+        group_order_sensitive: bool = False,
+        group_string_kind: str = "",
+        group_string_text: str = "",
     ) -> dict | None:
         token = str(unit.get("token", unit.get("display_text", unit.get("content", {}).get("display", ""))))
         if not token:
@@ -1237,6 +1661,10 @@ class CutEngine:
         er = round(float(unit.get("er", unit.get("energy", {}).get("er", 0.0))), 8)
         ev = round(float(unit.get("ev", unit.get("energy", {}).get("ev", 0.0))), 8)
         sensor_fatigue = dict(unit.get("sensor_fatigue", {}) or {})
+        raw_order_sensitive = unit.get("order_sensitive")
+        packet_order_sensitive = bool(group_order_sensitive if raw_order_sensitive is None else raw_order_sensitive)
+        packet_string_unit_kind = str(unit.get("string_unit_kind", group_string_kind) or "")
+        packet_string_token_text = str(unit.get("string_token_text", group_string_text) or "")
         return {
             "unit_id": unit_id,
             "object_type": str(unit.get("object_type", "sa")),
@@ -1249,6 +1677,9 @@ class CutEngine:
             "source_group_index": int(unit.get("source_group_index", source_group_index)),
             "source_type": str(unit.get("source_type", source_type)),
             "origin_frame_id": str(unit.get("origin_frame_id", origin_frame_id)),
+            "order_sensitive": packet_order_sensitive,
+            "string_unit_kind": packet_string_unit_kind,
+            "string_token_text": packet_string_token_text,
             "er": er,
             "ev": ev,
             "total_energy": round(er + ev, 8),
@@ -1274,15 +1705,20 @@ class CutEngine:
             "bundle_member_signatures": list(unit.get("bundle_member_signatures", [])),
         }
 
-    def _compose_group_signature(self, units: list[dict], bundles: list[dict]) -> str:
-        unit_part = self.tokens_to_signature(sorted(str(unit.get("unit_signature", "")) for unit in units if str(unit.get("unit_signature", ""))))
+    def _compose_group_signature(self, units: list[dict], bundles: list[dict], *, order_sensitive: bool = False) -> str:
+        unit_signatures = [str(unit.get("unit_signature", "")) for unit in units if str(unit.get("unit_signature", ""))]
+        if order_sensitive:
+            unit_part = self.tokens_to_signature(unit_signatures)
+        else:
+            unit_part = self.tokens_to_signature(sorted(unit_signatures))
         bundle_part = self.tokens_to_signature(sorted(str(bundle.get("bundle_signature", "")) for bundle in bundles if str(bundle.get("bundle_signature", ""))))
+        prefix = "OS" if order_sensitive else "U"
         if unit_part and bundle_part:
-            return f"U[{unit_part}]#B[{bundle_part}]"
+            return f"{prefix}[{unit_part}]#B[{bundle_part}]"
         if bundle_part:
             return f"B[{bundle_part}]"
         if unit_part:
-            return f"U[{unit_part}]"
+            return f"{prefix}[{unit_part}]"
         return ""
 
     def _infer_raw_bundles_from_units(self, units: list[dict]) -> list[dict]:
@@ -1806,6 +2242,9 @@ class CutEngine:
             "origin_frame_id": group.get("origin_frame_id", ""),
             "source_group_index": int(group.get("source_group_index", group.get("group_index", order_index))),
             "source_sequence_index": int(group.get("source_sequence_index", 0)),
+            "order_sensitive": bool(group.get("order_sensitive", False)),
+            "string_unit_kind": str(group.get("string_unit_kind", "") or ""),
+            "string_token_text": str(group.get("string_token_text", "") or ""),
             "units": [dict(unit) for unit in group.get("units", [])],
             "csa_bundles": [dict(bundle) for bundle in group.get("csa_bundles", [])],
         }
@@ -1827,6 +2266,9 @@ class CutEngine:
         sequence_index = int(packet_context.get("sequence_index", obj.get("stimulus", {}).get("global_sequence_index", 0)))
         effective_source_type = str(packet_context.get("source_type", source_type))
         effective_source_group_index = int(packet_context.get("source_group_index", source_group_index))
+        packet_order_sensitive = bool(packet_context.get("order_sensitive", False))
+        packet_string_unit_kind = str(packet_context.get("string_unit_kind", "") or "")
+        packet_string_token_text = str(packet_context.get("string_token_text", "") or "")
         effective_origin_frame_id = str(packet_context.get("origin_frame_id", origin_frame_id))
         role = str(obj.get("stimulus", {}).get("role", "feature") or "feature")
         parent_ids = list((obj.get("source", {}) or {}).get("parent_ids", []))
@@ -1846,6 +2288,9 @@ class CutEngine:
             "source_group_index": effective_source_group_index,
             "source_type": effective_source_type,
             "origin_frame_id": effective_origin_frame_id,
+            "order_sensitive": packet_order_sensitive,
+            "string_unit_kind": packet_string_unit_kind,
+            "string_token_text": packet_string_token_text,
             "er": er,
             "ev": ev,
             "total_energy": round(er + ev, 8),
@@ -1983,5 +2428,7 @@ class CutEngine:
             if char.isalnum() or "\u4e00" <= char <= "\u9fff":
                 return False
         return True
+
+
 
 

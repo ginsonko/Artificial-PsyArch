@@ -344,10 +344,18 @@ class StructureStore:
         db_count = len(self._structure_dbs)
         for structure_id in list(self._structures):
             self.delete_structure(structure_id)
+        orphan_db_count = 0
+        for path in list_json_files(self._indexes_dir):
+            if remove_file(path):
+                orphan_db_count += 1
         self._structures.clear()
         self._structure_dbs.clear()
         self._owner_to_db.clear()
-        return {"structure_count": structure_count, "structure_db_count": db_count}
+        return {
+            "structure_count": structure_count,
+            "structure_db_count": db_count + orphan_db_count,
+            "orphan_structure_db_count": orphan_db_count,
+        }
 
     def get_recent_structures(self, limit: int = 10) -> list[dict]:
         if limit <= 0:
@@ -371,28 +379,44 @@ class StructureStore:
         write_json_file(self._db_file_path(structure_db["structure_db_id"]), structure_db)
 
     def _load(self) -> None:
+        referenced_db_ids: set[str] = set()
         for path in list_json_files(self._structures_dir):
             payload = load_json_file(path, default=None)
             if not isinstance(payload, dict) or not payload.get("id"):
                 continue
             structure_id = payload["id"]
             self._structures[structure_id] = payload
+            structure_db_id = str(payload.get("db_pointer", {}).get("structure_db_id", ""))
+            if structure_db_id:
+                referenced_db_ids.add(structure_db_id)
             numeric_tail = structure_id.rsplit("_", 1)[-1]
             if numeric_tail.isdigit():
                 ensure_counter("st", int(numeric_tail))
 
         for path in list_json_files(self._indexes_dir):
+            numeric_tail = path.stem.rsplit("_", 1)[-1]
+            if numeric_tail.isdigit():
+                ensure_counter("sdb", int(numeric_tail))
+            if referenced_db_ids and path.stem not in referenced_db_ids:
+                continue
+            if self._structures and not referenced_db_ids:
+                # Legacy fallback: structure files without db pointers are invalid for
+                # current storage, so avoid loading every orphan DB into memory.
+                continue
+            if not self._structures:
+                continue
             payload = load_json_file(path, default=None)
             if not isinstance(payload, dict) or not payload.get("structure_db_id"):
                 continue
             structure_db_id = payload["structure_db_id"]
-            self._structure_dbs[structure_db_id] = payload
+            if referenced_db_ids and structure_db_id not in referenced_db_ids:
+                continue
             owner_id = payload.get("owner_structure_id", "")
+            if owner_id and owner_id not in self._structures:
+                continue
+            self._structure_dbs[structure_db_id] = payload
             if owner_id:
                 self._owner_to_db[owner_id] = structure_db_id
-            numeric_tail = structure_db_id.rsplit("_", 1)[-1]
-            if numeric_tail.isdigit():
-                ensure_counter("sdb", int(numeric_tail))
 
         for structure_id, structure_obj in self._structures.items():
             structure_db_id = structure_obj.get("db_pointer", {}).get("structure_db_id", "")
@@ -403,15 +427,29 @@ class StructureStore:
         structure_obj = self.get(structure_id)
         if structure_obj is None:
             return None
-        display_text = structure_obj.get("structure", {}).get("display_text", structure_id)
+        structure = structure_obj.get("structure", {}) if isinstance(structure_obj.get("structure", {}), dict) else {}
+        display_text = str(structure.get("display_text", structure_id) or structure_id)
+        flat_tokens = [str(token) for token in (structure.get("flat_tokens", []) or []) if str(token)]
+        plain_text = "".join(flat_tokens) if flat_tokens else ""
+        if not plain_text and isinstance(structure.get("sequence_groups", []), list):
+            plain_parts = []
+            for group in structure.get("sequence_groups", []):
+                if not isinstance(group, dict):
+                    continue
+                if bool(group.get("order_sensitive", False)) and str(group.get("string_unit_kind", "") or "") == "char_sequence":
+                    text_part = str(group.get("string_token_text", "") or "")
+                    if text_part:
+                        plain_parts.append(text_part)
+            plain_text = "".join(part for part in plain_parts if part)
+        canonical_text = plain_text or structure_id
         return {
             "id": structure_id,
             "object_type": "st",
             "sub_type": structure_obj.get("sub_type", "stimulus_sequence_structure"),
             "content": {
-                "raw": display_text,
+                "raw": canonical_text,
                 "display": display_text,
-                "normalized": display_text,
+                "normalized": canonical_text,
             },
             "energy": {
                 "er": round(float(er), 6),

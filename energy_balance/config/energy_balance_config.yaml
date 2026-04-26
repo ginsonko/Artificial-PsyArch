@@ -11,7 +11,8 @@
 # Purpose / 作用: Master on/off switch for the balance controller.
 # Meaning / 意义: When false, the controller outputs no modulation and keeps its state unchanged.
 # Reference / 参考: Default false (safe). Enable when you want stable EV:ER alignment experiments.
-enabled: false
+
+enabled: true
 
 # target_ratio / 目标比例（EV_total / ER_total）
 # Purpose / 作用: Target ratio that the global EV/ER should converge to.
@@ -40,6 +41,7 @@ ki: 0.04
 # Purpose / 作用: Clamp range for the controller output g (positive scale factor).
 # Meaning / 意义: Prevents the controller from driving EV propagation too extreme.
 g_min: 0.2
+
 g_max: 5.0
 
 # min_total_energy_to_update / 低能量冻结阈值
@@ -58,4 +60,3 @@ min_total_energy_to_update: 0.5
 apply_scales:
   ev_propagation_ratio_scale: true
   er_induction_ratio_scale: true
-

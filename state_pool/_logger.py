@@ -217,11 +217,16 @@ class ModuleLogger:
             current_path = target_dir / f"{level_key}_current.log"
             if current_path.exists():
                 ts = time.strftime("%Y-%m-%d_%H-%M-%S")
-                archive_path = target_dir / f"{level_key}_{ts}.log"
+                archive_path = target_dir / f"{level_key}_{ts}_{os.getpid()}_{time.time_ns()}.log"
                 current_path.rename(archive_path)
         except OSError:
-            if self._stdout_fallback:
-                print(f"[{_MODULE_NAME}] 日志轮转失败 / Log rotation failed: {level_key}", file=sys.stderr)
+            # Do not spam stderr on transient rotation failures.
+            # Fall back to reopening/continuing the current file so logging stays non-blocking.
+            try:
+                filepath = target_dir / f"{level_key}_current.log"
+                self._handles[level_key] = open(filepath, "a", encoding="utf-8")
+            except OSError:
+                pass
 
     def close(self):
         """关闭所有打开的日志文件句柄。"""

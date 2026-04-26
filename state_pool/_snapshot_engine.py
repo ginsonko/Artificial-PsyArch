@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 AP 状态池模块 — 快照引擎
 ==========================
@@ -44,6 +44,7 @@ class SnapshotEngine:
         type_counts: dict[str, int] = {}
         bound_attribute_item_count = 0
         binding_csa_item_count = 0
+        bound_attribute_energy_totals: dict[str, dict] = {}
 
         for item in all_items:
             ref_type = item.get("ref_object_type", "unknown")
@@ -52,6 +53,37 @@ class SnapshotEngine:
                 bound_attribute_item_count += 1
             if item.get("sub_type") == "csa_binding_item":
                 binding_csa_item_count += 1
+            for attr in item.get("ext", {}).get("bound_attributes", []) or []:
+                if not isinstance(attr, dict):
+                    continue
+                content = attr.get("content", {}) if isinstance(attr.get("content", {}), dict) else {}
+                attr_energy = attr.get("energy", {}) if isinstance(attr.get("energy", {}), dict) else {}
+                attr_name = str(content.get("attribute_name", "") or "").strip()
+                if not attr_name:
+                    raw = str(content.get("raw", "") or "")
+                    if ":" in raw:
+                        attr_name = raw.split(":", 1)[0].strip()
+                if not attr_name:
+                    continue
+                bucket = bound_attribute_energy_totals.setdefault(
+                    attr_name,
+                    {
+                        "attribute_name": attr_name,
+                        "total_er": 0.0,
+                        "total_ev": 0.0,
+                        "total_energy": 0.0,
+                        "item_count": 0,
+                        "attribute_count": 0,
+                    },
+                )
+                attr_er = float(attr_energy.get("er", attr.get("er", 0.0)) or 0.0)
+                attr_ev = float(attr_energy.get("ev", attr.get("ev", 0.0)) or 0.0)
+                bucket["total_er"] = round(float(bucket.get("total_er", 0.0)) + attr_er, 8)
+                bucket["total_ev"] = round(float(bucket.get("total_ev", 0.0)) + attr_ev, 8)
+                bucket["total_energy"] = round(float(bucket.get("total_er", 0.0)) + float(bucket.get("total_ev", 0.0)), 8)
+                bucket["attribute_count"] = int(bucket.get("attribute_count", 0) or 0) + 1
+                bucket.setdefault("_item_ids", set())
+                bucket["_item_ids"].add(str(item.get("id", "") or ""))
 
         summary = {
             "active_item_count": len(all_items),
@@ -61,6 +93,13 @@ class SnapshotEngine:
             "object_type_counts": type_counts,
             "bound_attribute_item_count": bound_attribute_item_count,
             "binding_csa_item_count": binding_csa_item_count,
+            "bound_attribute_energy_totals": {
+                name: {
+                    **{k: v for k, v in row.items() if k != "_item_ids"},
+                    "item_count": len(row.get("_item_ids", set()) or set()),
+                }
+                for name, row in bound_attribute_energy_totals.items()
+            },
         }
 
         # top items
@@ -310,6 +349,46 @@ class SnapshotEngine:
         # 向后兼容：保留历史字段 bound_attribute_names（旧 UI/逻辑仍可能读取）。
         bound_attribute_names = list(runtime_attribute_names)
 
+        lightweight_ref_snapshot = {
+            "content_display": ref_snapshot.get("content_display", ""),
+            "content_display_detail": ref_snapshot.get("content_display_detail", ""),
+            "content_signature": ref_snapshot.get("content_signature", ""),
+            "token_count": int(ref_snapshot.get("token_count", len(ref_snapshot.get("flat_tokens", []) or [])) or ref_snapshot.get("member_count", 0) or 0),
+            "member_count": ref_snapshot.get("member_count", 0),
+            "flat_tokens": list(ref_snapshot.get("flat_tokens", []) or []),
+            "sequence_groups": list(ref_snapshot.get("sequence_groups", []) or []),
+            "member_refs": list(ref_snapshot.get("member_refs", []) or []),
+        }
+        if ref_snapshot.get("anchor_display"):
+            lightweight_ref_snapshot["anchor_display"] = ref_snapshot.get("anchor_display", "")
+        if ref_snapshot.get("attribute_displays"):
+            lightweight_ref_snapshot["attribute_displays"] = list(ref_snapshot.get("attribute_displays", []) or [])
+        if ref_snapshot.get("feature_displays"):
+            lightweight_ref_snapshot["feature_displays"] = list(ref_snapshot.get("feature_displays", []) or [])
+        if ref_snapshot.get("bound_attribute_displays"):
+            lightweight_ref_snapshot["bound_attribute_displays"] = list(ref_snapshot.get("bound_attribute_displays", []) or [])
+        if ref_snapshot.get("structure_ext"):
+            lightweight_ref_snapshot["structure_ext"] = ref_snapshot.get("structure_ext", {})
+        if ref_snapshot.get("group_ext"):
+            lightweight_ref_snapshot["group_ext"] = ref_snapshot.get("group_ext", {})
+
+        structure_ext = ref_snapshot.get("structure_ext", {}) if isinstance(ref_snapshot.get("structure_ext", {}), dict) else {}
+        structure_sequence_mode = str(structure_ext.get("sequence_mode", "") or "").strip()
+        groups = ref_snapshot.get("sequence_groups", []) if isinstance(ref_snapshot.get("sequence_groups", []), list) else []
+        has_goal_b_string_group = False
+        has_non_string_group = False
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            is_goal_b_string = bool(group.get("order_sensitive", False)) and str(group.get("string_unit_kind", "") or "") == "char_sequence"
+            if is_goal_b_string:
+                has_goal_b_string_group = True
+            else:
+                tokens = [str(token) for token in (group.get("tokens", []) or []) if str(token)]
+                if tokens:
+                    has_non_string_group = True
+        goal_b_mixed_structure = bool(has_goal_b_string_group and has_non_string_group)
+
         return {
             "item_id": item["id"],
             "ref_object_id": item.get("ref_object_id", ""),
@@ -322,9 +401,13 @@ class SnapshotEngine:
             # (e.g. sa_* and st_*). We expose aliases for UI resolution and rule-engine targeting.
             "ref_alias_ids": list(item.get("ref_alias_ids", []) or []),
             "display": ref_snapshot.get("content_display", ""),
+            "display_text": ref_snapshot.get("content_display", ""),
             "display_detail": self._build_display_detail(item, bound_attributes),
             "anchor_display": ref_snapshot.get("anchor_display", ""),
+            "ref_snapshot": lightweight_ref_snapshot,
             "semantic_signature": str(item.get("semantic_signature", "") or ""),
+            "structure_sequence_mode": structure_sequence_mode,
+            "goal_b_mixed_structure": goal_b_mixed_structure,
             "attribute_displays": list(ref_snapshot.get("attribute_displays", [])),
             # feature_displays / 特征展示（例如 CSA 的非属性成员摘要）
             # 用途：先天规则 metric 选择器 contains_text 可用来匹配“包含某特征”的对象。
@@ -390,3 +473,6 @@ class SnapshotEngine:
         if ref_snapshot.get("member_count"):
             parts.append(f"members={ref_snapshot.get('member_count')}")
         return " | ".join(parts)
+
+
+

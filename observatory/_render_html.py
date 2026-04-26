@@ -308,6 +308,7 @@ def export_cycle_html(report: dict, html_path: str | Path) -> str:
     sections = [
         _render_sensor_section(report.get("sensor", {})),
         _render_maintenance_section(report.get("maintenance", {})),
+        _render_cognitive_stitching_section(report.get("cognitive_stitching", {})),
         _render_attention_section(report.get("attention", {})),
         _render_structure_section(report.get("structure_level", {})),
         _render_projection_section(report.get("pool_apply", {})),
@@ -349,6 +350,7 @@ def _render_shell(report: dict) -> str:
         f"<p>轮次 {e(report.get('trace_id', ''))}</p>"
         "</div>"
         "<nav class='nav'>"
+        "<a href='#cognitive_stitching'>Cognitive Stitching</a>"
         "<a href='#overview'>总览</a>"
         "<a href='#sensor'>文本感受器</a>"
         "<a href='#maintenance'>状态池维护</a>"
@@ -452,6 +454,82 @@ def _render_maintenance_section(maintenance: dict) -> str:
         "状态池自适应维护 / State Pool Maintenance",
         "".join(cards)
         + _table("维护事件", ["事件", "目标", "类型", "原因", "ER", "EV", "CP"], event_rows),
+    )
+
+
+def _render_cognitive_stitching_section(cognitive_stitching: dict) -> str:
+    candidate_rows = [
+        [
+            item.get("action_type", ""),
+            item.get("source_display", ""),
+            item.get("source_kind", ""),
+            item.get("target_display", ""),
+            item.get("target_kind", ""),
+            item.get("match_mode", ""),
+            item.get("context_k", 0),
+            item.get("matched_span", 0),
+            f(item.get("score", 0.0)),
+            f(item.get("edge_weight_ratio", 0.0)),
+            f(item.get("match_strength", 0.0)),
+            f(item.get("fatigue_before", 0.0)),
+        ]
+        for item in cognitive_stitching.get("candidate_preview", [])[:12]
+    ]
+    action_rows = [
+        [
+            item.get("action", ""),
+            item.get("action_family", ""),
+            item.get("event_display", ""),
+            item.get("event_component_count", 0),
+            item.get("source_display", ""),
+            item.get("source_kind", ""),
+            item.get("target_display", ""),
+            item.get("target_kind", ""),
+            item.get("match_mode", ""),
+            item.get("context_k", 0),
+            item.get("matched_span", 0),
+            f(item.get("score", 0.0)),
+            f(item.get("absorbed_total", 0.0)),
+            f(item.get("fatigue_after", 0.0)),
+        ]
+        for item in cognitive_stitching.get("actions", [])[:12]
+    ]
+    narrative_rows = [
+        [
+            item.get("display", ""),
+            item.get("ref_object_id", ""),
+            f(item.get("er", 0.0)),
+            f(item.get("ev", 0.0)),
+            f(item.get("cp_abs", 0.0)),
+            f(item.get("event_grasp", 0.0)),
+            f(item.get("salience_score", 0.0)),
+            item.get("component_count", 0),
+            item.get("esdb_parent_depth", 0),
+            item.get("esdb_delta_entry_count", 0),
+            1 if item.get("esdb_materialized", False) else 0,
+            item.get("esdb_update_count", 0),
+        ]
+        for item in cognitive_stitching.get("narrative_top_items", [])[:12]
+    ]
+    cards = [
+        _metric_card("enabled", yn(cognitive_stitching.get("enabled", False)), cognitive_stitching.get("reason", "")),
+        _metric_card("seed / candidate", f"{cognitive_stitching.get('seed_structure_count', 0)} / {cognitive_stitching.get('candidate_count', 0)}", f"stage {cognitive_stitching.get('stage', '')}"),
+        _metric_card("plain / event seed", f"{cognitive_stitching.get('seed_plain_structure_count', 0)} / {cognitive_stitching.get('seed_event_count', 0)}", f"actions {cognitive_stitching.get('action_count', 0)}"),
+        _metric_card("create / extend / merge", f"{cognitive_stitching.get('created_count', 0)} / {cognitive_stitching.get('extended_count', 0)} / {cognitive_stitching.get('merged_count', 0)}", f"reinforced {cognitive_stitching.get('reinforced_count', 0)}"),
+        _metric_card("narrative top", str(len(cognitive_stitching.get("narrative_top_items", []) or [])), f"fatigue states {cognitive_stitching.get('pair_fatigue_state_size', 0)}"),
+        _metric_card(
+            "ESDB",
+            f"events {cognitive_stitching.get('esdb_event_count', 0)}",
+            f"mat {cognitive_stitching.get('esdb_materialized_event_count', 0)} | delta {cognitive_stitching.get('esdb_delta_entry_total', 0)}",
+        ),
+    ]
+    return _section(
+        "cognitive_stitching",
+        "认知拼接 / Cognitive Stitching",
+        "".join(cards)
+        + _table("CS candidates", ["action", "source", "source_kind", "target", "target_kind", "match", "context_k", "matched_span", "score", "edge_ratio", "match_strength", "fatigue"], candidate_rows)
+        + _table("CS actions", ["action", "family", "event", "components", "source", "source_kind", "target", "target_kind", "match", "context_k", "matched_span", "score", "absorbed", "fatigue_after"], action_rows)
+        + _table("CS narrative top", ["display", "ref_id", "ER", "EV", "CP", "grasp", "salience", "components", "es_depth", "delta", "mat", "upd"], narrative_rows),
     )
 
 
@@ -890,6 +968,7 @@ def export_cycle_html(report: dict, html_path: str | Path) -> str:
     sections = [
         _render_sensor_section(report.get("sensor", {})),
         _render_maintenance_section(report.get("maintenance", {})),
+        _render_cognitive_stitching_section(report.get("cognitive_stitching", {})),
         _render_attention_section(report.get("attention", {})),
         _render_structure_section(report.get("structure_level", {})),
         _render_cache_section(report.get("cache_neutralization", {})),

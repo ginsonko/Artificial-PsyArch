@@ -22,6 +22,173 @@ from state_pool._id_generator import reset_id_generator
 from hdb._cut_engine import CutEngine
 
 
+class TestCognitiveStitchingPriorityNeutralization:
+    def test_plain_structure_is_not_misclassified_as_cognitive_stitching_event(self, pool):
+        """
+        Regression:
+        - Plain ST structures always have member_refs (SA unit ids).
+        - They must NOT be treated as cognitive stitching events, otherwise the
+          event-component neutralization path will start touching everything and
+          pollute meta.ext.cognitive_stitching across the pool.
+        """
+        plain_st = {
+            "id": "st_plain_1",
+            "object_type": "st",
+            "sub_type": "plain_structure",
+            "content": {"raw": "A B", "display": "A B", "normalized": "A B"},
+            "energy": {"er": 1.0, "ev": 0.0},
+            "structure": {
+                "display_text": "A B",
+                "flat_tokens": ["A", "B"],
+                "sequence_groups": [
+                    {
+                        "group_index": 0,
+                        "source_type": "pytest",
+                        "origin_frame_id": "plain_seed",
+                        "tokens": ["A"],
+                        "units": [{"token": "A", "unit_id": "sa_a", "unit_role": "feature", "display_visible": True}],
+                    },
+                    {
+                        "group_index": 1,
+                        "source_type": "pytest",
+                        "origin_frame_id": "plain_seed",
+                        "tokens": ["B"],
+                        "units": [{"token": "B", "unit_id": "sa_b", "unit_role": "feature", "display_visible": True}],
+                    },
+                ],
+                "member_refs": ["sa_a", "sa_b"],
+                "content_signature": "plain_sig_ab",
+                "ext": {},
+            },
+        }
+        insert_result = pool.insert_runtime_node(plain_st, trace_id="plain_st_seed", source_module="pytest")
+        assert insert_result["success"] is True
+
+        state_item = pool._store.get_by_ref("st_plain_1")
+        assert state_item is not None
+        assert pool._is_cognitive_stitching_event_item(state_item) is False
+
+    def test_insert_runtime_cs_event_preserves_component_metadata(self, pool):
+        runtime_event = {
+            "id": "cs_event::st_a::st_b",
+            "object_type": "st",
+            "sub_type": "cognitive_stitching_event",
+            "content": {"raw": "A -> B", "display": "A -> B", "normalized": "A -> B"},
+            "energy": {"er": 0.4, "ev": 1.6},
+            "structure": {
+                "display_text": "A -> B",
+                "flat_tokens": ["A", "B"],
+                "sequence_groups": [
+                    {"group_index": 0, "source_type": "cognitive_stitching", "origin_frame_id": "seed_event", "tokens": ["A"]},
+                    {"group_index": 1, "source_type": "cognitive_stitching", "origin_frame_id": "seed_event", "tokens": ["B"]},
+                ],
+                "member_refs": ["st_a", "st_b"],
+                "content_signature": "cs_event::st_a::st_b|st_a|st_b",
+                "ext": {
+                    "cognitive_stitching": {
+                        "stage": "pytest_seed",
+                        "component_count": 2,
+                        "component_profile": [
+                            {"index": 0, "ref_id": "st_a", "display": "A", "share": 0.5},
+                            {"index": 1, "ref_id": "st_b", "display": "B", "share": 0.5},
+                        ],
+                        "component_ledger": [
+                            {"index": 0, "ref_id": "st_a", "display": "A", "tokens": ["A"], "profile_share": 0.5, "er": 0.4, "ev": 0.0, "cp_abs": 0.4},
+                            {"index": 1, "ref_id": "st_b", "display": "B", "tokens": ["B"], "profile_share": 0.5, "er": 0.0, "ev": 1.6, "cp_abs": 1.6},
+                        ],
+                    }
+                },
+            },
+        }
+
+        insert_result = pool.insert_runtime_node(runtime_event, trace_id="cs_event_seed", source_module="pytest")
+        assert insert_result["success"] is True
+
+        state_item = pool._store.get_by_ref("cs_event::st_a::st_b")
+        assert state_item is not None
+        assert state_item["ref_snapshot"]["member_refs"] == ["st_a", "st_b"]
+        assert state_item["ref_snapshot"]["structure_ext"]["cognitive_stitching"]["component_count"] == 2
+        assert state_item["meta"]["ext"]["cognitive_stitching"]["component_ledger"][1]["display"] == "B"
+
+    def test_priority_neutralization_can_complement_cs_event_component(self, pool):
+        now_ms = int(time.time() * 1000)
+        runtime_event = {
+            "id": "cs_event::st_a::st_b",
+            "object_type": "st",
+            "sub_type": "cognitive_stitching_event",
+            "content": {"raw": "A -> B", "display": "A -> B", "normalized": "A -> B"},
+            "energy": {"er": 0.2, "ev": 1.8},
+            "structure": {
+                "display_text": "A -> B",
+                "flat_tokens": ["A", "B"],
+                "sequence_groups": [
+                    {"group_index": 0, "source_type": "cognitive_stitching", "origin_frame_id": "seed_event", "tokens": ["A"]},
+                    {"group_index": 1, "source_type": "cognitive_stitching", "origin_frame_id": "seed_event", "tokens": ["B"]},
+                ],
+                "member_refs": ["st_a", "st_b"],
+                "content_signature": "cs_event::st_a::st_b|st_a|st_b",
+                "ext": {
+                    "cognitive_stitching": {
+                        "stage": "pytest_seed",
+                        "component_count": 2,
+                        "component_profile": [
+                            {"index": 0, "ref_id": "st_a", "display": "A", "share": 0.1},
+                            {"index": 1, "ref_id": "st_b", "display": "B", "share": 0.9},
+                        ],
+                        "component_ledger": [
+                            {"index": 0, "ref_id": "st_a", "display": "A", "tokens": ["A"], "profile_share": 0.1, "er": 0.2, "ev": 0.0, "cp_abs": 0.2},
+                            {"index": 1, "ref_id": "st_b", "display": "B", "tokens": ["B"], "profile_share": 0.9, "er": 0.0, "ev": 1.8, "cp_abs": 1.8},
+                        ],
+                    }
+                },
+            },
+        }
+        insert_result = pool.insert_runtime_node(runtime_event, trace_id="cs_event_component_seed", source_module="pytest")
+        assert insert_result["success"] is True
+
+        pkt = {
+            "id": "pkt_b_verify",
+            "object_type": "stimulus_packet",
+            "sa_items": [
+                {
+                    "id": "sa_b",
+                    "object_type": "sa",
+                    "content": {"raw": "B", "display": "B", "value_type": "discrete"},
+                    "stimulus": {"role": "feature", "modality": "text"},
+                    "energy": {"er": 1.0, "ev": 0.0},
+                    "ext": {"packet_context": {"group_index": 0, "sequence_index": 0, "source_type": "current"}},
+                    "created_at": now_ms,
+                    "updated_at": now_ms,
+                },
+            ],
+            "csa_items": [],
+            "grouped_sa_sequences": [
+                {"group_index": 0, "source_type": "current", "origin_frame_id": "pkt_b_verify", "sa_ids": ["sa_b"], "csa_ids": []},
+            ],
+            "energy_summary": {"total_er": 1.0, "total_ev": 0.0, "current_total_er": 1.0, "current_total_ev": 0.0},
+            "trace_id": "priority_event_component_trace",
+        }
+
+        result = pool.apply_stimulus_packet(pkt, trace_id="priority_event_component_trace")
+        assert result["success"] is True
+        assert result["data"]["priority_neutralized_item_count"] == 1
+        assert result["data"]["event_component_neutralization_count"] == 1
+        assert result["data"]["event_component_cp_drop_sum"] > 0.0
+        assert result["data"]["residual_stimulus_packet"]["sa_items"] == []
+        assert result["data"]["residual_stimulus_packet"]["energy_summary"]["total_er"] == 0.0
+
+        diagnostics = result["data"]["priority_neutralization_diagnostics"]
+        assert diagnostics
+        assert diagnostics[0]["neutralization_mode"] == "event_component_complementary"
+        assert "B" in diagnostics[0]["matched_components"]
+
+        state_item = pool._store.get_by_ref("cs_event::st_a::st_b")
+        assert state_item is not None
+        ledger = state_item["meta"]["ext"]["cognitive_stitching"]["component_ledger"]
+        component_b = next(entry for entry in ledger if entry["display"] == "B")
+        assert component_b["er"] == 1.0
+        assert component_b["ev"] == 1.8
+
 # ====================================================================== #
 #                          测试 Fixtures                                  #
 # ====================================================================== #

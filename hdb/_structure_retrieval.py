@@ -5,11 +5,13 @@ Structure-level retrieval-storage for HDB.
 
 from __future__ import annotations
 
+from collections import deque
 import math
 import time
 
+from ._display_semantics import strip_display_only_glyphs
 from ._id_generator import next_id
-from ._profile_restore import restore_profile
+from ._profile_restore import restore_group_profile, restore_profile, restore_structure_profile
 from ._sequence_display import format_sequence_groups
 
 
@@ -19,9 +21,29 @@ class StructureRetrievalEngine:
         self._weight = weight_engine
         self._logger = logger
         self._maintenance = maintenance_engine
+        # Runtime state for internal residual resolution (DARL + PARS).
+        # This is intentionally in-memory only: it models "temporary fatigue" and
+        # "progressive detail revealing" across consecutive ticks, without any hard-coded semantics.
+        self._internal_resolution_cursor: dict[str, int] = {}
+        self._internal_resolution_history: dict[str, deque[str]] = {}
+        self._internal_resolution_history_counts: dict[str, dict[str, int]] = {}
+        self._internal_resolution_focus_credit: dict[str, float] = {}
 
     def update_config(self, config: dict) -> None:
         self._config = config
+
+    def clear_runtime_state(self) -> dict:
+        summary = {
+            "internal_resolution_cursor_count": len(self._internal_resolution_cursor),
+            "internal_resolution_history_count": len(self._internal_resolution_history),
+            "internal_resolution_history_bucket_count": len(self._internal_resolution_history_counts),
+            "internal_resolution_focus_credit_count": len(self._internal_resolution_focus_credit),
+        }
+        self._internal_resolution_cursor.clear()
+        self._internal_resolution_history.clear()
+        self._internal_resolution_history_counts.clear()
+        self._internal_resolution_focus_credit.clear()
+        return summary
 
     def run(
         self,
@@ -48,6 +70,18 @@ class StructureRetrievalEngine:
         if attention_mode not in {"top_n_stub", "cam_snapshot"}:
             return self._empty_result(code="NOT_IMPLEMENTED_ERROR", message="attention_mode not implemented")
 
+        # CAM-only internal stimulus mode (结构级开关关闭时使用):
+        # - Convert the current CAM snapshot directly into endogenous (co-occurrence) stimulus fragments.
+        # - Still apply DARL+PARS so internal SA count stays bounded.
+        # - Must NOT require HDB-backed structure objects: CAM may contain runtime ST items not yet persisted.
+        if attention_mode == "cam_snapshot" and int(max_rounds) <= 0:
+            return self._run_cam_internal_stimulus_only(
+                items=items,
+                trace_id=trace_id,
+                tick_id=tick_id,
+                cut_engine=cut_engine,
+            )
+
         # 只消费结构（ST）。top_n 在这里是“安全上限”，避免误配置时 CAM 过大导致结构级展开爆炸。
         safe_cap = max(1, int(top_n or 1))
         st_items = [item for item in items if item.get("ref_object_type") == "st"][:safe_cap]
@@ -63,6 +97,7 @@ class StructureRetrievalEngine:
         budget_er_map = {item["structure_id"]: item["er"] for item in cam_items}
         budget_ev_map = {item["structure_id"]: item["ev"] for item in cam_items}
         debug_cam_items = [dict(item["debug"]) for item in cam_items]
+        profile_restore_cache: dict[str, dict] = {}
         episodic_memory_id = ""
         if enable_storage:
             episodic = episodic_store.append(
@@ -103,6 +138,7 @@ class StructureRetrievalEngine:
 
         matched_group_ids: list[str] = []
         new_group_ids: list[str] = []
+        group_projections: list[dict] = []
         bias_structure_ids: list[str] = []
         bias_projections: list[dict] = []
         internal_fragments: list[dict] = []
@@ -113,6 +149,21 @@ class StructureRetrievalEngine:
         temp_anchor_fatigue: dict[str, float] = {}
         single_group_processed_ids: set[str] = set()
         min_budget_threshold = max(0.01, float(self._config.get("stimulus_residual_min_energy", 0.05)))
+        # Goal B / 方案A：当 CAM-only 内源刺激直接由当前注意记忆体构造时，
+        # 不再额外叠加 attention_landscape fragment。否则会把同一 CAM 内容重复投影，
+        # 导致主字符串 fragment 与景观 fragment 同时进入 internal_packet，形成重复字符串组和碎片组。
+        attention_landscape_fragment = self._build_attention_landscape_fragment(
+            items=items,
+            tick_id=tick_id,
+            structure_store=structure_store,
+            group_store=group_store,
+            cut_engine=cut_engine,
+            total_er=sum(max(0.0, float(item.get("er", 0.0))) for item in items if isinstance(item, dict)),
+            total_ev=sum(max(0.0, float(item.get("ev", 0.0))) for item in items if isinstance(item, dict)),
+            profile_cache=profile_restore_cache,
+        )
+        if attention_landscape_fragment is not None and attention_mode != "cam_snapshot":
+            internal_fragments.append(attention_landscape_fragment)
 
         for round_index in range(1, max_rounds + 1):
             if self._max_total_budget(cam_structure_ids, budget_er_map, budget_ev_map) < min_budget_threshold:
@@ -155,6 +206,7 @@ class StructureRetrievalEngine:
 
             if not best:
                 storage_summary = None
+                storage_fragments: list[dict] = []
                 selected_group = self._build_implicit_single_group_debug(
                     anchor_item=anchor_item,
                     structure_store=structure_store,
@@ -184,6 +236,15 @@ class StructureRetrievalEngine:
                             if group_id:
                                 new_group_ids.append(group_id)
                         debug_new_group_details.extend(storage_summary.get("new_group_details", []))
+                        storage_fragments = self._build_internal_storage_fragments(
+                            storage_summary=storage_summary,
+                            source_group_id=selected_group.get("group_id", ""),
+                            source_phase="storage_residual_round",
+                            fallback_total_er=float(anchor_item.get("er", 0.0)),
+                            fallback_total_ev=float(anchor_item.get("ev", 0.0)),
+                            cut_engine=cut_engine,
+                        )
+                        internal_fragments.extend(storage_fragments)
                 round_summaries.append(
                     {
                         "round_index": round_index,
@@ -194,7 +255,7 @@ class StructureRetrievalEngine:
                         "matched_er_total": round(float(anchor_item.get("er", 0.0)), 8),
                         "matched_ev_total": round(float(anchor_item.get("ev", 0.0)), 8),
                         "bias_structure_ids": [],
-                        "internal_fragment_count": 0,
+                        "internal_fragment_count": len(storage_fragments),
                         "synthetic": True,
                     }
                 )
@@ -207,7 +268,17 @@ class StructureRetrievalEngine:
                         "candidate_groups": candidate_details,
                         "selected_group": selected_group,
                         "bias_projections": [],
-                        "internal_fragments": [],
+                        "internal_fragments": [
+                            {
+                                "source_structure_id": fragment.get("source_structure_id", ""),
+                                "display_text": fragment.get("display_text", ""),
+                                "token_count": len(fragment.get("flat_tokens", [])),
+                                "er_hint": round(float(fragment.get("er_hint", 0.0)), 8),
+                                "ev_hint": round(float(fragment.get("ev_hint", 0.0)), 8),
+                                "energy_hint": round(float(fragment.get("er_hint", 0.0)) + float(fragment.get("ev_hint", 0.0)), 8),
+                            }
+                            for fragment in storage_fragments
+                        ],
                         "storage_summary": storage_summary,
                         "chain_steps": list(lookup.get("chain_steps", [])),
                     }
@@ -232,6 +303,17 @@ class StructureRetrievalEngine:
             current_required_profile = self._normalize_energy(required_ids, budget_er_map, budget_ev_map)
             matched_er_total = round(sum(float(budget_er_map.get(structure_id, 0.0)) for structure_id in required_ids), 8)
             matched_ev_total = round(sum(float(budget_ev_map.get(structure_id, 0.0)) for structure_id in required_ids), 8)
+            projected_er = round(max(0.0, float(matched_er_total)) * max(0.0, float(rho)), 8)
+            projected_ev = round(max(0.0, float(matched_ev_total)) * max(0.0, float(rho)), 8)
+            if projected_er + projected_ev > 0.0:
+                group_projections.append(
+                    {
+                        "group_id": group_obj.get("id", ""),
+                        "er": projected_er,
+                        "ev": projected_ev,
+                        "reason": "structure_group_matched",
+                    }
+                )
 
             self._update_group_after_match(
                 group_obj=group_obj,
@@ -264,6 +346,17 @@ class StructureRetrievalEngine:
                 for projection in round_bias_projections
                 if projection.get("structure_id")
             )
+            active_group_fragment = self._build_internal_group_fragment(
+                group_obj=group_obj,
+                required_ids=required_ids,
+                matched_er_total=matched_er_total,
+                matched_ev_total=matched_ev_total,
+                rho=rho,
+                structure_store=structure_store,
+                group_store=group_store,
+                cut_engine=cut_engine,
+                profile_cache=profile_restore_cache,
+            )
 
             transferred_er_map: dict[str, float] = {}
             transferred_ev_map: dict[str, float] = {}
@@ -289,7 +382,12 @@ class StructureRetrievalEngine:
                 transfer_er_map=transferred_er_map,
                 transfer_ev_map=transferred_ev_map,
                 structure_store=structure_store,
+                group_store=group_store,
+                cut_engine=cut_engine,
+                profile_cache=profile_restore_cache,
             )
+            if active_group_fragment is not None:
+                round_fragments.insert(0, active_group_fragment)
             internal_fragments.extend(round_fragments)
 
             storage_summary = None
@@ -351,6 +449,7 @@ class StructureRetrievalEngine:
                         }
                         for fragment in round_fragments
                     ],
+                    "active_group_fragment": dict(active_group_fragment) if isinstance(active_group_fragment, dict) else None,
                     "storage_summary": storage_summary,
                     "chain_steps": list(lookup.get("chain_steps", [])),
                 }
@@ -366,6 +465,7 @@ class StructureRetrievalEngine:
                     "matched_ev_total": matched_ev_total,
                     "bias_structure_ids": [projection.get("structure_id", "") for projection in round_bias_projections],
                     "internal_fragment_count": len(round_fragments),
+                    "active_group_fragment_count": 1 if active_group_fragment is not None else 0,
                 }
             )
             temp_anchor_fatigue[anchor_item["structure_id"]] = round(
@@ -390,9 +490,21 @@ class StructureRetrievalEngine:
             transfer_er_map=budget_er_map,
             transfer_ev_map=budget_ev_map,
             structure_store=structure_store,
+            group_store=group_store,
+            cut_engine=cut_engine,
+            profile_cache=profile_restore_cache,
         )
         internal_fragments.extend(tail_fragments)
         internal_fragments = self._merge_internal_fragments(internal_fragments)
+        focus_credit_ids = list(dict.fromkeys(list(cam_structure_ids) + list(matched_group_ids)))
+        internal_fragments, internal_resolution_summary = self._apply_internal_resolution_to_fragments(
+            fragments=internal_fragments,
+            cam_items=cam_items,
+            cam_structure_ids=focus_credit_ids,
+            now_ms=now_ms,
+            trace_id=trace_id,
+            tick_id=tick_id,
+        )
 
         if self._config.get("detail_log_dump_group_match_profile", True):
             self._logger.detail(
@@ -414,15 +526,269 @@ class StructureRetrievalEngine:
             "round_count": len(round_summaries) if round_summaries else len(debug_round_details),
             "matched_group_ids": list(dict.fromkeys(matched_group_ids)),
             "new_group_ids": list(dict.fromkeys(new_group_ids)),
+            "group_projections": list(group_projections),
             "bias_structure_ids": list(dict.fromkeys(bias_structure_ids)),
             "bias_projections": bias_projections,
             "internal_stimulus_fragments": internal_fragments,
+            "internal_resolution": internal_resolution_summary,
             "episodic_memory_id": episodic_memory_id,
             "fallback_used": fallback_used,
             "debug": {
                 "cam_items": debug_cam_items,
                 "round_details": debug_round_details,
                 "new_group_details": list({item.get("group_id", ""): item for item in debug_new_group_details if item.get("group_id", "")}.values()),
+            },
+        }
+
+    def _run_cam_internal_stimulus_only(
+        self,
+        *,
+        items: list[dict],
+        trace_id: str,
+        tick_id: str,
+        cut_engine,
+    ) -> dict:
+        """
+        Build internal stimulus fragments directly from CAM snapshot items.
+
+        Why:
+          When structure-level retrieval-storage is disabled, we still need endogenous stimulus
+          to keep the closed loop alive. In this mode we intentionally avoid any HDB group matching
+          (rounds=0) and do NOT require HDB-backed structures to exist in `structure_store`.
+        """
+        now_ms = int(time.time() * 1000)
+
+        # Best-effort CAM structure list for internal resolution (focus credit, per-structure allocation).
+        cam_items: list[dict] = []
+        cam_structure_ids: list[str] = []
+        debug_cam_items: list[dict] = []
+
+        internal_fragments: list[dict] = []
+        for order_index, item in enumerate(items or []):
+            if not isinstance(item, dict):
+                continue
+            ref_type = str(item.get("ref_object_type", "") or item.get("object_type", "") or "").strip()
+            ref_id = str(item.get("ref_object_id", "") or item.get("id", "") or item.get("item_id", "") or "").strip()
+            ref_snapshot = item.get("ref_snapshot", {}) or {}
+            if not isinstance(ref_snapshot, dict):
+                ref_snapshot = {}
+            structure_ext = ref_snapshot.get("structure_ext", {}) if isinstance(ref_snapshot.get("structure_ext", {}), dict) else {}
+            structure_kind = str(structure_ext.get("kind", "") or "").strip()
+            if ref_type in {"st", "sg"} and structure_kind in {"residual_context_common"}:
+                # Goal B / 方案A：上下文全景残差结构不应在 CAM-only 内源路径中再次回投。
+                continue
+                continue
+                ref_snapshot = {}
+
+            display_text = str(
+                item.get("display", "")
+                or ref_snapshot.get("content_display_detail", "")
+                or ref_snapshot.get("content_display", "")
+                or ref_id
+                or item.get("item_id", "")
+                or ""
+            ).strip()
+            if not display_text:
+                continue
+
+            # Goal B / 方案A口径：若 CAM 项已经携带字符串 sequence_groups，则内源片段必须优先复用这些顺序敏感组，
+            # 不能退化为 display 文本字符拆分或无序 tokens。否则后续刺激级匹配会丢失字符串剪枝信息。
+            raw_groups = ref_snapshot.get("sequence_groups", []) or item.get("sequence_groups", []) or []
+            sequence_groups = []
+            goal_b_mode = bool(self._config.get("enable_goal_b_char_sa_string_mode", False))
+            has_goal_b_string_group = False
+            for group in raw_groups:
+                if not isinstance(group, dict):
+                    continue
+                normalized_group = dict(group)
+                if bool(group.get("order_sensitive", False)) and str(group.get("string_unit_kind", "") or "") == "char_sequence":
+                    normalized_group.setdefault("string_token_text", str(group.get("string_token_text", "") or "".join([str(t) for t in (group.get("tokens", []) or []) if str(t)])))
+                if goal_b_mode and not (bool(group.get("order_sensitive", False)) and str(group.get("string_unit_kind", "") or "") == "char_sequence"):
+                    continue
+                if bool(group.get("order_sensitive", False)) and str(group.get("string_unit_kind", "") or "") == "char_sequence":
+                    has_goal_b_string_group = True
+                sequence_groups.append(normalized_group)
+            flat_tokens = [str(t) for t in (ref_snapshot.get("flat_tokens", []) or item.get("flat_tokens", []) or []) if str(t)]
+            used_display_fallback_char_split = False
+
+            er = round(max(0.0, float(item.get("er", 0.0))), 8)
+            ev = round(max(0.0, float(item.get("ev", 0.0))), 8)
+            cp_abs = round(max(0.0, float(item.get("cp_abs", 0.0))), 8)
+
+            # Build a stored-group-like payload from snapshot when available; otherwise fall back to tokens.
+            if not flat_tokens and sequence_groups:
+                flat_tokens = [str(token) for group in sequence_groups for token in (group.get("tokens", []) or []) if str(token)]
+            if not sequence_groups:
+                if not flat_tokens:
+                    is_runtime_event_like = (
+                        ref_type in {"event", "cs_event", "narrative_event"}
+                        or ref_id.startswith("cs_event::")
+                        or str(ref_snapshot.get("event_ref_id", "") or "").startswith("cs_event::")
+                    )
+                    if is_runtime_event_like:
+                        # Goal B safety: runtime event displays are presentation summaries, not canonical feature tokens.
+                        # If an event-like CAM item has no canonical sequence_groups/flat_tokens, skip it rather than
+                        # injecting formatted display text such as "{??}" back into endogenous SA.
+                        continue
+                    # IMPORTANT SAFETY:
+                    # - Never use `display_text` as a SINGLE canonical token. display_text may contain
+                    #   "{...}" / "->" / debug merge chains, which would pollute endogenous SA tokens
+                    #   and then be atomically persisted by stimulus-level preseed.
+                    #
+                    # Fallback policy (CS-first CAM-only endogenous stimulus):
+                    # - If this is an *attribute stimulus* (e.g. 违和感/正确感), do NOT split it into
+                    #   characters. Instead emit a stable single token derived from attribute_name.
+                    # - Otherwise, if the fallback text is short enough, we may split into characters
+                    #   so each character can act as a minimal SA feature token. If it's too long,
+                    #   skip emitting this fragment (avoid generating large ungrounded internal streams).
+                    stimulus = ref_snapshot.get("stimulus", {}) if isinstance(ref_snapshot.get("stimulus", {}), dict) else {}
+                    content = ref_snapshot.get("content", {}) if isinstance(ref_snapshot.get("content", {}), dict) else {}
+                    role = str(stimulus.get("role", "") or "").strip()
+                    attribute_name = str(content.get("attribute_name", "") or "").strip()
+                    is_attribute = (role == "attribute") or bool(attribute_name)
+
+                    if is_attribute:
+                        # Attributes may be numerical and MUST preserve their value when possible.
+                        # We keep a single-token representation for safety (avoid large streams),
+                        # but include the numeric value so downstream can reconstruct/parse it.
+                        #
+                        # Note: we intentionally do NOT split attributes into characters.
+                        raw = str(content.get("raw", "") or "").strip()
+                        value_type = str(content.get("value_type", "") or "").strip()
+                        val = content.get("attribute_value", None)
+                        if not attribute_name and raw and ":" in raw:
+                            attribute_name = raw.split(":", 1)[0].strip()
+                        if attribute_name:
+                            if value_type == "numerical" and val is not None:
+                                try:
+                                    v = float(val)
+                                except Exception:
+                                    v = None
+                                if v is not None and math.isfinite(v):
+                                    flat_tokens = [f"ATTR[{attribute_name}:{round(v, 6)}]"]
+                                else:
+                                    # Can't preserve a valid numeric -> drop attribute fragment rather than pollute.
+                                    flat_tokens = []
+                            elif raw:
+                                # Non-numerical attribute: keep raw string if present.
+                                safe = raw
+                                if len(safe) > 96:
+                                    safe = safe[:96]
+                                flat_tokens = [f"ATTR[{safe}]"]
+                            else:
+                                flat_tokens = [f"ATTR[{attribute_name}]"]
+                        else:
+                            # Unknown attribute name -> skip (don't emit valueless attribute).
+                            flat_tokens = []
+                    else:
+                        max_len = int(self._config.get("cam_internal_fallback_char_split_max_len", 500) or 500)
+                        # Remove common formatting glyphs from display strings (not semantic tokens).
+                        text = strip_display_only_glyphs(display_text)
+                        if 0 < len(text) <= max_len:
+                            flat_tokens = [ch for ch in text if ch and not ch.isspace()]
+                            used_display_fallback_char_split = bool(flat_tokens)
+                        else:
+                            flat_tokens = []
+
+                    if not flat_tokens:
+                        # Too long / empty / unsupported -> skip this item.
+                        continue
+                sequence_groups = [
+                    {
+                        "group_index": 0,
+                        "source_type": "cam_snapshot",
+                        "origin_frame_id": tick_id,
+                        "tokens": list(flat_tokens),
+                    }
+                ]
+
+            profile = self._profile_from_stored_groups(
+                sequence_groups,
+                cut_engine=cut_engine,
+                ext={"kind": "cam_snapshot_internal", "tick_id": tick_id, "ref_type": ref_type},
+            )
+            fragment = self._build_internal_fragment_from_profile(
+                owner_id=ref_id or display_text,
+                owner_kind=ref_type or "runtime_item",
+                source_group_id="",
+                source_phase="cam_snapshot",
+                display_text=display_text,
+                profile=profile,
+                total_er=er,
+                total_ev=ev,
+                ext={
+                    "ref_object_type": ref_type,
+                    "ref_object_id": ref_id,
+                    "display_fallback_char_split": bool(used_display_fallback_char_split),
+                    "goal_b_has_string_group": bool(has_goal_b_string_group),
+                    "goal_b_string_group_count": int(len([g for g in sequence_groups if bool(g.get("order_sensitive", False)) and str(g.get("string_unit_kind", "") or "") == "char_sequence"])),
+                    "goal_b_string_texts": [str(g.get("string_token_text", "") or "") for g in sequence_groups if bool(g.get("order_sensitive", False)) and str(g.get("string_unit_kind", "") or "") == "char_sequence"],
+                    "sequence_group_count": int(len(sequence_groups)),
+                },
+            )
+            if fragment is not None:
+                internal_fragments.append(fragment)
+
+            if ref_type in {"st", "sg"}:
+                sid = ref_id or display_text
+                cam_structure_ids.append(sid)
+                cam_items.append(
+                    {
+                        "structure_id": sid,
+                        "structure_obj": None,  # intentionally absent in this mode
+                        "display_text": display_text,
+                        "er": er,
+                        "ev": ev,
+                        "cp_abs": cp_abs,
+                        "order_index": int(order_index),
+                        "runtime_weight": 1.0,
+                        "debug": {
+                            "structure_id": sid,
+                            "display_text": display_text,
+                            "sequence_groups": sequence_groups,
+                            "er": er,
+                            "ev": ev,
+                            "total_energy": round(er + ev, 8),
+                            "cp_abs": cp_abs,
+                            "base_weight": 1.0,
+                            "recent_gain": 1.0,
+                            "fatigue": 0.0,
+                            "runtime_weight": 1.0,
+                            "fallback": "cam_snapshot_no_structure_store",
+                        },
+                    }
+                )
+                debug_cam_items.append(dict(cam_items[-1].get("debug", {})))
+
+        # Ensure deterministic ids and avoid duplicated fragments when multiple CAM items map to the same owner id.
+        internal_fragments = self._merge_internal_fragments(internal_fragments)
+        internal_fragments, internal_resolution_summary = self._apply_internal_resolution_to_fragments(
+            fragments=internal_fragments,
+            cam_items=cam_items,
+            cam_structure_ids=list(dict.fromkeys(cam_structure_ids)),
+            now_ms=now_ms,
+            trace_id=trace_id,
+            tick_id=tick_id,
+        )
+
+        return {
+            "code": "OK",
+            "message": "CAM internal stimulus only (no group matching rounds)",
+            "cam_stub_count": len(cam_structure_ids),
+            "round_count": 0,
+            "matched_group_ids": [],
+            "new_group_ids": [],
+            "group_projections": [],
+            "bias_structure_ids": [],
+            "bias_projections": [],
+            "internal_stimulus_fragments": internal_fragments,
+            "internal_resolution": internal_resolution_summary,
+            "episodic_memory_id": "",
+            "fallback_used": False,
+            "debug": {
+                "cam_items": debug_cam_items,
+                "round_details": [],
+                "new_group_details": [],
             },
         }
 
@@ -434,6 +800,7 @@ class StructureRetrievalEngine:
             "round_count": 0,
             "matched_group_ids": [],
             "new_group_ids": [],
+            "group_projections": [],
             "bias_structure_ids": [],
             "bias_projections": [],
             "internal_stimulus_fragments": [],
@@ -452,6 +819,7 @@ class StructureRetrievalEngine:
             runtime_stats = self._preview_structure_stats(structure_obj, now_ms=now_ms)
             er = round(max(0.0, float(item.get("er", 0.0))), 8)
             ev = round(max(0.0, float(item.get("ev", 0.0))), 8)
+            cp_abs = round(max(0.0, float(item.get("cp_abs", 0.0))), 8)
             cam_items.append(
                 {
                     "structure_id": structure_id,
@@ -459,6 +827,7 @@ class StructureRetrievalEngine:
                     "display_text": self._structure_display_text(structure_obj),
                     "er": er,
                     "ev": ev,
+                    "cp_abs": cp_abs,
                     "order_index": order_index,
                     "runtime_weight": runtime_stats["runtime_weight"],
                     "debug": {
@@ -468,6 +837,7 @@ class StructureRetrievalEngine:
                         "er": er,
                         "ev": ev,
                         "total_energy": round(er + ev, 8),
+                        "cp_abs": cp_abs,
                         "base_weight": runtime_stats["base_weight"],
                         "recent_gain": runtime_stats["recent_gain"],
                         "fatigue": runtime_stats["fatigue"],
@@ -563,7 +933,7 @@ class StructureRetrievalEngine:
         return {
             "unit_id": structure_id,
             "object_type": "st",
-            "token": fuzzy_metadata.get("grouped_display_text", "") or display_text or structure_id,
+            "token": structure_id,
             "display_text": fuzzy_metadata.get("grouped_display_text", "") or display_text or structure_id,
             "unit_role": "feature",
             "unit_signature": f"ST:{structure_id}",
@@ -1138,6 +1508,7 @@ class StructureRetrievalEngine:
                 continue
             entry_stats = self._preview_entry_stats(entry, now_ms=now_ms)
             group_stats = self._preview_group_stats(group_obj, now_ms=now_ms)
+            required_ids = [str(structure_id) for structure_id in group_obj.get("required_structure_ids", []) if str(structure_id)]
             candidates.append(
                 {
                     "owner_kind": owner_kind,
@@ -1150,7 +1521,7 @@ class StructureRetrievalEngine:
                     "group_obj": group_obj,
                     "group_runtime_weight": group_stats["runtime_weight"],
                     "relative_profile": relative_profile,
-                    "full_profile": self._group_full_profile(group_obj=group_obj, structure_store=structure_store, cut_engine=cut_engine),
+                    "required_ids": required_ids,
                 }
             )
         return candidates
@@ -1242,14 +1613,37 @@ class StructureRetrievalEngine:
         best = None
         candidate_details = []
         current_total_energy = max(1e-8, self._profile_total_energy(runtime_profile))
+        runtime_structure_counts = self._count_structure_ids(self._extract_structure_ids_from_profile(runtime_profile))
         for candidate in candidates:
             group_obj = candidate.get("group_obj") or {}
-            group_profile = candidate.get("full_profile") or self._group_full_profile(group_obj=group_obj, structure_store=structure_store, cut_engine=cut_engine)
+            required_ids = list(candidate.get("required_ids", []) or group_obj.get("required_structure_ids", []))
+            min_required = max(1, int(min_required_count))
+            skip_reason = ""
+            if len(required_ids) < min_required:
+                skip_reason = "below_min_required_count"
+            elif anchor_structure_id not in required_ids:
+                skip_reason = "missing_anchor_structure"
+            elif not self._structure_id_counts_cover(
+                required_counts=self._count_structure_ids(required_ids),
+                available_counts=runtime_structure_counts,
+            ):
+                skip_reason = "required_structure_ids_not_covered"
+            if skip_reason:
+                detail = self._build_group_skip_detail(
+                    candidate=candidate,
+                    group_obj=group_obj,
+                    required_ids=required_ids,
+                    skip_reason=skip_reason,
+                    min_required_count=min_required,
+                )
+                candidate_details.append(detail)
+                continue
+
+            group_profile = self._group_full_profile(group_obj=group_obj, structure_store=structure_store, cut_engine=cut_engine)
             common_part = cut_engine.maximum_common_part(
                 group_profile.get("sequence_groups", []),
                 runtime_profile.get("sequence_groups", []),
             )
-            required_ids = list(group_obj.get("required_structure_ids", []))
             existing_length = max(1, len(required_ids) or int(group_profile.get("unit_count", 0)))
             matched_current_units = self._collect_matched_units_from_common_part(runtime_profile, common_part, use_existing_side=False)
             matched_current_ids = self._matched_structure_ids_from_units(matched_current_units)
@@ -1294,7 +1688,7 @@ class StructureRetrievalEngine:
                 path_strength=path_strength,
             ) if eligible else 0.0
             detail = {
-                **self._build_group_debug_payload(group_obj, structure_store, cut_engine),
+                **self._build_group_debug_payload(group_obj, structure_store, cut_engine, group_profile=group_profile),
                 "owner_kind": candidate.get("owner_kind", ""),
                 "owner_id": candidate.get("owner_id", ""),
                 "owner_display_text": candidate.get("owner_display_text", ""),
@@ -1355,6 +1749,68 @@ class StructureRetrievalEngine:
             )
         )
         return best, candidate_details
+
+    @staticmethod
+    def _count_structure_ids(structure_ids: list[str]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for structure_id in structure_ids or []:
+            sid = str(structure_id)
+            if not sid:
+                continue
+            counts[sid] = int(counts.get(sid, 0)) + 1
+        return counts
+
+    @staticmethod
+    def _structure_id_counts_cover(*, required_counts: dict[str, int], available_counts: dict[str, int]) -> bool:
+        for structure_id, required_count in (required_counts or {}).items():
+            if int(available_counts.get(structure_id, 0)) < int(required_count):
+                return False
+        return True
+
+    def _build_group_skip_detail(
+        self,
+        *,
+        candidate: dict,
+        group_obj: dict,
+        required_ids: list[str],
+        skip_reason: str,
+        min_required_count: int,
+    ) -> dict:
+        group_structure = group_obj.get("group_structure", {})
+        grouped_display_text = self._group_display_text(group_obj)
+        return {
+            "group_id": group_obj.get("id", ""),
+            "display_text": grouped_display_text,
+            "grouped_display_text": grouped_display_text,
+            "sequence_groups": list(group_structure.get("sequence_groups", [])),
+            "required_structure_ids": list(required_ids),
+            "bias_structure_ids": list(group_obj.get("bias_structure_ids", [])),
+            "avg_energy_profile": dict(group_obj.get("avg_energy_profile", {})),
+            "flat_tokens": list(group_structure.get("flat_tokens", [])),
+            "content_signature": group_structure.get("content_signature", ""),
+            "temporal_signature": group_structure.get("temporal_signature", group_structure.get("content_signature", "")),
+            "owner_kind": candidate.get("owner_kind", ""),
+            "owner_id": candidate.get("owner_id", ""),
+            "owner_display_text": candidate.get("owner_display_text", ""),
+            "entry_id": candidate.get("entry_id", ""),
+            "runtime_weight": round(float(candidate.get("group_runtime_weight", 1.0)), 8),
+            "entry_runtime_weight": round(float(candidate.get("entry_runtime_weight", 1.0)), 8),
+            "path_strength": 0.0,
+            "base_similarity": 0.0,
+            "coverage_ratio": 0.0,
+            "structure_ratio": 0.0,
+            "wave_similarity": 0.0,
+            "score": 0.0,
+            "competition_score": 0.0,
+            "similarity": 0.0,
+            "full_structure_included": False,
+            "contains_anchor": False,
+            "eligible": False,
+            "common_part": {},
+            "chain_depth": 1,
+            "skip_reason": str(skip_reason or ""),
+            "min_required_count": int(min_required_count),
+        }
 
     @staticmethod
     def _is_better_group_match(candidate: dict, current_best: dict | None) -> bool:
@@ -1541,6 +1997,9 @@ class StructureRetrievalEngine:
     def _profile_total_energy(self, profile: dict) -> float:
         return self._profile_total_energy_from_units(self._collect_profile_units(profile))
 
+    def _profile_er_ev_totals(self, profile: dict) -> tuple[float, float]:
+        return self._profile_er_ev_totals_from_units(self._collect_profile_units(profile))
+
     @staticmethod
     def _profile_unit_count(profile: dict) -> int:
         return int(profile.get("unit_count", profile.get("token_count", len(profile.get("flat_tokens", [])))))
@@ -1572,6 +2031,18 @@ class StructureRetrievalEngine:
             ),
             8,
         )
+
+    @staticmethod
+    def _profile_er_ev_totals_from_units(units: list[dict]) -> tuple[float, float]:
+        er_total = 0.0
+        ev_total = 0.0
+        for unit in units:
+            if not isinstance(unit, dict):
+                continue
+            similarity = max(0.0, min(1.0, float(unit.get("match_similarity", 1.0))))
+            er_total += max(0.0, float(unit.get("er", 0.0))) * similarity
+            ev_total += max(0.0, float(unit.get("ev", 0.0))) * similarity
+        return round(er_total, 8), round(ev_total, 8)
 
     @staticmethod
     def _collect_profile_units(profile: dict) -> list[dict]:
@@ -3352,8 +3823,25 @@ class StructureRetrievalEngine:
 
     @staticmethod
     def _owner_placeholder_token(*, owner_kind: str, owner_id: str, owner_display_text: str) -> str:
-        label = owner_display_text or owner_id
-        return f"SELF[{owner_id}:{label}]" if owner_kind in {"st", "sg"} else f"SELF[{label}]"
+        """
+        Build a SHORT placeholder token.
+
+        Safety note:
+        - This token may be used as a last-resort endogenous fragment seed when canonical tokens
+          are missing. It must be bounded in length to avoid "display_text pollution" blow-ups.
+        """
+        label = str(owner_display_text or owner_id or "").strip()
+        oid = str(owner_id or "").strip()
+        if not label:
+            return ""
+        # hard cap to keep any fallback token small and safe
+        if len(label) > 96:
+            label = label[:96]
+        if len(oid) > 48:
+            oid = oid[:48]
+        if owner_kind in {"st", "sg"} and oid:
+            return f"SELF[{oid}:{label}]"
+        return f"SELF[{label}]"
 
     def _upsert_group_details(self, base_items: list[dict], new_items: list[dict]) -> list[dict]:
         merged = {}
@@ -3455,6 +3943,339 @@ class StructureRetrievalEngine:
             return {structure_id: round(1.0 / len(target_ids), 8) for structure_id in target_ids}
         return {structure_id: round(max(0.0, float(weights.get(structure_id, 0.0))) / total, 8) for structure_id in target_ids}
 
+    def _build_internal_fragment_from_profile(
+        self,
+        *,
+        owner_id: str,
+        owner_kind: str,
+        source_group_id: str,
+        source_phase: str,
+        display_text: str,
+        profile: dict,
+        total_er: float,
+        total_ev: float,
+        ext: dict | None = None,
+    ) -> dict | None:
+        profile_data = dict(profile or {})
+        sequence_groups = [
+            dict(group)
+            for group in (profile_data.get("sequence_groups", []) or [])
+            if isinstance(group, dict)
+        ]
+        flat_tokens = [str(token) for token in (profile_data.get("flat_tokens", []) or []) if str(token)]
+        if not sequence_groups and flat_tokens:
+            sequence_groups = [
+                {
+                    "group_index": 0,
+                    "source_type": "internal",
+                    "origin_frame_id": owner_id,
+                    "tokens": list(flat_tokens),
+                }
+            ]
+        total_energy = round(max(0.0, float(total_er)) + max(0.0, float(total_ev)), 8)
+        if total_energy <= 0.0 or not sequence_groups:
+            return None
+        return {
+            "fragment_id": next_id("sif"),
+            "source_group_id": source_group_id,
+            "source_phase": source_phase,
+            "source_structure_id": owner_id,
+            "source_owner_kind": owner_kind,
+            "source_owner_id": owner_id,
+            "display_text": str(display_text or profile_data.get("display_text", "") or owner_id),
+            "flat_tokens": list(flat_tokens),
+            "sequence_groups": sequence_groups,
+            "er_hint": round(max(0.0, float(total_er)), 8),
+            "ev_hint": round(max(0.0, float(total_ev)), 8),
+            "energy_hint": total_energy,
+            "ext": dict(ext or {}),
+        }
+
+    def _build_attention_landscape_fragment(
+        self,
+        *,
+        items: list[dict],
+        tick_id: str,
+        structure_store,
+        group_store,
+        cut_engine,
+        total_er: float,
+        total_ev: float,
+        profile_cache: dict[str, list[dict]] | None = None,
+    ) -> dict | None:
+        if not bool(self._config.get("internal_attention_landscape_enabled", True)):
+            return None
+        if bool(self._config.get("enable_goal_b_char_sa_string_mode", False)):
+            # Goal B / 当前默认口径：
+            # 内源刺激应优先由 CAM 选中的字符串/结构对象自身的 sequence_groups 构成，
+            # 不再额外把 attention landscape 作为一层“结构特征图景”重新投影到内源，
+            # 否则会把 ST/SG 级特征单元（如 st_000123）直接混入刺激流，污染真实语义。
+            return None
+        if not items:
+            return None
+
+        projection_ratio = max(0.0, float(self._config.get("internal_attention_landscape_ratio", 0.22) or 0.22))
+        scaled_er = round(max(0.0, float(total_er)) * projection_ratio, 8)
+        scaled_ev = round(max(0.0, float(total_ev)) * projection_ratio, 8)
+        if scaled_er + scaled_ev <= 0.0:
+            return None
+
+        sequence_groups: list[dict] = []
+        group_index = 0
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            ref_type = str(item.get("ref_object_type", "") or item.get("object_type", "") or "").strip()
+            ref_id = str(item.get("ref_object_id", "") or item.get("id", "") or item.get("item_id", "") or "").strip()
+            if ref_type == "st" and ref_id:
+                structure_obj = structure_store.get(ref_id) if structure_store is not None else None
+                if structure_obj is None:
+                    continue
+                restored_profile = restore_structure_profile(
+                    structure_obj,
+                    cut_engine=cut_engine,
+                    structure_store=structure_store,
+                    group_store=group_store,
+                    _cache=profile_cache,
+                )
+                for group in restored_profile.get("sequence_groups", []) or []:
+                    if not isinstance(group, dict):
+                        continue
+                    cloned_group = dict(group)
+                    cloned_group["group_index"] = int(group_index)
+                    cloned_group["source_group_index"] = int(cloned_group.get("source_group_index", cloned_group.get("group_index", group_index)))
+                    cloned_group["source_type"] = "attention_landscape"
+                    cloned_group["origin_frame_id"] = str(cloned_group.get("origin_frame_id", ref_id) or ref_id)
+                    sequence_groups.append(cloned_group)
+                    group_index += 1
+                continue
+
+            if ref_type == "sg" and ref_id:
+                group_obj = group_store.get(ref_id) if group_store is not None else None
+                if group_obj is None:
+                    # Fall back to treating the group as a single unit token (display text),
+                    # so CAM still contributes to endogenous stimulus even if group store misses.
+                    pass
+                else:
+                    restored_profile = restore_group_profile(
+                        group_obj,
+                        cut_engine=cut_engine,
+                        structure_store=structure_store,
+                        group_store=group_store,
+                        _cache=profile_cache,
+                    )
+                    for group in restored_profile.get("sequence_groups", []) or []:
+                        if not isinstance(group, dict):
+                            continue
+                        cloned_group = dict(group)
+                        cloned_group["group_index"] = int(group_index)
+                        cloned_group["source_group_index"] = int(cloned_group.get("source_group_index", cloned_group.get("group_index", group_index)))
+                        cloned_group["source_type"] = "attention_landscape"
+                        cloned_group["origin_frame_id"] = str(cloned_group.get("origin_frame_id", ref_id) or ref_id)
+                        sequence_groups.append(cloned_group)
+                        group_index += 1
+                    continue
+
+            unit = self._build_attention_landscape_unit(item=item, group_index=group_index, tick_id=tick_id)
+            if unit is None:
+                continue
+            sequence_groups.append(
+                {
+                    "group_index": int(group_index),
+                    "source_type": "attention_landscape",
+                    "origin_frame_id": tick_id,
+                    "tokens": [str(unit.get("token", ""))],
+                    "units": [unit],
+                    "csa_bundles": [],
+                }
+            )
+            group_index += 1
+
+        if not sequence_groups:
+            return None
+
+        profile = self._profile_from_stored_groups(
+            sequence_groups,
+            cut_engine=cut_engine,
+            ext={"kind": "attention_landscape", "tick_id": tick_id},
+        )
+        return self._build_internal_fragment_from_profile(
+            owner_id=f"attention_landscape::{tick_id}",
+            owner_kind="attention_landscape",
+            source_group_id="",
+            source_phase="attention_landscape",
+            display_text=format_sequence_groups(sequence_groups) or f"attention_landscape::{tick_id}",
+            profile=profile,
+            total_er=scaled_er,
+            total_ev=scaled_ev,
+            ext={"item_count": len(items)},
+        )
+
+    def _build_attention_landscape_unit(self, *, item: dict, group_index: int, tick_id: str) -> dict | None:
+        display_text = str(
+            item.get("display", "")
+            or (item.get("content", {}) or {}).get("display", "")
+            or (item.get("content", {}) or {}).get("raw", "")
+            or item.get("ref_object_id", "")
+            or item.get("item_id", "")
+            or ""
+        ).strip()
+        if not display_text:
+            return None
+        ref_type = str(item.get("ref_object_type", "") or item.get("object_type", "") or "runtime_item").strip()
+        ref_id = str(item.get("ref_object_id", "") or item.get("id", "") or item.get("item_id", "") or display_text).strip()
+        er = round(max(0.0, float(item.get("er", 0.0))), 8)
+        ev = round(max(0.0, float(item.get("ev", 0.0))), 8)
+        return {
+            "unit_id": f"cam::{ref_type}::{ref_id}::{group_index}",
+            "object_type": ref_type or "runtime_item",
+            "token": display_text,
+            "display_text": display_text,
+            "unit_role": "feature",
+            "unit_signature": f"CAM:{ref_type}:{ref_id}",
+            "sequence_index": 0,
+            "group_index": int(group_index),
+            "source_group_index": int(group_index),
+            "source_type": "attention_landscape",
+            "origin_frame_id": tick_id,
+            "er": er,
+            "ev": ev,
+            "total_energy": round(er + ev, 8),
+            "is_punctuation": False,
+            "display_visible": True,
+            "is_placeholder": False,
+            "bundle_id": "",
+            "bundle_anchor_unit_id": "",
+            "bundle_anchor_signature": "",
+            "bundle_signature": "",
+            "bundle_member_unit_ids": [],
+            "bundle_member_signatures": [],
+        }
+
+    def _build_internal_storage_fragments(
+        self,
+        *,
+        storage_summary: dict | None,
+        source_group_id: str,
+        source_phase: str,
+        fallback_total_er: float,
+        fallback_total_ev: float,
+        cut_engine,
+    ) -> list[dict]:
+        if not bool(self._config.get("internal_storage_projection_enabled", True)):
+            return []
+        if not isinstance(storage_summary, dict):
+            return []
+
+        projection_ratio = max(0.0, float(self._config.get("internal_storage_projection_ratio", 0.32) or 0.32))
+        if projection_ratio <= 0.0:
+            return []
+        max_fragments = max(1, int(self._config.get("internal_storage_projection_max_fragments_per_round", 1) or 1))
+
+        candidates: list[tuple[int, int, float, dict]] = []
+        for order_index, action in enumerate(storage_summary.get("actions", []) or []):
+            if not isinstance(action, dict):
+                continue
+            canonical_groups = [
+                dict(group)
+                for group in (action.get("canonical_sequence_groups", []) or [])
+                if isinstance(group, dict)
+            ]
+            if not canonical_groups:
+                continue
+            profile = self._profile_from_stored_groups(
+                canonical_groups,
+                cut_engine=cut_engine,
+                ext={
+                    "kind": "storage_residual_projection",
+                    "owner_id": storage_summary.get("owner_id", ""),
+                    "entry_id": action.get("entry_id", ""),
+                    "action_type": action.get("type", ""),
+                },
+            )
+            er_total, ev_total = self._profile_er_ev_totals(profile)
+            if er_total + ev_total <= 0.0:
+                er_total = max(0.0, float(fallback_total_er))
+                ev_total = max(0.0, float(fallback_total_ev))
+            er_total = round(er_total * projection_ratio, 8)
+            ev_total = round(ev_total * projection_ratio, 8)
+            if er_total + ev_total <= 0.0:
+                continue
+            entry_id = str(action.get("entry_id", "") or "")
+            owner_id = entry_id or f"storage_residual::{storage_summary.get('owner_id', '')}:{order_index}"
+            fragment = self._build_internal_fragment_from_profile(
+                owner_id=owner_id,
+                owner_kind="storage_residual",
+                source_group_id=source_group_id,
+                source_phase=source_phase,
+                display_text=str(action.get("canonical_display_text", "") or action.get("raw_display_text", "") or owner_id),
+                profile=profile,
+                total_er=er_total,
+                total_ev=ev_total,
+                ext={
+                    "storage_owner_kind": str(storage_summary.get("owner_kind", "") or ""),
+                    "storage_owner_id": str(storage_summary.get("owner_id", "") or ""),
+                    "storage_action_type": str(action.get("type", "") or ""),
+                    "storage_entry_id": entry_id,
+                    "storage_signature": str(action.get("canonical_signature", "") or action.get("raw_signature", "") or ""),
+                },
+            )
+            if fragment is None:
+                continue
+            candidates.append(
+                (
+                    int(self._profile_unit_count(profile)),
+                    int(order_index),
+                    float(self._profile_total_energy(profile)),
+                    fragment,
+                )
+            )
+
+        if not candidates:
+            return []
+
+        candidates.sort(key=lambda item: (int(item[0]), float(item[2]), -int(item[1])), reverse=True)
+        return [dict(item[3]) for item in candidates[:max_fragments]]
+
+    def _build_internal_group_fragment(
+        self,
+        *,
+        group_obj: dict,
+        required_ids: list[str],
+        matched_er_total: float,
+        matched_ev_total: float,
+        rho: float,
+        structure_store,
+        group_store,
+        cut_engine,
+        profile_cache: dict[str, list[dict]] | None = None,
+    ) -> dict | None:
+        group_id = str(group_obj.get("id", "") or "")
+        if not group_id:
+            return None
+        consumed_er = round(max(0.0, float(matched_er_total)) * max(0.0, float(rho)), 8)
+        consumed_ev = round(max(0.0, float(matched_ev_total)) * max(0.0, float(rho)), 8)
+        if consumed_er + consumed_ev <= 0.0:
+            return None
+        restored_profile = restore_group_profile(
+            group_obj,
+            cut_engine=cut_engine,
+            structure_store=structure_store,
+            group_store=group_store,
+            _cache=profile_cache,
+        )
+        return self._build_internal_fragment_from_profile(
+            owner_id=group_id,
+            owner_kind="sg",
+            source_group_id=group_id,
+            source_phase="activated_group_round",
+            display_text=self._group_display_text(group_obj),
+            profile=restored_profile,
+            total_er=consumed_er,
+            total_ev=consumed_ev,
+            ext={"required_structure_ids": list(required_ids)},
+        )
+
     def _build_internal_fragments(
         self,
         *,
@@ -3464,6 +4285,9 @@ class StructureRetrievalEngine:
         transfer_er_map: dict[str, float],
         transfer_ev_map: dict[str, float],
         structure_store,
+        group_store,
+        cut_engine,
+        profile_cache: dict[str, list[dict]] | None = None,
     ) -> list[dict]:
         fragments = []
         for structure_id in structure_ids:
@@ -3475,29 +4299,43 @@ class StructureRetrievalEngine:
             if not structure_obj:
                 continue
             structure = structure_obj.get("structure", {})
-            sequence_groups = list(structure.get("sequence_groups", []))
-            if not sequence_groups:
-                sequence_groups = [{"group_index": 0, "source_type": "internal", "origin_frame_id": structure_id, "tokens": list(structure.get("flat_tokens", []))}]
-            fragments.append(
-                {
-                    "fragment_id": next_id("sif"),
-                    "source_group_id": source_group_id,
-                    "source_phase": source_phase,
-                    "source_structure_id": structure_id,
-                    "display_text": structure.get("display_text", structure_id),
-                    "flat_tokens": list(structure.get("flat_tokens", [])),
-                    "sequence_groups": sequence_groups,
-                    "er_hint": total_er,
-                    "ev_hint": total_ev,
-                    "energy_hint": round(total_er + total_ev, 8),
-                }
+            restored_profile = restore_structure_profile(
+                structure_obj,
+                cut_engine=cut_engine,
+                structure_store=structure_store,
+                group_store=group_store,
+                _cache=profile_cache,
             )
+            fragment = self._build_internal_fragment_from_profile(
+                owner_id=str(structure_id),
+                owner_kind="st",
+                source_group_id=source_group_id,
+                source_phase=source_phase,
+                display_text=structure.get("display_text", structure_id),
+                profile=restored_profile,
+                total_er=total_er,
+                total_ev=total_ev,
+            )
+            if fragment is not None:
+                fragments.append(fragment)
         return fragments
 
     def _merge_internal_fragments(self, fragments: list[dict]) -> list[dict]:
         merged = {}
+        goal_b_mode = bool(self._config.get("enable_goal_b_char_sa_string_mode", False))
         for fragment in fragments:
-            key = str(fragment.get("source_structure_id", "")) or str(fragment.get("display_text", "")) or str(fragment.get("fragment_id", ""))
+            sequence_groups = fragment.get("sequence_groups", []) if isinstance(fragment.get("sequence_groups", []), list) else []
+            key = ""
+            if goal_b_mode and len(sequence_groups) == 1:
+                group = sequence_groups[0] if isinstance(sequence_groups[0], dict) else {}
+                if bool(group.get("order_sensitive", False)) and str(group.get("string_unit_kind", "") or "") == "char_sequence":
+                    string_key = str(group.get("string_token_text", "") or "")
+                    if not string_key:
+                        string_key = "".join([str(t) for t in (group.get("tokens", []) or []) if str(t)])
+                    if string_key:
+                        key = f"goal_b_string::{string_key}"
+            if not key:
+                key = str(fragment.get("source_structure_id", "")) or str(fragment.get("display_text", "")) or str(fragment.get("fragment_id", ""))
             current = merged.get(key)
             if current is None:
                 merged[key] = dict(fragment)
@@ -3506,6 +4344,683 @@ class StructureRetrievalEngine:
             current["ev_hint"] = round(float(current.get("ev_hint", 0.0)) + float(fragment.get("ev_hint", 0.0)), 8)
             current["energy_hint"] = round(float(current.get("er_hint", 0.0)) + float(current.get("ev_hint", 0.0)), 8)
         return list(merged.values())
+
+    def _apply_internal_resolution_to_fragments(
+        self,
+        *,
+        fragments: list[dict],
+        cam_items: list[dict],
+        cam_structure_ids: list[str],
+        now_ms: int,
+        trace_id: str,
+        tick_id: str,
+    ) -> tuple[list[dict], dict]:
+        """
+        Dynamic Attention Resource Limitation (DARL) + Progressive Attention Resolution Sampling (PARS)
+        ------------------------------------------------------------------------------------------------
+        Compress structure-level internal residual fragments before they are converted into internal SA.
+
+        Why:
+          Some structures can become very long (hundreds/thousands units). Even if attention selects only
+          ~10-20 structures, fully expanding each residual structure will explode internal SA count and cost.
+
+        Constraints:
+          - No semantic hardcoding (no punctuation/stop-word lists; no special casing of tokens).
+          - Endogenous stimulus stays in the closed loop (we never "turn it off").
+          - Soft, resource-aware limits (budget), with temporary fatigue and progressive detail revealing.
+        """
+        enabled = bool(self._config.get("internal_resolution_enabled", False))
+        if not enabled or not fragments:
+            return fragments, {
+                "enabled": bool(enabled),
+                "structure_count": len(fragments),
+                "structure_count_total": len(fragments),
+                "structure_count_selected": len(fragments),
+                "structure_count_dropped": 0,
+                "detail_budget": 0,
+                "raw_unit_count": 0,
+                "selected_unit_count": 0,
+                "max_structures_per_tick": int(self._config.get("internal_resolution_max_structures_per_tick", 0) or 0),
+                "reason": "disabled_or_empty",
+            }
+
+        # Update per-structure "focus credit" (sustained attention -> higher resolution over time).
+        if bool(self._config.get("internal_resolution_focus_credit_enabled", True)):
+            self._update_internal_resolution_focus_credit(cam_structure_ids=cam_structure_ids)
+
+        cam_map = {str(item.get("structure_id", "")): dict(item) for item in cam_items if str(item.get("structure_id", ""))}
+
+        # Global detail budget (unit count) for this tick.
+        nt = self._config.get("_runtime_nt_snapshot", {})
+        adr = 0.0
+        if isinstance(nt, dict):
+            try:
+                adr = float(nt.get("ADR", 0.0) or 0.0)
+            except Exception:
+                adr = 0.0
+        base_budget = float(self._config.get("internal_resolution_detail_budget_base", 128))
+        adr_gain = float(self._config.get("internal_resolution_detail_budget_adr_gain", 128))
+        detail_budget = int(max(1.0, round(base_budget + adr_gain * max(0.0, min(1.0, adr)))))
+
+        min_per_structure = int(self._config.get("internal_resolution_min_detail_per_structure", 4) or 4)
+        min_per_structure = max(1, min_per_structure)
+        base_max_per_structure = int(self._config.get("internal_resolution_max_detail_per_structure", 64) or 64)
+        base_max_per_structure = max(1, base_max_per_structure)
+        cost_cap = int(self._config.get("internal_resolution_cost_cap", 512) or 512)
+        cost_cap = max(1, cost_cap)
+        # Hard cap on how many units we will *materialize/consider* per structure per tick.
+        # This is a resource fuse: it does NOT disable internal fragments; it only bounds
+        # the per-structure work, while cursor progression still reveals different parts
+        # across ticks.
+        flat_cap = int(self._config.get("internal_resolution_flat_unit_cap_per_structure", cost_cap) or cost_cap)
+        flat_cap = max(int(base_max_per_structure), max(16, flat_cap))
+
+        w_energy = float(self._config.get("internal_resolution_value_weight_total_energy", 1.0) or 1.0)
+        w_cp = float(self._config.get("internal_resolution_value_weight_cp_abs", 0.35) or 0.35)
+        w_rw = float(self._config.get("internal_resolution_value_weight_runtime_weight", 0.15) or 0.15)
+        focus_gamma = float(self._config.get("internal_resolution_focus_credit_gamma", 0.25) or 0.25)
+
+        # Gather fragment stats (raw unit counts + value/cost).
+        infos: list[dict] = []
+        raw_total_units = 0
+        for fragment in fragments:
+            sid = str(fragment.get("source_structure_id", "")) or str(fragment.get("display_text", ""))
+            groups = fragment.get("sequence_groups", []) if isinstance(fragment.get("sequence_groups", []), list) else []
+            raw_units = 0
+            for g in groups:
+                if not isinstance(g, dict):
+                    continue
+                units = g.get("units", [])
+                if isinstance(units, list):
+                    raw_units += len([u for u in units if isinstance(u, dict)])
+            if raw_units <= 0:
+                # Legacy fallback: approximate by token length
+                raw_units = len([t for t in (fragment.get("flat_tokens", []) or []) if str(t)])
+            raw_units_total = max(0, int(raw_units))
+            raw_units_eff = min(int(raw_units_total), int(flat_cap))
+            raw_total_units += raw_units_eff
+
+            energy = float(fragment.get("energy_hint", 0.0) or 0.0)
+            if energy <= 0.0:
+                energy = float(fragment.get("er_hint", 0.0) or 0.0) + float(fragment.get("ev_hint", 0.0) or 0.0)
+
+            cam = cam_map.get(sid, {})
+            cp_abs = float(cam.get("cp_abs", 0.0) or 0.0)
+            runtime_weight = float(cam.get("runtime_weight", 1.0) or 1.0)
+            focus_credit = float(self._internal_resolution_focus_credit.get(sid, 0.0) or 0.0)
+            focus_multiplier = 1.0 + max(0.0, float(focus_gamma)) * max(0.0, focus_credit)
+
+            # Value uses only runtime signals (energy/cp/runtime_weight), no token semantics.
+            value = max(0.0, w_energy * energy) + max(0.0, w_cp * cp_abs) + max(0.0, w_rw * runtime_weight)
+            value_eff = value * focus_multiplier
+
+            cost = max(1, raw_units_eff)
+            cost_eff = min(cost, cost_cap)
+
+            # Effective per-structure max can grow with sustained focus (still bounded by raw length + global budget).
+            max_k_eff = min(cost, int(round(base_max_per_structure * focus_multiplier)))
+            max_k_eff = max(1, max_k_eff)
+
+            infos.append(
+                {
+                    "structure_id": sid,
+                    "raw_unit_count": cost,
+                    "raw_unit_count_total": int(raw_units_total),
+                    "raw_unit_cap": int(flat_cap),
+                    "cost_eff": cost_eff,
+                    "energy": energy,
+                    "cp_abs": cp_abs,
+                    "runtime_weight": runtime_weight,
+                    "focus_credit": focus_credit,
+                    "focus_multiplier": focus_multiplier,
+                    "value_eff": value_eff,
+                    "weight_base": (value_eff / float(cost_eff)) if cost_eff > 0 else float(value_eff),
+                    "richness_score": float(value_eff) * math.pow(max(1.0, float(cost)), max(0.0, float(self._config.get("internal_resolution_structure_richness_power", 0.5) or 0.5))),
+                    "max_k_eff": max_k_eff,
+                }
+            )
+
+        if not infos:
+            return fragments, {
+                "enabled": True,
+                "structure_count": 0,
+                "structure_count_total": 0,
+                "structure_count_selected": 0,
+                "structure_count_dropped": 0,
+                "detail_budget": detail_budget,
+                "raw_unit_count": 0,
+                "selected_unit_count": 0,
+                "adr": round(float(adr), 8),
+                "max_structures_per_tick": int(self._config.get("internal_resolution_max_structures_per_tick", 0) or 0),
+            }
+
+        raw_total_units_all_candidates = int(raw_total_units)
+        # Sort by weight_base for deterministic allocation.
+        infos.sort(key=lambda it: (float(it.get("weight_base", 0.0) or 0.0), float(it.get("value_eff", 0.0) or 0.0)), reverse=True)
+        structure_count_total = len(infos)
+        selection_mode = "density_only"
+        rich_candidate_count = 0
+        rich_selected_count = 0
+
+        # Soft-but-hard safety fuse: limit how many residual structures can enter
+        # the detail allocator per tick. This keeps worst-case spikes bounded
+        # without disabling internal fragments entirely.
+        max_structures = int(self._config.get("internal_resolution_max_structures_per_tick", 0) or 0)
+        if max_structures > 0 and len(infos) > max_structures:
+            rich_ratio = float(self._config.get("internal_resolution_rich_structure_ratio", 0.4) or 0.4)
+            rich_ratio = max(0.0, min(1.0, rich_ratio))
+            rich_min_units = int(
+                self._config.get(
+                    "internal_resolution_rich_structure_min_units",
+                    max(4, int(min_per_structure) + 1),
+                )
+                or max(4, int(min_per_structure) + 1)
+            )
+            rich_min_units = max(2, rich_min_units)
+            density_ranked = list(infos)
+            rich_ranked = [
+                it
+                for it in sorted(
+                    infos,
+                    key=lambda item: (
+                        float(item.get("richness_score", 0.0) or 0.0),
+                        float(item.get("value_eff", 0.0) or 0.0),
+                        int(item.get("raw_unit_count", 0) or 0),
+                        float(item.get("weight_base", 0.0) or 0.0),
+                    ),
+                    reverse=True,
+                )
+                if int(it.get("raw_unit_count", 0) or 0) >= rich_min_units
+            ]
+            rich_candidate_count = len(rich_ranked)
+            rich_slots = 0
+            if rich_ranked and rich_ratio > 0.0:
+                rich_slots = int(round(float(max_structures) * rich_ratio))
+                if rich_slots <= 0:
+                    rich_slots = 1
+                rich_slots = min(int(max_structures), len(rich_ranked), rich_slots)
+            density_slots = max(0, int(max_structures) - int(rich_slots))
+            selected_infos: list[dict] = []
+            selected_ids: set[str] = set()
+
+            def _select_info(info: dict) -> None:
+                sid = str(info.get("structure_id", ""))
+                if not sid or sid in selected_ids:
+                    return
+                selected_ids.add(sid)
+                selected_infos.append(info)
+
+            for it in density_ranked:
+                if len(selected_infos) >= density_slots:
+                    break
+                _select_info(it)
+            for it in rich_ranked:
+                if len(selected_infos) >= int(max_structures):
+                    break
+                before = len(selected_infos)
+                _select_info(it)
+                if len(selected_infos) > before:
+                    rich_selected_count += 1
+            for it in density_ranked:
+                if len(selected_infos) >= int(max_structures):
+                    break
+                _select_info(it)
+
+            infos = selected_infos[: int(max_structures)]
+            selection_mode = "hybrid_density_rich" if rich_selected_count > 0 else "density_only"
+            keep = {str(it.get("structure_id", "")) for it in infos if str(it.get("structure_id", ""))}
+            fragments = [f for f in fragments if (str(f.get("source_structure_id", "")) or str(f.get("display_text", ""))) in keep]
+            raw_total_units = sum(int(it.get("raw_unit_count", 0) or 0) for it in infos)
+
+        # Step 1: allocate floors
+        alloc: dict[str, int] = {str(it["structure_id"]): 0 for it in infos}
+        floor_total = sum(min(int(it.get("raw_unit_count", 0) or 0), min_per_structure) for it in infos)
+        remaining = int(detail_budget)
+
+        if floor_total <= detail_budget:
+            for it in infos:
+                sid = str(it["structure_id"])
+                alloc[sid] = int(min(int(it.get("raw_unit_count", 0) or 0), min_per_structure))
+            remaining = max(0, int(detail_budget) - sum(alloc.values()))
+        else:
+            # If budget is too small, allocate 1 to the best few structures (soft pressure).
+            for it in infos:
+                if remaining <= 0:
+                    break
+                sid = str(it["structure_id"])
+                if int(it.get("raw_unit_count", 0) or 0) <= 0:
+                    continue
+                alloc[sid] = 1
+                remaining -= 1
+
+        # Step 2: distribute remaining budget with diminishing returns.
+        if remaining > 0:
+            active = {str(it["structure_id"]) for it in infos}
+            # Keep loop bounded even if config is odd.
+            for _ in range(int(detail_budget) * 2):
+                if remaining <= 0 or not active:
+                    break
+                best_sid = ""
+                best_marginal = -1.0
+                for it in infos:
+                    sid = str(it["structure_id"])
+                    if sid not in active:
+                        continue
+                    current = int(alloc.get(sid, 0) or 0)
+                    if current >= int(it.get("raw_unit_count", 0) or 0):
+                        active.discard(sid)
+                        continue
+                    if current >= int(it.get("max_k_eff", 0) or 0):
+                        active.discard(sid)
+                        continue
+                    weight_base = float(it.get("weight_base", 0.0) or 0.0)
+                    marginal = weight_base / (1.0 + float(current))
+                    if marginal > best_marginal:
+                        best_marginal = marginal
+                        best_sid = sid
+                if not best_sid:
+                    break
+                alloc[best_sid] = int(alloc.get(best_sid, 0) or 0) + 1
+                remaining -= 1
+
+        # Step 3: trim fragments
+        trimmed: list[dict] = []
+        per_structure: list[dict] = []
+        selected_total_units = 0
+
+        by_sid = {str(f.get("source_structure_id", "")) or str(f.get("display_text", "")): dict(f) for f in fragments}
+        for it in infos:
+            sid = str(it["structure_id"])
+            fragment = by_sid.get(sid)
+            if not fragment:
+                continue
+            target_k = int(alloc.get(sid, 0) or 0)
+            # Always keep at least 1 unit when the fragment carries energy (avoid "silent disappearance").
+            if target_k <= 0 and float(fragment.get("energy_hint", 0.0) or 0.0) > 0.0:
+                target_k = 1
+            trimmed_fragment, trim_info = self._trim_internal_fragment_units(
+                fragment=fragment,
+                target_unit_count=target_k,
+                focus_credit=float(it.get("focus_credit", 0.0) or 0.0),
+            )
+            selected_total_units += int(trim_info.get("selected_unit_count", 0) or 0)
+            trimmed.append(trimmed_fragment)
+            per_structure.append(
+                {
+                    "structure_id": sid,
+                    "raw_unit_count": int(it.get("raw_unit_count", 0) or 0),
+                    "selected_unit_count": int(trim_info.get("selected_unit_count", 0) or 0),
+                    "target_unit_count": int(target_k),
+                    "focus_credit": round(float(it.get("focus_credit", 0.0) or 0.0), 8),
+                    "cursor_before": int(trim_info.get("cursor_before", 0) or 0),
+                    "cursor_after": int(trim_info.get("cursor_after", 0) or 0),
+                }
+            )
+
+        # Preserve original fragment order (roughly: structure id order in fragments).
+        trimmed_by_sid = {str(f.get("source_structure_id", "")) or str(f.get("display_text", "")): f for f in trimmed}
+        final_fragments = []
+        for f in fragments:
+            sid = str(f.get("source_structure_id", "")) or str(f.get("display_text", ""))
+            final_fragments.append(trimmed_by_sid.get(sid, f))
+
+        summary = {
+            "enabled": True,
+            "detail_budget": int(detail_budget),
+            "detail_budget_base": round(float(base_budget), 8),
+            "detail_budget_adr_gain": round(float(adr_gain), 8),
+            "adr": round(float(adr), 8),
+            "structure_count": len(infos),
+            "structure_count_total": int(structure_count_total),
+            "structure_count_selected": int(len(infos)),
+            "structure_count_dropped": max(0, int(structure_count_total) - int(len(infos))),
+            "max_structures_per_tick": int(max_structures),
+            "selection_mode": selection_mode,
+            "rich_candidate_count": int(rich_candidate_count),
+            "rich_selected_count": int(rich_selected_count),
+            "raw_unit_count": int(raw_total_units),
+            "raw_unit_count_total_candidates": int(raw_total_units_all_candidates),
+            "selected_unit_count": int(selected_total_units),
+            "min_per_structure": int(min_per_structure),
+            "base_max_per_structure": int(base_max_per_structure),
+            "cost_cap": int(cost_cap),
+            # keep per-structure detail small and auditable (N is usually <= 20)
+            "per_structure": per_structure[: min(32, len(per_structure))],
+        }
+
+        return final_fragments, summary
+
+    def _update_internal_resolution_focus_credit(self, *, cam_structure_ids: list[str]) -> None:
+        decay = float(self._config.get("internal_resolution_focus_credit_decay", 0.90) or 0.90)
+        decay = max(0.0, min(1.0, decay))
+        gain = float(self._config.get("internal_resolution_focus_credit_gain", 0.35) or 0.35)
+        gain = max(0.0, gain)
+        cap = float(self._config.get("internal_resolution_focus_credit_cap", 6.0) or 6.0)
+        cap = max(0.0, cap)
+
+        # Apply decay to all tracked structures.
+        for sid in list(self._internal_resolution_focus_credit.keys()):
+            v = float(self._internal_resolution_focus_credit.get(sid, 0.0) or 0.0) * decay
+            if v <= 1e-6:
+                self._internal_resolution_focus_credit.pop(sid, None)
+            else:
+                self._internal_resolution_focus_credit[sid] = v
+
+        # Add credit for currently attended structures.
+        for sid in cam_structure_ids or []:
+            key = str(sid)
+            if not key:
+                continue
+            v = float(self._internal_resolution_focus_credit.get(key, 0.0) or 0.0) + gain
+            if v > cap:
+                v = cap
+            self._internal_resolution_focus_credit[key] = v
+
+    def _trim_internal_fragment_units(self, *, fragment: dict, target_unit_count: int, focus_credit: float) -> tuple[dict, dict]:
+        """
+        Trim a single fragment to at most target_unit_count units, using:
+        - stable anchors (small, identity-preserving)
+        - progressive cursor (cover different parts across ticks)
+        - temporary fatigue (avoid always picking the same details)
+        """
+        sid = str(fragment.get("source_structure_id", "")) or str(fragment.get("display_text", ""))
+        seq_groups = fragment.get("sequence_groups", []) if isinstance(fragment.get("sequence_groups", []), list) else []
+
+        # Some legacy internal fragments carry only `tokens` (no pre-built `units`).
+        # Build deterministic per-token units so resolution can trim them safely.
+        normalized_groups: list[dict] = []
+        for g_order, g in enumerate(seq_groups):
+            if not isinstance(g, dict):
+                continue
+            units = g.get("units", [])
+            if isinstance(units, list) and any(isinstance(u, dict) for u in units):
+                normalized_groups.append(g)
+                continue
+            tokens = [str(t) for t in (g.get("tokens", []) or []) if str(t)]
+            if not tokens:
+                normalized_groups.append(g)
+                continue
+            cloned = dict(g)
+            cloned_units = []
+            for idx, token in enumerate(tokens):
+                cloned_units.append(
+                    {
+                        "unit_id": f"legacy_{g_order}_{idx}",
+                        "unit_signature": token,
+                        "unit_role": "feature",
+                        "token": token,
+                        "display_text": token,
+                        "display_visible": True,
+                        "sequence_index": int(idx),
+                    }
+                )
+            cloned["units"] = cloned_units
+            normalized_groups.append(cloned)
+        seq_groups = normalized_groups
+
+        # Flatten units with stable ordering.
+        flat: list[dict] = []
+        for g_order, g in enumerate(seq_groups):
+            if not isinstance(g, dict):
+                continue
+            units = g.get("units", [])
+            if not isinstance(units, list) or not units:
+                continue
+            normalized_units = [u for u in units if isinstance(u, dict)]
+            normalized_units.sort(
+                key=lambda u: (
+                    int(u.get("sequence_index", 0)),
+                    str(u.get("unit_id", "")),
+                    str(u.get("unit_signature", "")),
+                )
+            )
+            for u in normalized_units:
+                unit_id = str(u.get("unit_id", ""))
+                sig = str(u.get("unit_signature", "")) or str(u.get("token", ""))
+                if not sig and not unit_id:
+                    continue
+                flat.append(
+                    {
+                        "group_order": int(g_order),
+                        "sequence_index": int(u.get("sequence_index", 0)),
+                        "unit_id": unit_id,
+                        "unit_signature": sig,
+                        "unit_role": str(u.get("unit_role", "feature") or "feature"),
+                        "unit": u,
+                    }
+                )
+
+        raw_unit_count = len(flat)
+        if raw_unit_count <= 0:
+            return fragment, {"raw_unit_count": 0, "selected_unit_count": 0, "cursor_before": 0, "cursor_after": 0}
+
+        # Cursor for progressive coverage (in the full unit index space).
+        raw_unit_total = int(raw_unit_count)
+        cursor_before_total = int(self._internal_resolution_cursor.get(sid, 0) or 0)
+        cursor_total = int(cursor_before_total % raw_unit_total)
+
+        # Cap materialized units to keep the per-structure cost bounded.
+        flat_cap = int(self._config.get("internal_resolution_flat_unit_cap_per_structure", self._config.get("internal_resolution_cost_cap", 512)) or 512)
+        flat_cap = max(16, flat_cap)
+        capped = False
+        if raw_unit_total > flat_cap:
+            capped = True
+            end = int(cursor_total + flat_cap)
+            if end <= raw_unit_total:
+                flat = flat[cursor_total:end]
+            else:
+                flat = flat[cursor_total:] + flat[: (end % raw_unit_total)]
+            raw_unit_count = len(flat)
+            cursor = 0
+        else:
+            cursor = int(cursor_total)
+
+        for idx, entry in enumerate(flat):
+            entry["flat_index"] = int(idx)
+
+        target_unit_count = int(max(1, min(raw_unit_count, int(target_unit_count or 1))))
+        if raw_unit_count <= target_unit_count:
+            return fragment, {
+                "raw_unit_count": raw_unit_count,
+                "selected_unit_count": raw_unit_count,
+                "cursor_before": int(self._internal_resolution_cursor.get(sid, 0) or 0),
+                "cursor_after": int(self._internal_resolution_cursor.get(sid, 0) or 0),
+            }
+
+        # Fatigue state (sliding window over recently selected unit signatures).
+        window = int(self._config.get("internal_resolution_detail_fatigue_window", 64) or 64)
+        window = max(1, window)
+        start = float(self._config.get("internal_resolution_detail_fatigue_start", 2.0) or 2.0)
+        full = float(self._config.get("internal_resolution_detail_fatigue_full", 8.0) or 8.0)
+        min_scale = float(self._config.get("internal_resolution_detail_fatigue_min_scale", 0.0) or 0.0)
+        beta = float(self._config.get("internal_resolution_detail_fatigue_beta", 1.0) or 1.0)
+
+        hist = self._internal_resolution_history.get(sid)
+        if hist is None:
+            hist = deque()
+            self._internal_resolution_history[sid] = hist
+        counts = self._internal_resolution_history_counts.get(sid)
+        if counts is None:
+            counts = {}
+            self._internal_resolution_history_counts[sid] = counts
+
+        def fatigue_scale(signature: str) -> float:
+            c = float(counts.get(signature, 0) or 0)
+            if full <= start:
+                return 1.0
+            if c <= start:
+                return 1.0
+            if c >= full:
+                return float(min_scale)
+            t = (c - start) / (full - start)
+            t = max(0.0, min(1.0, t))
+            base = (1.0 - t)
+            if beta != 1.0:
+                try:
+                    base = math.pow(base, float(beta))
+                except Exception:
+                    base = (1.0 - t)
+            return float(min_scale) + (1.0 - float(min_scale)) * base
+
+        # Cursor for progressive coverage.
+        cursor_before = int(cursor_total)
+
+        # Score units (no semantics: energy + fatigue + mild position bonus).
+        for idx, entry in enumerate(flat):
+            u = entry["unit"]
+            sig = str(entry.get("unit_signature", ""))
+            try:
+                unit_energy = float(u.get("total_energy", float(u.get("er", 0.0)) + float(u.get("ev", 0.0))) or 0.0)
+            except Exception:
+                unit_energy = 0.0
+            unit_energy = max(0.0, unit_energy)
+            fscale = fatigue_scale(sig) if sig else 1.0
+            pos_bonus = 1.0 / math.sqrt(1.0 + float(idx))
+            entry["fatigue_scale"] = fscale
+            entry["score"] = (1.0 + unit_energy) * fscale * (0.85 + 0.15 * pos_bonus)
+
+        # Anchors: prefer non-attribute units when available (structural role, not token semantics).
+        stable_anchor_count = int(self._config.get("internal_resolution_stable_anchor_count", 1) or 1)
+        stable_anchor_count = max(0, stable_anchor_count)
+        anchor_ratio = float(self._config.get("internal_resolution_anchor_ratio", 0.35) or 0.35)
+        anchor_ratio = max(0.0, min(1.0, anchor_ratio))
+        anchor_target = int(round(float(target_unit_count) * anchor_ratio))
+        anchor_target = max(stable_anchor_count, anchor_target)
+        anchor_target = max(0, min(target_unit_count, anchor_target))
+
+        candidates = [e for e in flat if str(e.get("unit_role", "")) != "attribute"]
+        if len(candidates) < max(1, anchor_target):
+            candidates = list(flat)
+        candidates.sort(key=lambda e: (-float(e.get("score", 0.0) or 0.0), int(e.get("sequence_index", 0)), str(e.get("unit_id", ""))))
+        selected_idx: set[int] = set()
+        for e in candidates[:anchor_target]:
+            selected_idx.add(int(e.get("flat_index", 0) or 0))
+
+        # Detail fill: walk from cursor, skipping zero-fatigue units, then fall back to top scores.
+        need = int(target_unit_count - len(selected_idx))
+        detail_picks = 0
+        if need > 0:
+            i = cursor
+            loops = 0
+            while need > 0 and loops < raw_unit_count:
+                if i not in selected_idx and float(flat[i].get("fatigue_scale", 1.0) or 1.0) > 0.0:
+                    selected_idx.add(i)
+                    need -= 1
+                    detail_picks += 1
+                i = (i + 1) % raw_unit_count
+                loops += 1
+        if need > 0:
+            remaining = [i for i in range(raw_unit_count) if i not in selected_idx]
+            remaining.sort(key=lambda i: (-float(flat[i].get("score", 0.0) or 0.0), int(flat[i].get("sequence_index", 0)), str(flat[i].get("unit_id", ""))))
+            for i in remaining:
+                if need <= 0:
+                    break
+                selected_idx.add(i)
+                need -= 1
+                detail_picks += 1
+
+        # Bundle closure: if a bundle member is selected, try to include its bundle anchor.
+        id_to_idx = {str(entry.get("unit_id", "")): idx for idx, entry in enumerate(flat) if str(entry.get("unit_id", ""))}
+        must_include: set[int] = set()
+        for i in list(selected_idx):
+            u = flat[i]["unit"]
+            anchor_id = str(u.get("bundle_anchor_unit_id", "") or "")
+            if anchor_id and anchor_id in id_to_idx:
+                must_include.add(int(id_to_idx[anchor_id]))
+        if must_include:
+            selected_idx |= must_include
+            # Enforce hard cap by removing lowest-score non-must units.
+            while len(selected_idx) > target_unit_count:
+                removable = [i for i in selected_idx if i not in must_include]
+                if not removable:
+                    break
+                removable.sort(key=lambda i: (float(flat[i].get("score", 0.0) or 0.0), -int(flat[i].get("sequence_index", 0))))
+                selected_idx.discard(removable[0])
+
+        # Rebuild groups with selected units.
+        selected_unit_ids = {str(flat[i].get("unit_id", "")) for i in selected_idx if str(flat[i].get("unit_id", ""))}
+        selected_signatures = {str(flat[i].get("unit_signature", "")) for i in selected_idx if str(flat[i].get("unit_signature", ""))}
+
+        new_groups: list[dict] = []
+        for g_order, g in enumerate(seq_groups):
+            if not isinstance(g, dict):
+                continue
+            units = g.get("units", [])
+            if not isinstance(units, list) or not units:
+                continue
+            new_units = []
+            for u in units:
+                if not isinstance(u, dict):
+                    continue
+                uid = str(u.get("unit_id", ""))
+                sig = str(u.get("unit_signature", "")) or str(u.get("token", ""))
+                if uid and uid in selected_unit_ids:
+                    new_units.append(dict(u))
+                elif (not uid) and sig and sig in selected_signatures:
+                    new_units.append(dict(u))
+            if not new_units:
+                continue
+            cloned = dict(g)
+            cloned["units"] = new_units
+            cloned["tokens"] = [str(u.get("token", "")) for u in new_units if str(u.get("token", ""))]
+            new_groups.append(cloned)
+
+        if not new_groups:
+            # Safety fallback: keep a tiny prefix of the first group.
+            first = None
+            for g in seq_groups:
+                if isinstance(g, dict) and isinstance(g.get("units", []), list) and g.get("units"):
+                    first = dict(g)
+                    first["units"] = [dict(u) for u in (g.get("units", []) or [])[:target_unit_count] if isinstance(u, dict)]
+                    first["tokens"] = [str(u.get("token", "")) for u in first["units"] if str(u.get("token", ""))]
+                    break
+            if first:
+                new_groups = [first]
+
+        # Update cursor for progressive coverage.
+        advance = max(1, int(detail_picks))
+        cursor_after_total = int((cursor_total + advance) % raw_unit_total)
+        self._internal_resolution_cursor[sid] = cursor_after_total
+
+        # Update fatigue history with selected signatures (temporary; sliding window).
+        selected_sigs = [str(flat[i].get("unit_signature", "")) for i in selected_idx if str(flat[i].get("unit_signature", ""))]
+        for sig in selected_sigs:
+            # Ensure window size by popping oldest.
+            while len(hist) >= window:
+                old = hist.popleft()
+                if old:
+                    counts[old] = int(counts.get(old, 0) or 0) - 1
+                    if int(counts.get(old, 0) or 0) <= 0:
+                        counts.pop(old, None)
+            hist.append(sig)
+            counts[sig] = int(counts.get(sig, 0) or 0) + 1
+
+        new_fragment = dict(fragment)
+        new_fragment["sequence_groups"] = new_groups
+        new_fragment["flat_tokens"] = [token for g in new_groups for token in (g.get("tokens", []) or []) if str(token)]
+        new_fragment["ext"] = dict(new_fragment.get("ext", {}) or {})
+        new_fragment["ext"]["internal_resolution"] = {
+            "enabled": True,
+            "raw_unit_count": int(raw_unit_count),
+            "raw_unit_count_total": int(raw_unit_total),
+            "raw_unit_cap": int(flat_cap),
+            "raw_unit_capped": bool(capped),
+            "selected_unit_count": int(sum(len(g.get("units", [])) for g in new_groups if isinstance(g, dict))),
+            "target_unit_count": int(target_unit_count),
+            "cursor_before": int(cursor_before),
+            "cursor_after": int(cursor_after_total),
+            "focus_credit": round(float(focus_credit), 8),
+        }
+
+        return new_fragment, {
+            "raw_unit_count": int(raw_unit_count),
+            "raw_unit_count_total": int(raw_unit_total),
+            "raw_unit_cap": int(flat_cap),
+            "raw_unit_capped": bool(capped),
+            "selected_unit_count": int(new_fragment["ext"]["internal_resolution"]["selected_unit_count"]),
+            "cursor_before": int(cursor_before),
+            "cursor_after": int(cursor_after_total),
+        }
 
     @staticmethod
     def _max_total_budget(structure_ids: list[str], budget_er_map: dict[str, float], budget_ev_map: dict[str, float]) -> float:
@@ -3542,10 +5057,10 @@ class StructureRetrievalEngine:
             )
         return refs
 
-    def _build_group_debug_payload(self, group_obj: dict, structure_store, cut_engine) -> dict:
+    def _build_group_debug_payload(self, group_obj: dict, structure_store, cut_engine, *, group_profile: dict | None = None) -> dict:
         now_ms = int(time.time() * 1000)
         stats = self._preview_group_stats(group_obj, now_ms=now_ms)
-        profile = self._group_full_profile(group_obj=group_obj, structure_store=structure_store, cut_engine=cut_engine)
+        profile = group_profile or self._group_full_profile(group_obj=group_obj, structure_store=structure_store, cut_engine=cut_engine)
         group_structure = group_obj.get("group_structure", {})
         return {
             "group_id": group_obj.get("id", ""),
@@ -3565,6 +5080,10 @@ class StructureRetrievalEngine:
             "fatigue": round(float(stats.get("fatigue", 0.0)), 8),
             "runtime_weight": round(float(stats.get("runtime_weight", 1.0)), 8),
         }
+
+
+
+
 
 
 

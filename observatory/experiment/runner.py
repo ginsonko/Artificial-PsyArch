@@ -14,15 +14,18 @@ import os
 import sys
 import time
 import contextlib
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from . import dataset as ds
+from .expectation_contracts import ExpectationContractEngine, ExpectationContractError
 from .io import ExperimentIOError, iter_jsonl, load_yaml_file, sha256_file, write_jsonl
 from .metrics import extract_tick_metrics
 from .storage import DatasetFileRef, ExperimentStorageError, make_run_dir, resolve_dataset_file, safe_slug
+from .auto_tuner import AutoTuner
 
 
 class ExperimentRunnerError(RuntimeError):
@@ -34,6 +37,10 @@ class RunOptions:
     reset_mode: str = "keep"  # keep | clear_runtime | clear_all
     export_json: bool = False
     export_html: bool = False
+    # Adaptive auto tuner (self-adaptive parameter tuning)
+    auto_tune_enabled: bool = False
+    auto_tune_short_term: bool = True
+    auto_tune_long_term: bool = True
     # time sensor override during the run (None means keep current runtime config)
     time_sensor_time_basis: str | None = None  # tick | wallclock | None
     tick_interval_sec: float | None = None  # for display only (time_sensor config field)
@@ -44,6 +51,9 @@ class RunOptions:
             "reset_mode": self.reset_mode,
             "export_json": bool(self.export_json),
             "export_html": bool(self.export_html),
+            "auto_tune_enabled": bool(self.auto_tune_enabled),
+            "auto_tune_short_term": bool(self.auto_tune_short_term),
+            "auto_tune_long_term": bool(self.auto_tune_long_term),
             "time_sensor_time_basis": self.time_sensor_time_basis,
             "tick_interval_sec": self.tick_interval_sec,
             "max_ticks": self.max_ticks,
@@ -74,6 +84,75 @@ def _count_jsonl_lines(path: Path) -> int:
             if line.strip():
                 n += 1
     return n
+
+
+def _compact_auto_tuner_tick_result(result: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(result, dict):
+        return None
+    compact: dict[str, Any] = {
+        "enabled": bool(result.get("enabled", False)),
+        "applied": bool(result.get("applied", False)),
+        "reason": str(result.get("reason", "") or ""),
+        "applied_count": int(result.get("applied_count", 0) or 0),
+    }
+    updates = []
+    for item in (result.get("applied_updates") or []):
+        if not isinstance(item, dict):
+            continue
+        updates.append(
+            {
+                "rule_id": str(item.get("rule_id", "") or ""),
+                "param": str(item.get("param", "") or ""),
+                "metric_key": str(item.get("metric_key", "") or ""),
+                "issue_mode": str(item.get("issue_mode", "") or ""),
+                "reason": str(item.get("reason", "") or ""),
+                "from": item.get("from"),
+                "to": item.get("to"),
+            }
+        )
+    if updates:
+        compact["applied_updates"] = updates[:8]
+    return compact
+
+
+def _resolve_time_sensor_runtime_overrides(
+    *,
+    normalized_doc: dict[str, Any] | None,
+    options: RunOptions,
+) -> tuple[str | None, float | None]:
+    """
+    Resolve the effective time-sensor runtime override for this run.
+
+    Priority:
+    1. Explicit RunOptions override
+    2. Dataset-declared time basis / tick interval
+    3. Keep current runtime config (None)
+    """
+
+    basis = options.time_sensor_time_basis
+    tick_interval_sec = options.tick_interval_sec
+
+    meta_basis = None
+    meta_tick_dt_ms = None
+    if isinstance(normalized_doc, dict):
+        meta_basis = str(normalized_doc.get("time_basis", "") or "").strip().lower() or None
+        try:
+            raw_tick_dt_ms = normalized_doc.get("tick_dt_ms", None)
+            if raw_tick_dt_ms is not None:
+                meta_tick_dt_ms = int(raw_tick_dt_ms)
+        except Exception:
+            meta_tick_dt_ms = None
+
+    if basis not in {"tick", "wallclock"}:
+        if meta_basis in {"tick", "wallclock"}:
+            basis = meta_basis
+        else:
+            basis = None
+
+    if tick_interval_sec is None and meta_tick_dt_ms is not None and meta_tick_dt_ms > 0:
+        tick_interval_sec = float(meta_tick_dt_ms) / 1000.0
+
+    return basis, tick_interval_sec
 
 
 def load_dataset_ticks(
@@ -158,6 +237,7 @@ def run_dataset(
     started_wall_ms = _now_ms()
     manifest_path = run_dir / "manifest.json"
     metrics_path = run_dir / "metrics.jsonl"
+    expectation_events_path = run_dir / "expectation_contract_events.jsonl"
     normalized_path = run_dir / "dataset.normalized.yaml"
     dataset_copy_path = run_dir / f"dataset.source{Path(resolve_dataset_file(dataset_ref)).suffix.lower()}"
 
@@ -177,6 +257,19 @@ def run_dataset(
             pass
 
     # Prepare initial manifest
+    tick_summary = ds.summarize_tick_counts(normalized_doc) if isinstance(normalized_doc, dict) else {}
+    planned_tick_summary = dict(tick_summary) if tick_summary else {}
+    if isinstance(normalized_doc, dict) and options.max_ticks is not None and int(options.max_ticks) > 0:
+        try:
+            planned_items = []
+            limit = max(0, int(options.max_ticks))
+            for idx, item in enumerate(ds.expand_dataset(normalized_doc)):
+                if idx >= limit:
+                    break
+                planned_items.append(item)
+            planned_tick_summary = ds.summarize_expanded_tick_items(planned_items)
+        except Exception:
+            planned_tick_summary = dict(tick_summary) if tick_summary else {}
     manifest: dict[str, Any] = {
         "run_id": run_id,
         "status": "running",
@@ -186,6 +279,9 @@ def run_dataset(
             "dataset_ref": dataset_ref.to_dict(),
             "dataset_path": str(resolve_dataset_file(dataset_ref)),
             "total_ticks": int(total_ticks) if total_ticks is not None else None,
+            "effective_text_ticks": planned_tick_summary.get("effective_text_ticks") if planned_tick_summary else None,
+            "empty_ticks": planned_tick_summary.get("empty_ticks") if planned_tick_summary else None,
+            "labeled_ticks": planned_tick_summary.get("labeled_ticks") if planned_tick_summary else None,
         },
         "options": options.to_dict(),
         "runtime": {
@@ -196,9 +292,49 @@ def run_dataset(
         "started_at_ms": int(started_wall_ms),
         "finished_at_ms": 0,
         "tick_done": 0,
+        "source_tick_done": 0,
+        "synthetic_tick_done": 0,
+        "executed_tick_done_total": 0,
         "tick_planned": int(total_ticks) if total_ticks is not None else None,
         "errors": [],
+        "expectation_contracts": {
+            "registered_count": 0,
+            "success_count": 0,
+            "failure_count": 0,
+            "synthetic_tick_count": 0,
+            "pending_count": 0,
+            "events_path": str(expectation_events_path),
+        },
     }
+
+    # Adaptive tuner (optional)
+    tuner: AutoTuner | None = None
+    if bool(options.auto_tune_enabled):
+        tuner = AutoTuner(
+            app=app,
+            run_dir=run_dir,
+            enabled=True,
+            enable_short_term=bool(options.auto_tune_short_term),
+            enable_long_term=bool(options.auto_tune_long_term),
+        )
+        try:
+            with lock_ctx:
+                applied = tuner.prepare_and_apply_overrides(trace_id="exp_prepare")
+            manifest["auto_tuner"] = {"enabled": True, "prepare": applied}
+        except Exception as exc:
+            manifest["auto_tuner"] = {"enabled": True, "prepare_error": str(exc)}
+    else:
+        manifest["auto_tuner"] = {"enabled": False}
+
+    effective_time_sensor_basis, effective_tick_interval_sec = _resolve_time_sensor_runtime_overrides(
+        normalized_doc=normalized_doc,
+        options=options,
+    )
+    manifest["time_sensor_runtime_override"] = {
+        "time_basis": effective_time_sensor_basis,
+        "tick_interval_sec": effective_tick_interval_sec,
+    }
+
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # Apply pre-run options (save old values, restore on exit)
@@ -215,19 +351,73 @@ def run_dataset(
             except Exception:
                 old_time_sensor = {}
 
+        # Ensure experiment runs follow the current string-mode theory path when the dataset
+        # is intended for companion / dialogue style runs. Without this, HDB stimulus-level
+        # string projections may never be seeded, causing `stimulus_new_structure_count` to
+        # stay at 0 even though the frontend/user observes long string objects elsewhere.
+        with lock_ctx:
+            try:
+                app._config["enable_goal_b_char_sa_string_mode"] = True  # type: ignore[attr-defined]
+                sensor_override = app._sensor_config_override() if hasattr(app, "_sensor_config_override") else {}  # type: ignore[attr-defined]
+                app.sensor._config.update(sensor_override)  # type: ignore[attr-defined]
+                app.sensor._normalizer.update_config(app.sensor._config)  # type: ignore[attr-defined]
+                app.sensor._segmenter.update_config(app.sensor._config)  # type: ignore[attr-defined]
+                app.sensor._scorer.update_config(app.sensor._config)  # type: ignore[attr-defined]
+                app.sensor._echo_mgr.update_config(app.sensor._config)  # type: ignore[attr-defined]
+                hdb_override = app._hdb_config_override() if hasattr(app, "_hdb_config_override") else {}  # type: ignore[attr-defined]
+                app.hdb._config.update(hdb_override)  # type: ignore[attr-defined]
+                app.hdb._stimulus.update_config(app.hdb._config)  # type: ignore[attr-defined]
+                app.hdb._cut.update_config(app.hdb._config)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
         # Reset modes (mutates app state)
         with lock_ctx:
             if options.reset_mode == "clear_all":
-                app.sensor.clear_echo_pool(trace_id="exp_clear_sensor")  # type: ignore[attr-defined]
-                app.pool.clear_state_pool(trace_id="exp_clear_pool", reason="experiment_reset", operator="researcher")  # type: ignore[attr-defined]
-                app.hdb.clear_hdb(trace_id="exp_clear_hdb", reason="experiment_reset", operator="researcher")  # type: ignore[attr-defined]
-                app._last_report = None  # type: ignore[attr-defined]
-                app._report_history = []  # type: ignore[attr-defined]
+                if hasattr(app, "_clear_runtime_modules"):
+                    app._clear_runtime_modules(  # type: ignore[attr-defined]
+                        clear_hdb=True,
+                        trace_prefix="exp_clear_all",
+                        reason="experiment_reset",
+                        operator="researcher",
+                    )
+                else:
+                    app.sensor.clear_echo_pool(trace_id="exp_clear_sensor")  # type: ignore[attr-defined]
+                    if hasattr(getattr(app, "time_sensor", None), "clear_runtime_state"):
+                        app.time_sensor.clear_runtime_state(trace_id="exp_clear_time_sensor", reason="experiment_reset")  # type: ignore[attr-defined]
+                    if hasattr(getattr(app, "action", None), "clear_runtime_state"):
+                        app.action.clear_runtime_state(trace_id="exp_clear_action", reason="experiment_reset")  # type: ignore[attr-defined]
+                    if hasattr(getattr(app, "cognitive_stitching", None), "clear_runtime_state"):
+                        app.cognitive_stitching.clear_runtime_state(trace_id="exp_clear_cs", reason="experiment_reset")  # type: ignore[attr-defined]
+                    if hasattr(getattr(app, "attention", None), "clear_runtime_state"):
+                        app.attention.clear_runtime_state(trace_id="exp_clear_attention", reason="experiment_reset")  # type: ignore[attr-defined]
+                    app.pool.clear_state_pool(trace_id="exp_clear_pool", reason="experiment_reset", operator="researcher")  # type: ignore[attr-defined]
+                    app.hdb.clear_hdb(trace_id="exp_clear_hdb", reason="experiment_reset", operator="researcher")  # type: ignore[attr-defined]
+                    app._last_report = None  # type: ignore[attr-defined]
+                    app._report_history = []  # type: ignore[attr-defined]
             elif options.reset_mode == "clear_runtime":
-                app.sensor.clear_echo_pool(trace_id="exp_clear_sensor")  # type: ignore[attr-defined]
-                app.pool.clear_state_pool(trace_id="exp_clear_pool", reason="experiment_reset", operator="researcher")  # type: ignore[attr-defined]
-                app._last_report = None  # type: ignore[attr-defined]
-                app._report_history = []  # type: ignore[attr-defined]
+                if hasattr(app, "_clear_runtime_modules"):
+                    app._clear_runtime_modules(  # type: ignore[attr-defined]
+                        clear_hdb=False,
+                        trace_prefix="exp_clear_runtime",
+                        reason="experiment_reset",
+                        operator="researcher",
+                    )
+                else:
+                    app.sensor.clear_echo_pool(trace_id="exp_clear_sensor")  # type: ignore[attr-defined]
+                    if hasattr(getattr(app, "time_sensor", None), "clear_runtime_state"):
+                        app.time_sensor.clear_runtime_state(trace_id="exp_clear_time_sensor", reason="experiment_reset")  # type: ignore[attr-defined]
+                    if hasattr(getattr(app, "action", None), "clear_runtime_state"):
+                        app.action.clear_runtime_state(trace_id="exp_clear_action", reason="experiment_reset")  # type: ignore[attr-defined]
+                    if hasattr(getattr(app, "cognitive_stitching", None), "clear_runtime_state"):
+                        app.cognitive_stitching.clear_runtime_state(trace_id="exp_clear_cs", reason="experiment_reset")  # type: ignore[attr-defined]
+                    if hasattr(getattr(app, "attention", None), "clear_runtime_state"):
+                        app.attention.clear_runtime_state(trace_id="exp_clear_attention", reason="experiment_reset")  # type: ignore[attr-defined]
+                    if hasattr(getattr(app, "hdb", None), "clear_runtime_state"):
+                        app.hdb.clear_runtime_state(trace_id="exp_clear_hdb_runtime", reason="experiment_reset")  # type: ignore[attr-defined]
+                    app.pool.clear_state_pool(trace_id="exp_clear_pool", reason="experiment_reset", operator="researcher")  # type: ignore[attr-defined]
+                    app._last_report = None  # type: ignore[attr-defined]
+                    app._report_history = []  # type: ignore[attr-defined]
             elif options.reset_mode == "keep":
                 pass
             else:
@@ -245,34 +435,70 @@ def run_dataset(
 
         # time_sensor override (runtime-only)
         with lock_ctx:
-            if options.time_sensor_time_basis in {"tick", "wallclock"}:
+            if effective_time_sensor_basis in {"tick", "wallclock"}:
                 try:
-                    app.time_sensor._config["time_basis"] = str(options.time_sensor_time_basis)  # type: ignore[attr-defined]
+                    app.time_sensor._config["time_basis"] = str(effective_time_sensor_basis)  # type: ignore[attr-defined]
                 except Exception:
                     pass
-            if options.tick_interval_sec is not None:
+            if effective_tick_interval_sec is not None:
                 try:
-                    app.time_sensor._config["tick_interval_sec"] = float(options.tick_interval_sec)  # type: ignore[attr-defined]
+                    app.time_sensor._config["tick_interval_sec"] = float(effective_tick_interval_sec)  # type: ignore[attr-defined]
                 except Exception:
                     pass
 
         # Main loop
-        tick_done = 0
+        source_tick_done = 0
+        synthetic_tick_done = 0
+        executed_tick_done_total = 0
         max_ticks = options.max_ticks
         if max_ticks is not None:
             max_ticks = max(1, int(max_ticks))
 
-        with metrics_path.open("w", encoding="utf-8") as mf:
-            for tick in ticks_iter:
+        expectation_engine = ExpectationContractEngine()
+        synthetic_queue: deque[dict[str, Any]] = deque()
+        source_iter = iter(ticks_iter)
+        source_exhausted = False
+
+        with metrics_path.open("w", encoding="utf-8") as mf, expectation_events_path.open("w", encoding="utf-8") as ef:
+            while True:
                 if cancel_cb():
                     manifest["status"] = "cancelled"
                     break
+
+                tick: dict[str, Any] | None = None
+                tick_is_synthetic = False
+
+                if synthetic_queue:
+                    tick = synthetic_queue.popleft()
+                    tick_is_synthetic = True
+                else:
+                    if not source_exhausted:
+                        if max_ticks is not None and source_tick_done >= max_ticks:
+                            manifest["status"] = "stopped_max_ticks"
+                            source_exhausted = True
+                        else:
+                            try:
+                                tick = next(source_iter)
+                            except StopIteration:
+                                source_exhausted = True
+                    if tick is None and source_exhausted:
+                        settle_res = expectation_engine.settle_on_run_end()
+                        for event in settle_res.get("events", []) or []:
+                            ef.write(json.dumps(event, ensure_ascii=False))
+                            ef.write("\n")
+                        for synthetic_tick in settle_res.get("synthetic_ticks", []) or []:
+                            if isinstance(synthetic_tick, dict):
+                                synthetic_queue.append(synthetic_tick)
+                        if synthetic_queue:
+                            try:
+                                ef.flush()
+                            except Exception:
+                                pass
+                            continue
+                        break
+
                 if not isinstance(tick, dict):
                     continue
-
-                if max_ticks is not None and tick_done >= max_ticks:
-                    manifest["status"] = "stopped_max_ticks"
-                    break
 
                 text = str(tick.get("input_text", "") or "")
                 is_empty = bool(tick.get("input_is_empty", False)) or (text == "")
@@ -282,33 +508,135 @@ def run_dataset(
                 metrics = extract_tick_metrics(report=report, dataset_tick=tick)
                 mf.write(json.dumps(metrics, ensure_ascii=False))
                 mf.write("\n")
-                tick_done += 1
+                executed_tick_done_total += 1
 
-                # Update progress (cheap, but do not flush too often)
-                if tick_done <= 5 or tick_done % 10 == 0:
-                    progress_cb(
-                        {
-                            "run_id": run_id,
-                            "status": manifest.get("status", "running"),
-                            "tick_done": tick_done,
-                            "tick_planned": total_ticks,
-                        }
-                    )
+                if tick_is_synthetic:
+                    synthetic_tick_done += 1
+                else:
+                    source_tick_done += 1
                     try:
-                        mf.flush()
-                    except Exception:
-                        pass
+                        contract_res = expectation_engine.on_source_tick(
+                            tick=tick,
+                            report=report,
+                            metrics=metrics,
+                            source_tick_cursor=source_tick_done,
+                        )
+                    except ExpectationContractError as exc:
+                        raise ExperimentRunnerError(f"Expectation contract error: {exc}") from exc
+                    for event in contract_res.get("events", []) or []:
+                        ef.write(json.dumps(event, ensure_ascii=False))
+                        ef.write("\n")
+                    for synthetic_tick in contract_res.get("synthetic_ticks", []) or []:
+                        if isinstance(synthetic_tick, dict):
+                            synthetic_queue.append(synthetic_tick)
 
-        manifest["tick_done"] = int(tick_done)
+                manifest["tick_done"] = int(source_tick_done)
+                manifest["source_tick_done"] = int(source_tick_done)
+                manifest["synthetic_tick_done"] = int(synthetic_tick_done)
+                manifest["executed_tick_done_total"] = int(executed_tick_done_total)
+                manifest["expectation_contracts"] = {
+                    **dict(manifest.get("expectation_contracts", {}) or {}),
+                    **expectation_engine.snapshot(),
+                    "events_path": str(expectation_events_path),
+                }
+
+                # Short-term auto tuning (best-effort, should never crash the run)
+                short_term_res: dict[str, Any] | None = None
+                if tuner is not None:
+                    try:
+                        # Keep tuning within the same app lock to avoid races with run_cycle/web reads.
+                        with lock_ctx:
+                            short_term_res = tuner.on_tick(metrics=metrics)
+                    except Exception:
+                        short_term_res = {"enabled": True, "applied": False, "reason": "short_term_error"}
+
+                progress_cb(
+                    {
+                        "run_id": run_id,
+                        "status": manifest.get("status", "running"),
+                        "tick_done": source_tick_done,
+                        "source_tick_done": source_tick_done,
+                        "synthetic_tick_done": synthetic_tick_done,
+                        "executed_tick_done_total": executed_tick_done_total,
+                        "tick_planned": total_ticks,
+                        "tick_index": int(metrics.get("tick_index", source_tick_done - 1) or (source_tick_done - 1)),
+                        "tick_source": str(metrics.get("tick_source", "dataset") or "dataset"),
+                        "auto_tuner_short_term": _compact_auto_tuner_tick_result(short_term_res),
+                    }
+                )
+                try:
+                    mf.flush()
+                    ef.flush()
+                except Exception:
+                    pass
+
+        manifest["tick_done"] = int(source_tick_done)
+        manifest["source_tick_done"] = int(source_tick_done)
+        manifest["synthetic_tick_done"] = int(synthetic_tick_done)
+        manifest["executed_tick_done_total"] = int(executed_tick_done_total)
+        manifest["expectation_contracts"] = {
+            **dict(manifest.get("expectation_contracts", {}) or {}),
+            **expectation_engine.snapshot(),
+            "events_path": str(expectation_events_path),
+        }
         if manifest.get("status") == "running":
             manifest["status"] = "completed"
         manifest["finished_at_ms"] = _now_ms()
+
+        # Long-term tuning at completion
+        if tuner is not None:
+            try:
+                # Re-read metrics.jsonl (bounded by run length; acceptable for paper runs).
+                from .io import iter_jsonl
+
+                all_rows = list(iter_jsonl(metrics_path))
+                with lock_ctx:
+                    long_res = tuner.on_run_complete(all_metrics=all_rows, trace_id="exp_complete")
+                manifest.setdefault("auto_tuner", {})
+                manifest["auto_tuner"]["long_term"] = long_res
+            except Exception as exc:
+                manifest.setdefault("auto_tuner", {})
+                manifest["auto_tuner"]["long_term_error"] = str(exc)
+
+        # Idle-time consolidation (best-effort): keep long-run storage/runtime from drifting too far.
+        # - Safe to run after a dataset completes (or is stopped/cancelled) to support acceptance runs.
+        idle_cons: dict[str, Any] = {}
+        if hasattr(app, "hdb") and hasattr(app.hdb, "idle_consolidate_hdb"):
+            try:
+                with lock_ctx:
+                    idle_cons["hdb"] = app.hdb.idle_consolidate_hdb(
+                        trace_id="exp_idle_consolidate",
+                        reason="experiment_run_completed",
+                        rebuild_pointer_index=True,
+                        apply_soft_limits=True,
+                    )
+            except Exception as exc:
+                idle_cons["hdb_error"] = str(exc)
+
+        if hasattr(app, "cognitive_stitching") and hasattr(app.cognitive_stitching, "idle_consolidate"):
+            try:
+                with lock_ctx:
+                    idle_cons["cognitive_stitching"] = app.cognitive_stitching.idle_consolidate(
+                        hdb=app.hdb,
+                        trace_id="exp_idle_consolidate_cs",
+                        tick_id="exp_idle_consolidate",
+                        reason="experiment_run_completed",
+                    )
+            except Exception as exc:
+                idle_cons["cognitive_stitching_error"] = str(exc)
+
+        if idle_cons:
+            manifest["idle_consolidation"] = idle_cons
+
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         progress_cb(
             {
                 "run_id": run_id,
                 "status": manifest.get("status"),
                 "tick_done": manifest.get("tick_done"),
+                "source_tick_done": manifest.get("source_tick_done"),
+                "synthetic_tick_done": manifest.get("synthetic_tick_done"),
+                "executed_tick_done_total": manifest.get("executed_tick_done_total"),
                 "tick_planned": manifest.get("tick_planned"),
             }
         )

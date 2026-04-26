@@ -13,7 +13,7 @@ enabled: true
 
 # global_decay_ratio / 全局衰减系数
 # 作用（Purpose）: 若通道未单独指定 decay_ratio，则使用该值。
-global_decay_ratio: 0.94
+global_decay_ratio: 0.92
 
 # soft_cap_enabled / 是否启用“软上限”极限算法
 # 作用（Purpose）: 让数值“无限逼近上限但不达到”，避免轻易打满（爆表）导致调制失去区分度。
@@ -35,29 +35,34 @@ soft_cap_k_default: 0.35
 # - base: 基准值/基线值（Baseline）。衰减会“回归”到 base，而不是回归到 0。
 # - soft_cap_k: 可选，覆盖 soft_cap_k_default（对该通道单独调节饱和速度）。
 nt_channels:
-  DA: { min: 0.0, max: 1.0, decay_ratio: 0.94, base: 0.0, soft_cap_k: 0.35 }
-  ADR: { min: 0.0, max: 1.0, decay_ratio: 0.92, base: 0.0, soft_cap_k: 0.35 }
-  OXY: { min: 0.0, max: 1.0, decay_ratio: 0.95, base: 0.0, soft_cap_k: 0.35 }
-  SER: { min: 0.0, max: 1.0, decay_ratio: 0.96, base: 0.0, soft_cap_k: 0.35 }
-  END: { min: 0.0, max: 1.0, decay_ratio: 0.93, base: 0.0, soft_cap_k: 0.35 }
-  COR: { min: 0.0, max: 1.0, decay_ratio: 0.90, base: 0.0, soft_cap_k: 0.35 }
+  # Notes:
+  # - base is a neutral baseline (decay regresses to base, not to 0).
+  # - decay_ratio is per-tick retention of deviation from base (lower => faster return).
+  # - We keep the steady band below ~0.5 most of the time, reserving high band for strong events.
+  DA: { min: 0.0, max: 1.0, decay_ratio: 0.91, base: 0.12, soft_cap_k: 0.35 }
+  ADR: { min: 0.0, max: 1.0, decay_ratio: 0.85, base: 0.05, soft_cap_k: 0.35 }
+  OXY: { min: 0.0, max: 1.0, decay_ratio: 0.93, base: 0.12, soft_cap_k: 0.35 }
+  SER: { min: 0.0, max: 1.0, decay_ratio: 0.94, base: 0.18, soft_cap_k: 0.35 }
+  END: { min: 0.0, max: 1.0, decay_ratio: 0.91, base: 0.10, soft_cap_k: 0.35 }
+  COR: { min: 0.0, max: 1.0, decay_ratio: 0.86, base: 0.06, soft_cap_k: 0.35 }
 
 # cfs_to_nt_gains / CFS -> NT 通道增益映射（delta = strength * coef）
 cfs_to_nt_gains:
-  dissonance: { COR: 0.28, ADR: 0.06 }
-  correct_event: { DA: 0.30, OXY: 0.18, SER: 0.08 }
-  surprise: { ADR: 0.35 }
-  expectation: { DA: 0.12 }
-  pressure: { COR: 0.30, END: 0.12, ADR: 0.08 }
+  # Gains are intentionally small: CFS strengths are in [0,1], and NT channels are slow states.
+  dissonance: { COR: 0.08, ADR: 0.02 }
+  correct_event: { DA: 0.12, OXY: 0.07, SER: 0.03 }
+  surprise: { ADR: 0.06 }
+  expectation: { DA: 0.05 }
+  pressure: { COR: 0.10, END: 0.05, ADR: 0.03 }
   # 期待/压力验证态（对齐理论 3.8.2）：验证/不验不是二极管，而是连续渐变对抗。
   # 这些信号用于让 EMgr 也能“感到验证/落空”的差异，从而影响递质通道。
-  expectation_verified: { DA: 0.18, SER: 0.06 }
-  expectation_unverified: { COR: 0.08, ADR: 0.04 }
-  pressure_verified: { COR: 0.18, ADR: 0.10, END: 0.04 }
-  pressure_unverified: { END: 0.10, COR: -0.05, SER: 0.03 }
-  complexity: { ADR: 0.08 }
-  repetition: { COR: 0.10 }
-  grasp: { SER: 0.10 }
+  expectation_verified: { DA: 0.08, SER: 0.03 }
+  expectation_unverified: { COR: 0.03, ADR: 0.015 }
+  pressure_verified: { COR: 0.07, ADR: 0.04, END: 0.02 }
+  pressure_unverified: { END: 0.04, COR: -0.02, SER: 0.01 }
+  complexity: { ADR: 0.015 }
+  repetition: { COR: 0.015 }
+  grasp: { SER: 0.03 }
 
 # cfs_to_rwd_pun / CFS -> 奖励/惩罚汇总（用于审计/后续 Drive 驱动力模块）
 cfs_to_rwd_pun:
@@ -83,8 +88,8 @@ rwd_pun_source_mode: pool
 # - rwd/pun 的取值通常已被上层（Observatory）软饱和到 0~1，因此这里系数无需过大。
 # - 允许出现负系数（表示“抑制/下降”），但建议保持小幅，避免震荡。
 rwd_pun_to_nt_gains:
-  rwd: { DA: 0.18, OXY: 0.06, SER: 0.03 }
-  pun: { COR: 0.16, ADR: 0.06, END: 0.04 }
+  rwd: { DA: 0.08, OXY: 0.03, SER: 0.015 }
+  pun: { COR: 0.06, ADR: 0.03, END: 0.02 }
 
 # rwd_pun_pool_aggregation / pool 汇总参数（由上层计算时使用，EMgr 只透传/展示）
 # 汇总逻辑（简述）：

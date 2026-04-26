@@ -721,5 +721,30 @@ class TestMultiRound:
 # ====================================================================== #
 
 
+def test_goal_b_char_sa_string_mode_groups_current_text_as_one_order_sensitive_string():
+    sensor = TextSensor(
+        config_override={
+            "default_mode": "simple",
+            "tokenizer_backend": "none",
+            "enable_token_output": False,
+            "enable_char_output": True,
+            "enable_goal_b_char_sa_string_mode": True,
+            "enable_echo": False,
+        }
+    )
+
+    result = sensor.ingest_text(text="ABC", trace_id="goal_b_sensor_001")
+
+    assert result["success"] is True
+    packet = result["data"]["stimulus_packet"]
+    groups = packet["grouped_sa_sequences"]
+    assert len(groups) == 1
+    group = groups[0]
+    assert group["order_sensitive"] is True
+    assert group["string_unit_kind"] == "char_sequence"
+    assert group["string_token_text"] == "ABC"
+    assert len(group["sa_ids"]) == 3
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

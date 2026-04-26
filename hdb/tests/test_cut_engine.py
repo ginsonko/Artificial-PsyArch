@@ -111,10 +111,14 @@ class TestCutEngine(unittest.TestCase):
             trace_id="cut_trace",
             tick_id="cut_tick",
         )
-        self.assertEqual(len(packet["grouped_sa_sequences"]), 1)
+        self.assertEqual(len(packet["grouped_sa_sequences"]), 3)
         profile = engine.build_sequence_profile_from_stimulus_packet(packet)
-        self.assertEqual(len(profile["sequence_groups"]), 1)
-        self.assertCountEqual(profile["sequence_groups"][0]["tokens"], ["A", "B", "C", "D"])
+        self.assertEqual(len(profile["sequence_groups"]), 3)
+        
+        self.assertCountEqual(profile["sequence_groups"][0]["tokens"], ["A", "B"])
+        self.assertCountEqual(profile["sequence_groups"][1]["tokens"], ["C"])
+        self.assertCountEqual(profile["sequence_groups"][2]["tokens"], ["D"])
+
 
     def test_build_internal_packet_uses_unique_runtime_csa_ids(self):
         engine = CutEngine()
@@ -203,27 +207,23 @@ class TestCutEngine(unittest.TestCase):
 
         merged = engine.merge_stimulus_packets(external_packet, internal_packet, trace_id="merge_trace", tick_id="merge_tick")
 
-        self.assertEqual(len(merged["grouped_sa_sequences"]), 2)
+        self.assertEqual(len(merged["grouped_sa_sequences"]), 4)
         self.assertEqual(merged["grouped_sa_sequences"][0]["sa_ids"], ["sa_echo_0"])
         self.assertEqual(merged["grouped_sa_sequences"][0]["csa_ids"], [])
 
-        expected_last_group_sa_ids = ["sa_current_0"] + [item["id"] for item in internal_packet["sa_items"]]
-        self.assertEqual(
-            merged["grouped_sa_sequences"][1]["sa_ids"],
-            expected_last_group_sa_ids,
-        )
+        self.assertEqual(merged["grouped_sa_sequences"][1]["sa_ids"], ["sa_current_0"])
+        self.assertEqual(merged["grouped_sa_sequences"][2]["source_type"], "internal")
+        self.assertEqual(merged["grouped_sa_sequences"][3]["source_type"], "internal")
 
         profile = engine.build_sequence_profile_from_stimulus_packet(merged)
-        self.assertEqual(len(profile["sequence_groups"]), 2)
-        self.assertCountEqual(profile["sequence_groups"][1]["tokens"], ["Y", "A", "B"])
+        self.assertEqual(len(profile["sequence_groups"]), 4)
+        self.assertCountEqual(profile["sequence_groups"][1]["tokens"], ["Y"])
 
         units_by_id = {
             unit["unit_id"]: unit
             for unit in profile["sequence_groups"][1]["units"]
         }
         self.assertEqual(units_by_id["sa_current_0"]["source_type"], "current")
-        for internal_item in internal_packet["sa_items"]:
-            self.assertEqual(units_by_id[internal_item["id"]]["source_type"], "internal")
 
     def test_sequence_signature_is_group_order_sensitive_but_group_internal_order_relaxed(self):
         engine = CutEngine()
@@ -388,6 +388,159 @@ class TestCutEngine(unittest.TestCase):
         common_units = result["common_groups"][0]["units"]
         self.assertTrue(any(str(unit.get("unit_signature", "")).startswith("AN:stimulus_intensity:") for unit in common_units))
 
+    def _goal_b_string_group(self, text: str, *, group_index: int = 0) -> dict:
+        return {
+            "group_index": group_index,
+            "source_type": "current",
+            "origin_frame_id": f"goal_b_{group_index}",
+            "order_sensitive": True,
+            "string_unit_kind": "char_sequence",
+            "string_token_text": text,
+            "units": [
+                {
+                    "unit_id": f"goal_b_{group_index}_{index}_{char}",
+                    "token": char,
+                    "unit_role": "feature",
+                    "sequence_index": index,
+                    "group_index": group_index,
+                    "source_group_index": group_index,
+                    "source_type": "current",
+                    "origin_frame_id": f"goal_b_{group_index}",
+                    "display_visible": True,
+                }
+                for index, char in enumerate(text)
+            ],
+        }
+
+    def test_goal_b_order_sensitive_signature_preserves_char_order(self):
+        engine = CutEngine({"enable_goal_b_char_sa_string_mode": True})
+
+        forward = engine.sequence_groups_to_signature([self._goal_b_string_group("AB")])
+        reversed_ = engine.sequence_groups_to_signature([self._goal_b_string_group("BA")])
+
+        self.assertNotEqual(forward, reversed_)
+        self.assertTrue(forward.startswith("OS["))
+
+    def test_goal_b_order_sensitive_common_part_does_not_treat_reversed_string_as_full_match(self):
+        engine = CutEngine({"enable_goal_b_char_sa_string_mode": True})
+
+        result = engine.maximum_common_part(
+            [self._goal_b_string_group("AB")],
+            [self._goal_b_string_group("BA")],
+        )
+
+        self.assertEqual(result["common_length"], 1)
+        self.assertNotEqual(result["residual_existing_signature"], "")
+        self.assertNotEqual(result["residual_incoming_signature"], "")
+
+    def test_goal_b_order_sensitive_common_part_matches_prefix_and_keeps_residual(self):
+        engine = CutEngine({"enable_goal_b_char_sa_string_mode": True})
+
+        result = engine.maximum_common_part(
+            [self._goal_b_string_group("AB")],
+            [self._goal_b_string_group("ABC")],
+        )
+
+        self.assertEqual(result["common_tokens"], ["A", "B"])
+        self.assertEqual(result["residual_incoming_tokens"], ["C"])
+        self.assertEqual(result["residual_existing_signature"], "")
+        self.assertTrue(result["common_groups"][0].get("order_sensitive"))
+
 
 if __name__ == '__main__':
     unittest.main()
+
+
+
+def test_goal_b_order_sensitive_string_display_omits_internal_plus():
+    engine = CutEngine({"enable_goal_b_char_sa_string_mode": True})
+    group = {
+        "group_index": 0,
+        "source_type": "current",
+        "origin_frame_id": "frame_a",
+        "source_group_index": 0,
+        "order_sensitive": True,
+        "string_unit_kind": "char_sequence",
+        "string_token_text": "ABC",
+        "tokens": ["A", "B", "C"],
+    }
+
+    profile = engine.build_sequence_profile_from_groups([group])
+
+    assert profile["display_text"] == "{ABC}"
+    assert "+" not in profile["display_text"]
+
+
+def test_goal_b_mixed_cooccurrence_display_joins_string_units_not_chars():
+    engine = CutEngine({"enable_goal_b_char_sa_string_mode": True})
+    group = {
+        "group_index": 0,
+        "source_type": "merged",
+        "origin_frame_id": "mix",
+        "source_group_index": 0,
+        "units": [
+            {
+                "unit_id": "u_a",
+                "token": "A",
+                "sequence_index": 0,
+                "source_type": "current",
+                "origin_frame_id": "frame_current",
+                "source_group_index": 0,
+                "order_sensitive": True,
+                "string_unit_kind": "char_sequence",
+                "string_token_text": "AB",
+                "display_visible": True,
+            },
+            {
+                "unit_id": "u_b",
+                "token": "B",
+                "sequence_index": 1,
+                "source_type": "current",
+                "origin_frame_id": "frame_current",
+                "source_group_index": 0,
+                "order_sensitive": True,
+                "string_unit_kind": "char_sequence",
+                "string_token_text": "AB",
+                "display_visible": True,
+            },
+            {
+                "unit_id": "u_c",
+                "token": "C",
+                "sequence_index": 2,
+                "source_type": "internal",
+                "origin_frame_id": "st_c",
+                "source_group_index": 0,
+                "display_visible": True,
+            },
+            {
+                "unit_id": "u_d1",
+                "token": "D",
+                "sequence_index": 3,
+                "source_type": "internal",
+                "origin_frame_id": "st_d",
+                "source_group_index": 0,
+                "order_sensitive": True,
+                "string_unit_kind": "char_sequence",
+                "string_token_text": "DE",
+                "display_visible": True,
+            },
+            {
+                "unit_id": "u_d2",
+                "token": "E",
+                "sequence_index": 4,
+                "source_type": "internal",
+                "origin_frame_id": "st_d",
+                "source_group_index": 0,
+                "order_sensitive": True,
+                "string_unit_kind": "char_sequence",
+                "string_token_text": "DE",
+                "display_visible": True,
+            },
+        ],
+    }
+
+    profile = engine.build_sequence_profile_from_groups([group])
+
+    assert profile["display_text"] == "{AB + C + DE}"
+    assert "A + B" not in profile["display_text"]
+    assert "D + E" not in profile["display_text"]

@@ -32,6 +32,11 @@ class StimulusRetrievalEngine:
     def update_config(self, config: dict) -> None:
         self._config = config
 
+    def clear_runtime_state(self) -> dict:
+        had_runtime_cache = bool(self._runtime_cache)
+        self._runtime_cache = None
+        return {"had_runtime_cache": had_runtime_cache}
+
     def run(
         self,
         *,
@@ -109,6 +114,20 @@ class StimulusRetrievalEngine:
             parent_ids=list(stimulus_packet.get("source", {}).get("parent_ids", [])),
             source_packet_id=stimulus_packet.get("id", ""),
         )
+        seeded_string_projection_ids = self._ensure_goal_b_string_structure_projections(
+            working_groups=working_set["groups"],
+            structure_store=structure_store,
+            pointer_index=pointer_index,
+            cut_engine=cut_engine,
+            trace_id=trace_id,
+            tick_id=tick_id,
+            parent_ids=list(stimulus_packet.get("source", {}).get("parent_ids", [])),
+            source_packet_id=stimulus_packet.get("id", ""),
+            runtime_projection_structures=runtime_projection_structures,
+        )
+        for sid in seeded_string_projection_ids:
+            if sid:
+                new_structure_ids.append(sid)
         episodic_memory_id = ""
         episodic_item = None
         if enable_storage:
@@ -136,6 +155,19 @@ class StimulusRetrievalEngine:
         transfer_ratio = max(0.0, float(self._config.get("stimulus_match_transfer_ratio", 1.0)))
         residual_min_energy = max(0.0, float(self._config.get("stimulus_residual_min_energy", 0.05)))
         min_common_length = int(self._config.get("min_cut_common_length", 2))
+        early_stop_enabled = bool(self._config.get("stimulus_early_stop_enabled", True))
+        early_stop_patience_rounds = max(1, int(self._config.get("stimulus_early_stop_patience_rounds", 2)))
+        early_stop_min_progress_ratio = max(0.0, float(self._config.get("stimulus_early_stop_min_progress_ratio", 0.01)))
+        early_stop_high_energy_unit_threshold = max(
+            0.0,
+            float(self._config.get("stimulus_early_stop_high_energy_unit_threshold", max(0.0, residual_min_energy * 5.0))),
+        )
+
+        low_progress_streak = 0
+        last_round_progress_ratio: float | None = None
+        last_round_consumed_total = 0.0
+        last_round_remaining_total = 0.0
+        early_stop_reason = ""
 
         for round_index in range(1, max_rounds + 1):
             remaining_units = self._flatten_remaining_units(working_set["groups"])
@@ -146,6 +178,37 @@ class StimulusRetrievalEngine:
             remaining_total_ev = round(sum(float(unit.get("ev", 0.0)) for unit in remaining_units), 8)
             if remaining_total_er + remaining_total_ev < residual_min_energy:
                 break
+
+            # Early-stop check (evaluated on the residual packet *after* the previous round).
+            # Suppress early-stop if there is still a clearly high-energy stimulus unit in the stream.
+            if early_stop_enabled and last_round_progress_ratio is not None:
+                remaining_total_energy = float(remaining_total_er + remaining_total_ev)
+                max_unit_energy = 0.0
+                for unit in remaining_units:
+                    try:
+                        e = float(unit.get("er", 0.0)) + float(unit.get("ev", 0.0))
+                    except Exception:
+                        e = 0.0
+                    if e > max_unit_energy:
+                        max_unit_energy = e
+                high_energy_present = max_unit_energy >= early_stop_high_energy_unit_threshold
+                low_progress = float(last_round_progress_ratio) < early_stop_min_progress_ratio
+                if (not high_energy_present) and low_progress:
+                    low_progress_streak += 1
+                else:
+                    low_progress_streak = 0
+                if low_progress_streak >= early_stop_patience_rounds:
+                    early_stop_reason = (
+                        "low_progress_no_high_energy"
+                        f" streak={low_progress_streak}"
+                        f" last_progress_ratio={round(float(last_round_progress_ratio), 6)}"
+                        f" last_consumed_total={round(float(last_round_consumed_total), 6)}"
+                        f" last_remaining_total={round(float(last_round_remaining_total), 6)}"
+                        f" remaining_total={round(float(remaining_total_energy), 6)}"
+                        f" max_unit_energy={round(float(max_unit_energy), 6)}"
+                        f" high_energy_threshold={round(float(early_stop_high_energy_unit_threshold), 6)}"
+                    )
+                    break
 
             round_count = round_index
             anchor_unit = self._select_anchor_unit(remaining_units)
@@ -159,11 +222,12 @@ class StimulusRetrievalEngine:
             groups_before = self._clone_working_groups(working_set["groups"])
             remaining_tokens_before = self._collect_remaining_tokens(groups_before)
             remaining_profile = cut_engine.build_sequence_profile_from_groups(groups_before)
-            current_units_before = self._flatten_remaining_units(groups_before)
             focus_tokens_before = self._collect_remaining_tokens([focus_group])
             candidate_lookup, best, candidate_details = self._resolve_anchor_chain_match(
                 anchor_unit=anchor_unit,
-                focus_window_units=current_units_before,
+                # PERF: remaining_units 已经是从当前 working_set 扁平化得到的快照（并且是 dict 拷贝）。
+                # 这里再对 groups_before 扁平化一次属于重复工作，且对匹配结果没有影响。
+                focus_window_units=remaining_units,
                 incoming_profile=remaining_profile,
                 competition_units=remaining_units,
                 structure_store=structure_store,
@@ -234,6 +298,13 @@ class StimulusRetrievalEngine:
             effective_transfer_fraction = self._effective_transfer_fraction(transfer_ratio, transfer_similarity)
             transferred_er = round(sum(float(unit.get("er", 0.0)) for unit in covered_units) * effective_transfer_fraction, 8)
             transferred_ev = round(sum(float(unit.get("ev", 0.0)) for unit in covered_units) * effective_transfer_fraction, 8)
+            last_round_consumed_total = float(max(0.0, transferred_er + transferred_ev))
+            last_round_remaining_total = float(max(0.0, remaining_total_er + remaining_total_ev))
+            last_round_progress_ratio = (
+                float(last_round_consumed_total) / float(max(1e-9, last_round_remaining_total))
+                if last_round_remaining_total > 0.0
+                else 0.0
+            )
 
             structure_stats_before = self._capture_structure_stats(structure_obj)
             matched_structure_id = structure_obj.get("id", "")
@@ -293,6 +364,18 @@ class StimulusRetrievalEngine:
                     sid = str(sid or "").strip()
                     if sid:
                         new_structure_ids.append(sid)
+                        new_obj = structure_store.get(sid)
+                        if isinstance(new_obj, dict):
+                            runtime_projection_structures.append(
+                                {
+                                    "structure_id": sid,
+                                    "display_text": new_obj.get("structure", {}).get("display_text", sid),
+                                    "er": round(float(transferred_er), 8),
+                                    "ev": round(float(transferred_ev), 8),
+                                    "reason": "new_relation_structure",
+                                    "match_mode": "residual_relation_projection",
+                                }
+                            )
                 if not created_common_structure and residual_store_result.get("common_structure"):
                     created_common_structure = residual_store_result.get("common_structure")
                 if not created_residual_structure and residual_store_result.get("residual_structure"):
@@ -370,12 +453,25 @@ class StimulusRetrievalEngine:
             "debug": {
                 "input_profile": {
                     "display_text": profile.get("display_text", ""),
-                    "flat_tokens": list(profile.get("flat_tokens", [])),
-                    "sequence_groups": list(profile.get("sequence_groups", [])),
                     "content_signature": profile.get("content_signature", ""),
-                    "feature_units": self._flatten_remaining_units(self._build_working_set(stimulus_packet, cut_engine=cut_engine)["groups"]),
+                    # Keep the debug profile compact: store counts + a short token preview only.
+                    "token_count": int(profile.get("token_count", len(profile.get("flat_tokens", []) or []))),
+                    "unit_count": int(profile.get("unit_count", profile.get("token_count", len(profile.get("flat_tokens", []) or [])))),
+                    "flat_tokens_preview": [
+                        str(token)
+                        for token in (profile.get("flat_tokens", []) or [])[:48]
+                        if str(token)
+                    ],
                 },
                 "round_details": debug_round_details,
+                "early_stop": {
+                    "enabled": bool(early_stop_enabled),
+                    "triggered": bool(early_stop_reason),
+                    "reason": str(early_stop_reason),
+                    "patience_rounds": int(early_stop_patience_rounds),
+                    "min_progress_ratio": float(early_stop_min_progress_ratio),
+                    "high_energy_unit_threshold": float(early_stop_high_energy_unit_threshold),
+                },
             },
         }
 
@@ -396,6 +492,16 @@ class StimulusRetrievalEngine:
         for group in working_groups:
             for unit in sorted(group.get("units", []), key=lambda item: int(item.get("sequence_index", 0))):
                 token = str(unit.get("token", ""))
+                if str(unit.get("object_type", "sa") or "sa") != "sa":
+                    continue
+                if bool(unit.get("is_placeholder", False)) or token.startswith("SELF["):
+                    continue
+                if token.startswith("st_") or token.startswith("sg_"):
+                    continue
+                # Safety guard: never persist polluted "display text" as atomic token structures.
+                # This must only trigger on abnormal tokens and must not affect normal flows.
+                if token and (("{{" in token) or ("->" in token) or (len(token) > 512)):
+                    continue
                 if not token or token in seen_tokens:
                     continue
                 seen_tokens.add(token)
@@ -421,6 +527,96 @@ class StimulusRetrievalEngine:
                 if result.get("created") and result["structure"].get("id", ""):
                     created_ids.append(result["structure"]["id"])
         return created_ids
+
+    def _ensure_goal_b_string_structure_projections(
+        self,
+        *,
+        working_groups: list[dict],
+        structure_store,
+        pointer_index,
+        cut_engine,
+        trace_id: str,
+        tick_id: str,
+        parent_ids: list[str],
+        source_packet_id: str,
+        runtime_projection_structures: list[dict],
+    ) -> list[str]:
+        if not bool(self._config.get("enable_goal_b_char_sa_string_mode", False)):
+            return []
+        created_or_found_ids: list[str] = []
+        string_bucket_counts: dict[str, int] = {}
+        for group in working_groups:
+            if not isinstance(group, dict):
+                continue
+            if not (bool(group.get("order_sensitive", False)) and str(group.get("string_unit_kind", "") or "") == "char_sequence"):
+                continue
+            units = [dict(unit) for unit in group.get("units", []) or [] if isinstance(unit, dict)]
+            units = [
+                unit
+                for unit in units
+                if str(unit.get("object_type", "sa") or "sa") == "sa"
+                and not bool(unit.get("is_placeholder", False))
+                and not str(unit.get("token", "") or "").startswith("SELF[")
+                and not str(unit.get("token", "") or "").startswith("st_")
+                and not str(unit.get("token", "") or "").startswith("sg_")
+            ]
+            if len(units) <= 1:
+                continue
+            profile = cut_engine.build_sequence_profile_from_groups([dict(group, units=units)])
+            string_key = str(profile.get("display_text", "") or group.get("string_token_text", "") or "").strip()
+            bucket_seen = int(string_bucket_counts.get(string_key, 0) or 0)
+            if not self._allow_long_profile_seed(
+                profile,
+                soft_max_units_key="goal_b_string_seed_soft_max_units",
+                min_avg_energy_key="goal_b_string_seed_min_avg_unit_energy_for_long",
+                require_single_source_for_long=bool(self._config.get("goal_b_string_seed_require_single_source_for_long", True)),
+            ):
+                continue
+            result = self._find_or_create_structure_from_profile(
+                profile=profile,
+                structure_store=structure_store,
+                pointer_index=pointer_index,
+                cut_engine=cut_engine,
+                trace_id=trace_id,
+                tick_id=tick_id,
+                confidence=float(self._config.get("stimulus_focus_seed_confidence", 0.9)),
+                origin="stimulus_goal_b_string_seed",
+                origin_id=source_packet_id,
+                parent_ids=parent_ids,
+                ext={
+                    "source_packet_id": source_packet_id,
+                    "origin_group_index": group.get("group_index", 0),
+                    "origin_source_type": group.get("source_type", ""),
+                    "kind": "goal_b_string_relation_seed",
+                    "relation_type": "goal_b_string_relation",
+                },
+            )
+            structure_obj = result.get("structure") if isinstance(result, dict) else None
+            if not isinstance(structure_obj, dict):
+                continue
+            sid = str(structure_obj.get("id", "") or "")
+            if not sid:
+                continue
+            created_or_found_ids.append(sid)
+            total_er = round(sum(float(unit.get("er", 0.0) or 0.0) for unit in units), 8)
+            total_ev = round(sum(float(unit.get("ev", 0.0) or 0.0) for unit in units), 8)
+            if bucket_seen > 0:
+                crowd_ratio = 1.0 / float(1 + bucket_seen)
+                total_er = round(total_er * crowd_ratio, 8)
+                total_ev = round(total_ev * crowd_ratio, 8)
+            runtime_projection_structures.append(
+                {
+                    "structure_id": sid,
+                    "display_text": structure_obj.get("structure", {}).get("display_text", profile.get("display_text", sid)),
+                    "er": total_er,
+                    "ev": total_ev,
+                    "reason": "goal_b_string_relation_seed",
+                    "match_mode": "goal_b_string_relation_seed",
+                    "same_tick_bucket_rank": int(bucket_seen + 1),
+                }
+            )
+            string_bucket_counts[string_key] = bucket_seen + 1
+        return list(dict.fromkeys(created_or_found_ids))
 
     def _build_working_set(self, stimulus_packet: dict, *, cut_engine) -> dict:
         sa_index = {
@@ -502,6 +698,9 @@ class StimulusRetrievalEngine:
                     "source_group_index": source_group_index,
                     "source_type": source_type,
                     "origin_frame_id": origin_frame_id,
+                    "order_sensitive": bool(group.get("order_sensitive", False)),
+                    "string_unit_kind": str(group.get("string_unit_kind", "") or ""),
+                    "string_token_text": str(group.get("string_token_text", "") or ""),
                     "units": units,
                     "csa_bundles": csa_bundles,
                 }
@@ -723,27 +922,56 @@ class StimulusRetrievalEngine:
         groups_before: list[dict],
         groups_after: list[dict],
     ) -> dict:
-        remaining_groups_before = self._describe_runtime_groups(groups_before)
-        remaining_groups_after = self._describe_runtime_groups(groups_after)
-        remaining_units_after = self._flatten_remaining_units(groups_after)
+        # Debug payload is intentionally summary-first.
+        # Keeping full sequence groups for both "before/after" states makes the per-tick report
+        # explode in size during long runs and hurts UI responsiveness.
+        selected_summary = None
+        if isinstance(selected_match, dict):
+            cp = selected_match.get("common_part", {})
+            selected_summary = {
+                "structure_id": selected_match.get("structure_id", ""),
+                "display_text": selected_match.get("display_text", ""),
+                "match_mode": selected_match.get("match_mode", ""),
+                "match_score": selected_match.get("match_score", 0.0),
+                "competition_score": selected_match.get("competition_score", 0.0),
+                "coverage_ratio": selected_match.get("coverage_ratio", 0.0),
+                "structure_match_ratio": selected_match.get("structure_match_ratio", 0.0),
+                "stimulus_match_ratio": selected_match.get("stimulus_match_ratio", 0.0),
+                "exact_match": bool(selected_match.get("exact_match", False)),
+                "full_structure_included": bool(selected_match.get("full_structure_included", False)),
+                "incoming_range": list(selected_match.get("incoming_range", [0, 0]) or [0, 0]),
+                "existing_length": selected_match.get("existing_length", 0),
+                "incoming_length": selected_match.get("incoming_length", 0),
+                "matched_existing_length": selected_match.get("matched_existing_length", 0),
+                "matched_incoming_length": selected_match.get("matched_incoming_length", 0),
+                "common_part": {
+                    "common_length": cp.get("common_length", 0) if isinstance(cp, dict) else 0,
+                    "residual_existing_signature": cp.get("residual_existing_signature", "") if isinstance(cp, dict) else "",
+                    "residual_incoming_signature": cp.get("residual_incoming_signature", "") if isinstance(cp, dict) else "",
+                },
+            }
+
+        remaining_total_er_after = 0.0
+        remaining_total_ev_after = 0.0
+        for group in groups_after or []:
+            for unit in group.get("units", []) or []:
+                remaining_total_er_after += float(unit.get("er", 0.0))
+                remaining_total_ev_after += float(unit.get("ev", 0.0))
         return {
             "round_index": round_index,
             "anchor_unit": anchor_unit,
             "focus_group_index": focus_group.get("group_index", 0),
             "focus_group_source_type": focus_group.get("source_type", ""),
             "focus_group_text_before": self._format_runtime_group_text(focus_group),
-            "focus_group_sequence_groups_before": self._clone_working_groups([focus_group]),
             "remaining_tokens_before": remaining_tokens_before,
-            "remaining_groups_before": remaining_groups_before,
             "remaining_grouped_text_before": self._format_runtime_group_texts(groups_before),
-            "remaining_sequence_groups_before": self._clone_working_groups(groups_before),
             "remaining_total_er_before": remaining_total_er,
             "remaining_total_ev_before": remaining_total_ev,
             "candidate_lookup_source": candidate_lookup.get("candidate_source", "unknown"),
             "candidate_signature_hits": candidate_lookup.get("signature_hits", []),
             "chain_steps": list(candidate_lookup.get("chain_steps", [])),
             "candidate_details": candidate_details,
-            "selected_match": selected_match,
+            "selected_match": selected_summary,
             "structure_stats_before": structure_stats_before,
             "structure_stats_after": structure_stats_after,
             "covered_range": covered_range,
@@ -757,11 +985,9 @@ class StimulusRetrievalEngine:
             "created_residual_structure": created_residual_structure,
             "created_fresh_structure": created_fresh_structure,
             "remaining_tokens_after": self._collect_remaining_tokens(groups_after),
-            "remaining_groups_after": remaining_groups_after,
             "remaining_grouped_text_after": self._format_runtime_group_texts(groups_after),
-            "remaining_sequence_groups_after": self._clone_working_groups(groups_after),
-            "remaining_total_er_after": round(sum(float(unit.get("er", 0.0)) for unit in remaining_units_after), 8),
-            "remaining_total_ev_after": round(sum(float(unit.get("ev", 0.0)) for unit in remaining_units_after), 8),
+            "remaining_total_er_after": round(float(remaining_total_er_after), 8),
+            "remaining_total_ev_after": round(float(remaining_total_ev_after), 8),
         }
 
     def _resolve_anchor_chain_match(
@@ -873,6 +1099,7 @@ class StimulusRetrievalEngine:
         if not structure_db:
             return {"candidates": candidates, "entry_lookup": entry_lookup}
 
+        allow_cs_event_structures = bool(self._config.get("enable_cs_event_structures_in_stimulus_retrieval", False))
         diff_table = sorted(
             structure_db.get("diff_table", []),
             key=lambda item: (
@@ -889,6 +1116,11 @@ class StimulusRetrievalEngine:
                 continue
             target_structure, target_db_id = self._resolve_diff_target(entry, structure_store)
             if not target_structure:
+                continue
+            if (
+                (not allow_cs_event_structures)
+                and str(target_structure.get("sub_type", "") or "") == "cognitive_stitching_event_structure"
+            ):
                 continue
             target_id = target_structure.get("id", "")
             if not target_id or target_id in seen:
@@ -972,6 +1204,7 @@ class StimulusRetrievalEngine:
         candidates = []
         signature_hits = []
         seen_ids = set(exclude_structure_ids or [])
+        allow_cs_event_structures = bool(self._config.get("enable_cs_event_structures_in_stimulus_retrieval", False))
 
         def append_candidate(candidate_id: str) -> None:
             if not candidate_id or candidate_id in seen_ids:
@@ -979,10 +1212,19 @@ class StimulusRetrievalEngine:
             candidate = structure_store.get(candidate_id)
             if not candidate:
                 return
+            if not allow_cs_event_structures and str(candidate.get("sub_type", "") or "") == "cognitive_stitching_event_structure":
+                return
             seen_ids.add(candidate_id)
             candidates.append(candidate)
 
         def append_children(owner_structure_id: str) -> None:
+            if not allow_cs_event_structures:
+                try:
+                    owner_obj = structure_store.get(owner_structure_id)
+                    if owner_obj and str(owner_obj.get("sub_type", "") or "") == "cognitive_stitching_event_structure":
+                        return
+                except Exception:
+                    pass
             structure_db = structure_store.get_db_by_owner(owner_structure_id)
             if not structure_db:
                 return
@@ -1015,7 +1257,14 @@ class StimulusRetrievalEngine:
                 limit=int(self._config.get("fallback_lookup_max_candidates", 32))
             ):
                 candidate_id = candidate.get("id", "")
-                if candidate_id and candidate_id not in seen_ids:
+                if (
+                    candidate_id
+                    and candidate_id not in seen_ids
+                    and (
+                        allow_cs_event_structures
+                        or str(candidate.get("sub_type", "") or "") != "cognitive_stitching_event_structure"
+                    )
+                ):
                     seen_ids.add(candidate_id)
                     candidates.append(candidate)
 
@@ -1046,17 +1295,19 @@ class StimulusRetrievalEngine:
         incoming_groups = list(incoming_profile.get("sequence_groups", []))
         incoming_length = int(incoming_profile.get("unit_count", incoming_profile.get("token_count", len(incoming_profile.get("flat_tokens", [])))))
         entry_lookup = entry_lookup or {}
+        # PERF: 这里仅用于计算能量匹配比例（只读），不需要对每个 unit 做 dict 拷贝。
         incoming_all_units = [
-            dict(unit)
+            unit
             for group in incoming_groups
             for unit in group.get("units", [])
+            if isinstance(unit, dict)
         ]
         competition_all_units = [
-            dict(unit)
+            unit
             for unit in (competition_units or incoming_all_units)
             if isinstance(unit, dict)
         ]
-        competition_length = len([unit for unit in competition_all_units if str(unit.get("token", ""))])
+        competition_length = sum(1 for unit in competition_all_units if str(unit.get("token", "")))
 
         for candidate in candidates:
             self._weight.decay_structure(candidate, now_ms=now_ms, round_step=1)
@@ -1085,7 +1336,6 @@ class StimulusRetrievalEngine:
                         "structure_id": candidate.get("id", ""),
                         "display_text": candidate.get("structure", {}).get("display_text", candidate.get("id", "")),
                         "grouped_display_text": "",
-                        "sequence_groups": list(existing_profile.get("sequence_groups", [])),
                         "runtime_weight": round(float(candidate_runtime_weight), 8),
                         "entry_runtime_weight": round(float(entry_runtime_weight), 8),
                         "match_score": 0.0,
@@ -1117,10 +1367,47 @@ class StimulusRetrievalEngine:
                 )
                 continue
 
+            # PERF: contains_anchor 的必要条件之一是“结构侧必须包含 anchor token”。
+            # 若结构侧根本没有该 token，则不可能成为 eligible match，直接跳过昂贵的 common_part 计算。
+            #
+            # ⚠️ 重要细节（与属性刺激元/CSA 设计强相关）:
+            # - cut_engine.profile.flat_tokens 默认来自 group.tokens，它会倾向于“隐藏属性 unit”（display_visible=false）
+            #   以保持展示更清爽；
+            # - 但 pointer_index.register_structure() 会把 group.units[*].token 全部注册进签名索引（包含属性 token）。因此，
+            #   当锚点 token 恰好是“属性刺激元 token”时，候选结构可能会被索引命中，但却在这里因为 flat_tokens 不含属性 token
+            #   而被错误跳过，导致属性锚点无法扩展到长结构（违背“属性可脱锚抽象”的理论目标）。
+            #
+            # 解决方案：保持 flat_tokens 的展示洁净语义不变，但此处额外检查一次 unit.token（包含属性 unit）。
+            if anchor_token:
+                flat_tokens = existing_profile.get("flat_tokens", []) or []
+                if flat_tokens and anchor_token in flat_tokens:
+                    pass
+                else:
+                    has_anchor = False
+                    for g in existing_groups:
+                        for u in g.get("units", []):
+                            if not isinstance(u, dict):
+                                continue
+                            if str(u.get("token", "")) == anchor_token:
+                                has_anchor = True
+                                break
+                        if has_anchor:
+                            break
+                    if not has_anchor:
+                        continue
+
             common_part = cut_engine.maximum_common_part(existing_groups, incoming_groups)
             common_length = int(common_part.get("common_length", 0))
-            contains_anchor = anchor_token in list(common_part.get("common_tokens", [])) if anchor_token else True
             matched_incoming_units = self._collect_matched_units(incoming_groups, common_part)
+            # Anchor containment should be defined on matched units (unit.token), not only on
+            # group.tokens-derived common_tokens. Otherwise, attribute anchors (display_visible=false)
+            # can never satisfy contains_anchor, which breaks the "attribute SA can be an anchor"
+            # semantic and blocks "脱锚抽象" paths.
+            contains_anchor = (
+                any(str(unit.get("token", "")) == anchor_token for unit in matched_incoming_units)
+                if anchor_token
+                else True
+            )
             matched_existing_units = self._collect_matched_units(
                 existing_groups,
                 common_part,
@@ -1135,9 +1422,10 @@ class StimulusRetrievalEngine:
             structure_match_ratio = self._energy_match_ratio(
                 matched_units=matched_existing_units,
                 all_units=[
-                    dict(unit)
+                    unit
                     for group in existing_groups
                     for unit in group.get("units", [])
+                    if isinstance(unit, dict)
                 ],
                 fallback_numerator=common_length,
                 fallback_denominator=max(1, existing_length),
@@ -1172,11 +1460,23 @@ class StimulusRetrievalEngine:
             )
             competition_score = round(float(match_score if eligible else 0.0), 8)
 
+            # Keep candidate details compact: common_part can be very large (full group payloads).
+            common_part_summary = {
+                "common_length": int(common_part.get("common_length", 0)),
+                "incoming_range": list(common_part.get("incoming_range", [0, 0]) or [0, 0]),
+                "matched_existing_unit_count": int(common_part.get("matched_existing_unit_count", 0)),
+                "matched_incoming_unit_count": int(common_part.get("matched_incoming_unit_count", 0)),
+                "residual_existing_signature": str(common_part.get("residual_existing_signature", "") or ""),
+                "residual_incoming_signature": str(common_part.get("residual_incoming_signature", "") or ""),
+                "bundle_constraints_ok_exact": bool(common_part.get("bundle_constraints_ok_exact", True)),
+                "bundle_constraints_ok_existing_included": bool(common_part.get("bundle_constraints_ok_existing_included", True)),
+                "bundle_constraints_ok_incoming_included": bool(common_part.get("bundle_constraints_ok_incoming_included", True)),
+            }
+
             detail = {
                 "structure_id": candidate.get("id", ""),
                 "display_text": candidate.get("structure", {}).get("display_text", candidate.get("id", "")),
                 "grouped_display_text": self._format_runtime_group_texts(existing_groups),
-                "sequence_groups": list(existing_profile.get("sequence_groups", [])),
                 "runtime_weight": round(float(candidate_runtime_weight), 8),
                 "entry_runtime_weight": round(float(entry_runtime_weight), 8),
                 "match_score": round(float(match_score), 8),
@@ -1194,7 +1494,7 @@ class StimulusRetrievalEngine:
                 "matched_incoming_length": matched_incoming_length,
                 "contains_anchor": contains_anchor,
                 "eligible": eligible,
-                "common_part": common_part,
+                "common_part": common_part_summary,
                 "match_mode": "candidate_match",
                 "chain_depth": int(chain_depth),
                 "entry_id": entry.get("entry_id", "") if entry else "",
@@ -1214,7 +1514,6 @@ class StimulusRetrievalEngine:
                     "structure_id": candidate.get("id", ""),
                     "display_text": candidate.get("structure", {}).get("display_text", candidate.get("id", "")),
                     "grouped_display_text": self._format_runtime_group_texts(existing_groups),
-                    "sequence_groups": list(existing_profile.get("sequence_groups", [])),
                     "exact_match": exact_match,
                     "full_structure_included": full_structure_included,
                     "coverage_ratio": stimulus_match_ratio,
@@ -1233,15 +1532,20 @@ class StimulusRetrievalEngine:
                     "incoming_range": list(common_part.get("incoming_range", [0, 0])),
                     "match_mode": "candidate_match",
                     "structure_signature": existing_profile.get("content_signature", ""),
-                    "structure_db_id": str(candidate.get("_runtime_path", {}).get("target_db_id", "")) or str(candidate.get("db_pointer", {}).get("structure_db_id", "")),
+                    "structure_db_id": str(candidate.get("_runtime_path", {}).get("target_db_id", ""))
+                    or str(candidate.get("db_pointer", {}).get("structure_db_id", "")),
                     "path_entries": list(parent_match.get("path_entries", [])) if parent_match else [],
                 }
                 if entry is not None:
                     best["path_entries"].append(
                         {
                             "entry_id": entry.get("entry_id", ""),
-                            "owner_structure_id": str(candidate.get("_runtime_path", {}).get("owner_structure_id", "")),
-                            "owner_structure_db_id": str(candidate.get("_runtime_path", {}).get("owner_structure_db_id", "")),
+                            "owner_structure_id": str(
+                                candidate.get("_runtime_path", {}).get("owner_structure_id", "")
+                            ),
+                            "owner_structure_db_id": str(
+                                candidate.get("_runtime_path", {}).get("owner_structure_db_id", "")
+                            ),
                             "target_structure_id": candidate.get("id", ""),
                             "target_db_id": str(candidate.get("_runtime_path", {}).get("target_db_id", "")),
                         }
@@ -1378,7 +1682,6 @@ class StimulusRetrievalEngine:
             "structure_id": existing.get("id", ""),
             "display_text": existing.get("structure", {}).get("display_text", existing.get("id", "")),
             "grouped_display_text": self._format_runtime_group_texts(existing_profile.get("sequence_groups", [])),
-            "sequence_groups": list(existing_profile.get("sequence_groups", [])),
             "exact_match": exact_match,
             "full_structure_included": full_structure_included,
             "coverage_ratio": stimulus_match_ratio,
@@ -1831,6 +2134,7 @@ class StimulusRetrievalEngine:
             "new_structure_ids": [],
             "common_structure": None,
             "residual_structure": None,
+            "common_signature_counts": {},
         }
         self._normalize_owner_local_residual(
             owner_structure_id=owner_structure_id,
@@ -2081,39 +2385,59 @@ class StimulusRetrievalEngine:
         if overlap_candidate:
             common_part = overlap_candidate.get("common_part", {})
             common_profile = overlap_candidate.get("common_profile", {}) or common_profile
-            common_result = self._find_or_create_structure_from_profile(
-                profile=common_profile,
-                structure_store=structure_store,
-                pointer_index=pointer_index,
-                cut_engine=cut_engine,
-                trace_id=trace_id,
-                tick_id=tick_id,
-                confidence=float(self._config.get("stimulus_residual_common_confidence", 0.78)),
-                origin="stimulus_residual_common",
-                origin_id=source_packet_id,
-                parent_ids=[owner_structure_id],
-                base_weight=max(
-                    float(self._config.get("weight_floor", 0.05)),
-                    float(overlap_candidate.get("base_weight", 1.0))
-                    + self._profile_total_energy(canonical_profile) * float(self._config.get("base_weight_er_gain", 0.08)),
-                ),
-                ext={
-                    "kind": "residual_context_common",
-                    "relation_type": "residual_context_common",
-                    "owner_structure_id": owner_structure_id,
-                    "source_packet_id": source_packet_id,
-                },
-            )
-            common_structure = common_result["structure"]
-            common_structure_id = str(common_structure.get("id", ""))
-            if common_result.get("created") and common_structure_id:
-                summary["new_structure_ids"].append(common_structure_id)
-            if not summary.get("common_structure"):
-                summary["common_structure"] = {
-                    **self._build_structure_debug(common_structure),
-                    "created": bool(common_result.get("created")),
-                    "relation_type": "residual_context_common",
-                    "parent_structure_id": owner_structure_id,
+            common_signature = str(common_profile.get("content_signature", "") or common_profile.get("display_text", "") or "").strip()
+            common_signature_counts = summary.get("common_signature_counts", {}) if isinstance(summary.get("common_signature_counts", {}), dict) else {}
+            common_seen = int(common_signature_counts.get(common_signature, 0) or 0) if common_signature else 0
+            common_result = None
+            common_structure = None
+            if not self._allow_long_profile_seed(
+                common_profile,
+                soft_max_units_key="stimulus_residual_common_soft_max_units",
+                min_avg_energy_key="stimulus_residual_common_min_avg_unit_energy_for_long",
+            ):
+                overlap_candidate = None
+            elif common_seen > 0:
+                overlap_candidate = None
+            else:
+                common_result = self._find_or_create_structure_from_profile(
+                    profile=common_profile,
+                    structure_store=structure_store,
+                    pointer_index=pointer_index,
+                    cut_engine=cut_engine,
+                    trace_id=trace_id,
+                    tick_id=tick_id,
+                    confidence=float(self._config.get("stimulus_residual_common_confidence", 0.78)),
+                    origin="stimulus_residual_common",
+                    origin_id=source_packet_id,
+                    parent_ids=[owner_structure_id],
+                    base_weight=max(
+                        float(self._config.get("weight_floor", 0.05)),
+                        float(overlap_candidate.get("base_weight", 1.0))
+                        + self._profile_total_energy(canonical_profile) * float(self._config.get("base_weight_er_gain", 0.08)),
+                    ),
+                    ext={
+                        "kind": "residual_context_common",
+                        "relation_type": "residual_context_common",
+                        "owner_structure_id": owner_structure_id,
+                        "source_packet_id": source_packet_id,
+                    },
+                )
+                common_structure = common_result["structure"]
+                if common_signature:
+                    common_signature_counts[common_signature] = common_seen + 1
+                    summary["common_signature_counts"] = common_signature_counts
+            if overlap_candidate is None or not isinstance(common_result, dict) or not isinstance(common_structure, dict):
+                return
+            else:
+                common_structure_id = str(common_structure.get("id", ""))
+                if common_result.get("created") and common_structure_id:
+                    summary["new_structure_ids"].append(common_structure_id)
+                if not summary.get("common_structure"):
+                    summary["common_structure"] = {
+                        **self._build_structure_debug(common_structure),
+                        "created": bool(common_result.get("created")),
+                        "relation_type": "residual_context_common",
+                        "parent_structure_id": owner_structure_id,
                     "memory_id": episodic_memory_id,
                 }
 
@@ -2851,6 +3175,44 @@ class StimulusRetrievalEngine:
         er, ev = self._residual_profile_energy(profile)
         return round(er + ev, 8)
 
+    def _allow_long_profile_seed(
+        self,
+        profile: dict,
+        *,
+        soft_max_units_key: str,
+        min_avg_energy_key: str,
+        require_single_source_for_long: bool = False,
+    ) -> bool:
+        unit_count = max(0, int(self._profile_unit_count(profile)))
+        soft_max_units = max(2, int(self._config.get(soft_max_units_key, 48) or 48))
+        if unit_count <= soft_max_units:
+            return True
+        total_energy = max(0.0, float(self._profile_total_energy(profile) or 0.0))
+        avg_unit_energy = total_energy / max(1.0, float(unit_count))
+        min_avg_energy = max(0.0, float(self._config.get(min_avg_energy_key, 0.08) or 0.08))
+        if avg_unit_energy < min_avg_energy:
+            return False
+        if require_single_source_for_long:
+            source_types = set()
+            origin_frames = set()
+            for group in profile.get('sequence_groups', []) or []:
+                if not isinstance(group, dict):
+                    continue
+                for unit in group.get('units', []) or []:
+                    if not isinstance(unit, dict):
+                        continue
+                    st = str(unit.get('source_type', '') or '').strip()
+                    of = str(unit.get('origin_frame_id', '') or '').strip()
+                    if st:
+                        source_types.add(st)
+                    if of:
+                        origin_frames.add(of)
+            if len(source_types) > 1:
+                return False
+            if len(origin_frames) > 1:
+                return False
+        return True
+
     def _build_stimulus_memory_material(self, *, profile: dict) -> dict:
         sequence_groups = self._clone_working_groups(list(profile.get("sequence_groups", [])))
         grouped_display_text = format_sequence_groups(sequence_groups) or str(profile.get("display_text", ""))
@@ -3265,6 +3627,11 @@ class StimulusRetrievalEngine:
                 candidate = structure_store.get(candidate_id)
                 if not candidate:
                     continue
+                if (
+                    (not bool(self._config.get("enable_cs_event_structures_in_stimulus_retrieval", False)))
+                    and str(candidate.get("sub_type", "") or "") == "cognitive_stitching_event_structure"
+                ):
+                    continue
                 structure = candidate.get("structure", {})
                 if expected_tokens is not None and list(structure.get("flat_tokens", [])) != list(expected_tokens):
                     continue
@@ -3545,7 +3912,7 @@ class StimulusRetrievalEngine:
     def _format_runtime_group_text(cls, group: dict) -> str:
         units = [dict(unit) for unit in group.get("units", []) if isinstance(unit, dict)]
         bundles = [dict(bundle) for bundle in group.get("csa_bundles", []) if isinstance(bundle, dict)]
-        return format_group_display(units, bundles)
+        return format_group_display({**dict(group), "units": units, "csa_bundles": bundles})
 
     @classmethod
     def _format_runtime_bundle_texts(cls, group: dict) -> list[str]:
@@ -3620,15 +3987,28 @@ class StimulusRetrievalEngine:
                 grouped[key] = []
                 order.append(key)
             grouped[key].append(dict(unit))
-        return [
-            {
-                "group_index": key,
-                "source_type": grouped[key][0].get("source_type", "") if grouped[key] else "",
-                "origin_frame_id": grouped[key][0].get("origin_frame_id", "") if grouped[key] else "",
-                "units": sorted(grouped[key], key=lambda item: int(item.get("sequence_index", 0))),
-            }
-            for key in order
-        ]
+
+        result: list[dict] = []
+        for key in order:
+            group_units = sorted(grouped[key], key=lambda item: int(item.get("sequence_index", 0)))
+            first = group_units[0] if group_units else {}
+            order_sensitive = any(bool(unit.get("order_sensitive", False)) for unit in group_units)
+            string_texts = [str(unit.get("string_token_text", "") or "") for unit in group_units if str(unit.get("string_token_text", "") or "")]
+            string_token_text = string_texts[0] if string_texts and all(text == string_texts[0] for text in string_texts) else ""
+            string_unit_kind = "char_sequence" if string_token_text else str(first.get("string_unit_kind", "") or "")
+            result.append(
+                {
+                    "group_index": key,
+                    "source_type": first.get("source_type", "") if first else "",
+                    "origin_frame_id": first.get("origin_frame_id", "") if first else "",
+                    "source_group_index": int(first.get("source_group_index", key)) if first else key,
+                    "order_sensitive": bool(order_sensitive and string_token_text),
+                    "string_unit_kind": string_unit_kind,
+                    "string_token_text": string_token_text,
+                    "units": group_units,
+                }
+            )
+        return result
 
     @staticmethod
     def _subtract_units(units: list[dict], matched_units: list[dict]) -> list[dict]:

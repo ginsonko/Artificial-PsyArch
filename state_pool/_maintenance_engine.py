@@ -10,6 +10,61 @@ class MaintenanceEngine:
     def __init__(self, config: dict):
         self._config = config
 
+    @staticmethod
+    def _extract_attribute_name(attribute_sa: dict) -> str:
+        content = attribute_sa.get("content", {}) if isinstance(attribute_sa.get("content", {}), dict) else {}
+        name = str(content.get("attribute_name", "") or "").strip()
+        if name:
+            return name
+        raw = str(content.get("raw", "") or "")
+        if ":" in raw:
+            return raw.split(":", 1)[0].strip()
+        return ""
+
+    def _decay_bound_attributes(self, *, item: dict, tick_number: int, now_ms: int) -> int:
+        """
+        Decay runtime-bound attribute SA energies (CFS/time-feeling/rwd/pun tags, etc.).
+
+        Why:
+        - These attributes are part of the StatePool "live state" and should behave like
+          other slow variables: they persist and fade by a half-life/decay ratio.
+        - Without this, UIs tend to show only "trigger peaks" instead of a maintained state.
+        """
+        if not bool(self._config.get("bound_attribute_apply_decay", True)):
+            return 0
+
+        ext = item.get("ext", {}) if isinstance(item.get("ext", {}), dict) else {}
+        attrs = ext.get("bound_attributes", []) if isinstance(ext.get("bound_attributes", []), list) else []
+        if not attrs:
+            return 0
+
+        er_ratio = float(self._config.get("bound_attribute_er_decay_ratio", 0.97) or 0.97)
+        ev_ratio = float(self._config.get("bound_attribute_ev_decay_ratio", 0.97) or 0.97)
+        er_ratio = max(0.0, min(1.0, er_ratio))
+        ev_ratio = max(0.0, min(1.0, ev_ratio))
+
+        ignore_names = self._config.get("bound_attribute_decay_ignore_names", [])
+        ignore: set[str] = set(str(x).strip() for x in (ignore_names or []) if str(x).strip())
+
+        decayed = 0
+        for a in attrs:
+            if not isinstance(a, dict):
+                continue
+            name = self._extract_attribute_name(a)
+            if name and name in ignore:
+                continue
+            energy = a.get("energy", {}) if isinstance(a.get("energy", {}), dict) else {}
+            er0 = float(energy.get("er", 0.0) or 0.0)
+            ev0 = float(energy.get("ev", 0.0) or 0.0)
+            er1 = round(er0 * er_ratio, 8)
+            ev1 = round(ev0 * ev_ratio, 8)
+            if er1 != er0 or ev1 != ev0:
+                a["energy"] = {"er": er1, "ev": ev1}
+                a.setdefault("meta", {}).setdefault("ext", {})["last_decay_tick"] = int(tick_number)
+                a["updated_at"] = int(max(int(a.get("updated_at", 0) or 0), now_ms))
+                decayed += 1
+        return int(decayed)
+
     def _soft_capacity_profile(self, item_count: int) -> dict:
         """
         Soft capacity decay modulation / 软上限衰减调制
@@ -90,8 +145,10 @@ class MaintenanceEngine:
         before_count = len(items)
         soft = self._soft_capacity_profile(before_count)
         decay_power = float(soft.get("decay_power", 1.0) or 1.0)
+        now_ms = int(time.time() * 1000)
 
         decayed_count = 0
+        decayed_bound_attr_count = 0
         neutralized_count = 0
         pruned_count = 0
         merged_count = 0
@@ -113,6 +170,7 @@ class MaintenanceEngine:
                 )
                 all_events.append(event)
                 decayed_count += 1
+                decayed_bound_attr_count += self._decay_bound_attributes(item=item, tick_number=tick_number, now_ms=now_ms)
 
         neut_stage = self._config.get("neutralization_apply_stage", "maintenance")
         if apply_neutralization and neut_stage in ("maintenance", "both"):
@@ -127,7 +185,6 @@ class MaintenanceEngine:
                     all_events.append(event)
                     neutralized_count += 1
 
-        now_ms = int(time.time() * 1000)
         for item in pool_store.get_all():
             self._refresh_runtime_modulation(item=item, tick_number=tick_number, now_ms=now_ms)
 
@@ -189,6 +246,7 @@ class MaintenanceEngine:
                 "before_item_count": before_count,
                 "after_item_count": after_count,
                 "decayed_item_count": decayed_count,
+                "decayed_bound_attribute_count": int(decayed_bound_attr_count),
                 "neutralized_item_count": neutralized_count,
                 "pruned_item_count": pruned_count,
                 "merged_item_count": merged_count,

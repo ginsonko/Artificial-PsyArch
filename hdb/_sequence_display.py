@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 Unified sequence-group display helpers.
 
@@ -19,25 +19,45 @@ def _unit_token(unit: dict) -> str:
     return str(unit.get("token", "") or unit.get("display_text", "") or "").strip()
 
 
-def format_group_display(units: list[dict], bundles: list[dict] | None = None) -> str:
-    ordered_units = sorted(
-        [dict(unit) for unit in units or [] if isinstance(unit, dict)],
-        key=lambda item: (
-            int(item.get("sequence_index", 0)),
-            str(item.get("unit_id", "")),
-            str(item.get("unit_signature", "")),
-        ),
-    )
-    if not ordered_units:
-        return ""
+def _is_goal_b_string_group(group: dict) -> bool:
+    return bool(group.get("order_sensitive", False)) and str(group.get("string_unit_kind", "") or "") == "char_sequence"
 
+
+def _unit_string_key(unit: dict, *, group_order_sensitive: bool = False, group_string_kind: str = "") -> tuple:
+    return (
+        str(unit.get("source_type", "") or ""),
+        str(unit.get("origin_frame_id", "") or ""),
+        int(unit.get("source_group_index", unit.get("group_index", 0)) or 0),
+        bool(unit.get("order_sensitive", group_order_sensitive)),
+        str(unit.get("string_unit_kind", group_string_kind) or ""),
+        str(unit.get("string_token_text", "") or ""),
+    )
+
+
+def _dedupe_segments(segments: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for segment in segments:
+        text = str(segment or "")
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
+def _display_segments_from_units(group: dict, bundles: list[dict] | None = None) -> list[str]:
+    ordered_units = _ordered_units(group.get("units", []))
+    if not ordered_units:
+        tokens = group.get("tokens") or []
+        return [str(token).strip() for token in tokens if str(token).strip()]
     units_by_id = {
         str(unit.get("unit_id", "")): unit
         for unit in ordered_units
         if str(unit.get("unit_id", ""))
     }
     ordered_bundles = sorted(
-        [dict(bundle) for bundle in bundles or [] if isinstance(bundle, dict)],
+        [dict(bundle) for bundle in bundles or group.get("csa_bundles", []) or [] if isinstance(bundle, dict)],
         key=lambda item: (
             int(units_by_id.get(str(item.get("anchor_unit_id", "")), {}).get("sequence_index", 0)),
             str(item.get("bundle_id", "")),
@@ -50,11 +70,13 @@ def format_group_display(units: list[dict], bundles: list[dict] | None = None) -
     }
     emitted_bundle_ids: set[str] = set()
     covered_unit_ids: set[str] = set()
-    segments: list[str] = []
+    raw_segments: list[dict | str] = []
+    group_order_sensitive = bool(group.get("order_sensitive", False))
+    group_string_kind = str(group.get("string_unit_kind", "") or "")
 
     for unit in ordered_units:
         unit_id = str(unit.get("unit_id", ""))
-        if unit_id in covered_unit_ids:
+        if unit_id and unit_id in covered_unit_ids:
             continue
 
         bundle_id = str(unit.get("bundle_id", ""))
@@ -68,7 +90,7 @@ def format_group_display(units: list[dict], bundles: list[dict] | None = None) -
                 ]
                 member_tokens = [token for token in member_tokens if token]
                 if member_tokens:
-                    segments.append(f"({' + '.join(member_tokens)})")
+                    raw_segments.append(f"({' + '.join(member_tokens)})")
                     emitted_bundle_ids.add(bundle_id)
                     covered_unit_ids.update(
                         str(member_id)
@@ -80,24 +102,66 @@ def format_group_display(units: list[dict], bundles: list[dict] | None = None) -
         token = _unit_token(unit)
         if not token:
             continue
-        covered_unit_ids.add(unit_id)
-        segments.append(token)
+        if unit_id:
+            covered_unit_ids.add(unit_id)
+        raw_segments.append(
+            {
+                "token": token,
+                "order_sensitive": bool(unit.get("order_sensitive", group_order_sensitive)),
+                "string_unit_kind": str(unit.get("string_unit_kind", group_string_kind) or ""),
+                "string_key": _unit_string_key(unit, group_order_sensitive=group_order_sensitive, group_string_kind=group_string_kind),
+            }
+        )
 
-    return f"{{{' + '.join(segments)}}}" if segments else ""
+    segments: list[str] = []
+    index = 0
+    while index < len(raw_segments):
+        current = raw_segments[index]
+        if not isinstance(current, dict):
+            segments.append(str(current))
+            index += 1
+            continue
 
+        if bool(current.get("order_sensitive")) and str(current.get("string_unit_kind") or "") == "char_sequence":
+            key = current.get("string_key")
+            chars = [str(current.get("token", ""))]
+            index += 1
+            while index < len(raw_segments):
+                nxt = raw_segments[index]
+                if not isinstance(nxt, dict):
+                    break
+                if nxt.get("string_key") != key:
+                    break
+                chars.append(str(nxt.get("token", "")))
+                index += 1
+            segments.append("".join(chars))
+            continue
+
+        segments.append(str(current.get("token", "")))
+        index += 1
+
+    return _dedupe_segments(segments)
+
+
+def format_group_display(units: list[dict] | dict, bundles: list[dict] | None = None) -> str:
+    if isinstance(units, dict):
+        group = dict(units)
+    else:
+        group = {"units": [dict(unit) for unit in units or [] if isinstance(unit, dict)]}
+        if bundles is not None:
+            group["csa_bundles"] = [dict(bundle) for bundle in bundles if isinstance(bundle, dict)]
+    segments = _display_segments_from_units(group, bundles=bundles)
+    if not segments:
+        return ""
+    separator = " / " if _is_goal_b_string_group(group) else " + "
+    return f"{{{separator.join(segments)}}}"
 
 def format_sequence_groups(groups: list[dict]) -> str:
     parts: list[str] = []
     for group in groups or []:
         if not isinstance(group, dict):
             continue
-        units = list(group.get("units", []))
-        bundles = list(group.get("csa_bundles", []))
-        if units:
-            text = format_group_display(units, bundles)
-        else:
-            raw_tokens = [str(token).strip() for token in group.get("tokens", []) if str(token).strip()]
-            text = f"{{{' + '.join(raw_tokens)}}}" if raw_tokens else ""
+        text = format_group_display(group)
         if text:
             parts.append(text)
     return " / ".join(parts)
@@ -108,8 +172,8 @@ def _ordered_units(units: list[dict] | None) -> list[dict]:
         [dict(unit) for unit in units or [] if isinstance(unit, dict)],
         key=lambda item: (
             int(item.get("sequence_index", 0)),
-            str(item.get("unit_id", "")),
-            str(item.get("unit_signature", "")),
+            str(item.get("unit_id", "")) if str(item.get("unit_id", "")) else "",
+            str(item.get("unit_signature", "")) if str(item.get("unit_id", "")) else "",
         ),
     )
 
@@ -159,8 +223,7 @@ def _render_bundle_signature(bundle: dict, units_by_id: dict[str, dict]) -> str:
 
 def _render_stimulus_group_semantic(group: dict) -> str:
     units = _ordered_units(group.get("units", []))
-    unit_tokens = [_unit_token(unit) for unit in units]
-    unit_tokens = [token for token in unit_tokens if token]
+    unit_tokens = _display_segments_from_units(group)
     units_by_id = {
         str(unit.get("unit_id", "")): unit
         for unit in units
@@ -172,10 +235,14 @@ def _render_stimulus_group_semantic(group: dict) -> str:
     ]
     bundle_tokens = [token for token in bundle_tokens if token]
     if not unit_tokens and not bundle_tokens:
-        raw_tokens = [str(token).strip() for token in group.get("tokens", []) if str(token).strip()]
+        raw_tokens = [str(token).strip() for token in (group.get("tokens") or []) if str(token).strip()]
         unit_tokens = raw_tokens
-    parts = [*unit_tokens, *bundle_tokens]
-    return f"{{{' + '.join(parts)}}}" if parts else ""
+    if not unit_tokens and not bundle_tokens:
+        return ""
+    display_group = dict(group)
+    display_group["units"] = units
+    display_group["csa_bundles"] = [dict(bundle) for bundle in group.get("csa_bundles", []) or [] if isinstance(bundle, dict)]
+    return format_group_display(display_group)
 
 
 def _render_structure_unit_semantic(unit: dict) -> str:
@@ -197,7 +264,7 @@ def _render_structure_group_semantic(group: dict) -> str:
         if text:
             members.append(text)
     if not members:
-        raw_tokens = [str(token).strip() for token in group.get("tokens", []) if str(token).strip()]
+        raw_tokens = [str(token).strip() for token in (group.get("tokens") or []) if str(token).strip()]
         members = raw_tokens
     return f"{{{' / '.join(members)}}}" if members else ""
 
@@ -268,3 +335,6 @@ def semantic_notation_examples() -> list[dict[str, str]]:
             "explanation": "第一个时序点并列出现两个结构，第二个时序点随后出现另一个结构。",
         },
     ]
+
+
+

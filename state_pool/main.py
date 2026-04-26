@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 AP 状态池模块（State Pool Module, SPM）— 主模块
 =================================================
@@ -77,6 +77,18 @@ _DEFAULT_CONFIG = {
     "fatigue_max_value": 1.0,
     "default_er_decay_ratio": 0.95,
     "default_ev_decay_ratio": 0.90,
+    # Runtime-bound attributes decay (CFS/time-feeling/rwd/pun tags, etc.)
+    # 运行态绑定属性的半衰期/衰减：用于让“认知感受”等属性具备持续态，而不是只有触发峰值。
+    "bound_attribute_apply_decay": True,
+    "bound_attribute_er_decay_ratio": 0.97,
+    "bound_attribute_ev_decay_ratio": 0.97,
+    "bound_attribute_decay_ignore_names": [],
+    # CFS conservation-style transform (MVP): dissonance drop -> correctness rise (same amount).
+    "enable_cfs_correctness_transfer": True,
+    "cfs_dissonance_attribute_name": "cfs_dissonance",
+    "cfs_correctness_attribute_name": "cfs_correctness",
+    # Snapshot payload size control
+    "snapshot_bound_attribute_energy_top_n": 64,
     # soft_capacity_* / 状态池“软上限”衰减调制
     # 说明：当对象数量超过 soft_capacity_start_items 后，维护阶段衰减会变得更激进，
     # 以避免状态池规模无界增长（尤其是原型调试阶段）。
@@ -96,6 +108,8 @@ _DEFAULT_CONFIG = {
     "enable_priority_stimulus_neutralization": True,
     "priority_stimulus_target_ref_types": ["st"],
     "priority_neutralization_min_effect_threshold": 0.01,
+    "enable_event_component_neutralization": True,
+    "event_component_neutralization_ratio_cap": 1.0,
     "er_elimination_threshold": 0.05,
     "ev_elimination_threshold": 0.05,
     "cp_elimination_ignore_below": 0.02,
@@ -110,9 +124,9 @@ _DEFAULT_CONFIG = {
     "rate_smoothing_alpha": 1.0,
     "merge_duplicate_items": True,
     "merge_only_same_ref_object": True,
-    "enable_semantic_same_object_merge": True,
+    "enable_semantic_same_object_merge": False,
     "allow_weak_semantic_merge": False,
-    "aggregate_same_semantic_incoming_objects": True,
+    "aggregate_same_semantic_incoming_objects": False,
     "sensor_input_reconcile_mode": "max",
     # 是否把 CSA（组合刺激元）作为独立 state_item 写入状态池。
     # 注意：理论层面 CSA 是“匹配约束单元”，工程上不一定要以独立对象存在于 SP。
@@ -260,7 +274,14 @@ class StatePool:
 
         working_packet = self._clone_stimulus_packet(stimulus_packet)
         pre_neutralization_events: list[dict] = []
+        priority_neutralization_diagnostics: list[dict] = []
         priority_neutralized_item_count = 0
+        priority_event_component_summary = {
+            "event_component_neutralization_count": 0,
+            "event_component_neutralization_er_added_sum": 0.0,
+            "event_component_neutralization_ev_added_sum": 0.0,
+            "event_component_cp_drop_sum": 0.0,
+        }
         if apply_mode == "normal" and self._config.get("enable_priority_stimulus_neutralization", True):
             neutralization_result = self._priority_neutralize_stimulus_packet(
                 stimulus_packet=working_packet,
@@ -271,7 +292,14 @@ class StatePool:
             )
             working_packet = neutralization_result["residual_packet"]
             pre_neutralization_events = neutralization_result["events"]
+            priority_neutralization_diagnostics = list(neutralization_result.get("diagnostics", []))
             priority_neutralized_item_count = neutralization_result["neutralized_item_count"]
+            priority_event_component_summary = {
+                "event_component_neutralization_count": int(neutralization_result.get("event_component_neutralization_count", 0) or 0),
+                "event_component_neutralization_er_added_sum": round(float(neutralization_result.get("event_component_neutralization_er_added_sum", 0.0) or 0.0), 8),
+                "event_component_neutralization_ev_added_sum": round(float(neutralization_result.get("event_component_neutralization_ev_added_sum", 0.0) or 0.0), 8),
+                "event_component_cp_drop_sum": round(float(neutralization_result.get("event_component_cp_drop_sum", 0.0) or 0.0), 8),
+            }
 
         # ---- Step 2: 拆分对象 ----
         # SA 是状态池的主要输入对象。
@@ -692,6 +720,9 @@ class StatePool:
         # ---- 能量统计 ----
         total_delta_er = sum(e.get("delta", {}).get("delta_er", 0) for e in all_events if "delta" in e)
         total_delta_ev = sum(e.get("delta", {}).get("delta_ev", 0) for e in all_events if "delta" in e)
+        # CP (Option A): sum of per-event |Δ(ER-EV)| so it matches the global CP definition
+        # used by the Observatory (Σ|ER_i - EV_i|). This is an "update intensity" proxy.
+        total_delta_cp = sum(abs(e.get("delta", {}).get("delta_cp_delta", 0)) for e in all_events if "delta" in e)
         high_cp = len(self._store.get_high_cp_items(0.5))
 
         elapsed = self._elapsed_ms(start_time)
@@ -706,6 +737,7 @@ class StatePool:
             output_summary={"new_item_count": new_count, "updated_item_count": updated_count,
                             "merged_item_count": merged_count, "rejected_object_count": rejected_count,
                             "priority_neutralized_item_count": priority_neutralized_item_count,
+                            "priority_event_component_neutralization_count": priority_event_component_summary["event_component_neutralization_count"],
                             "residual_sa_count": len(working_packet.get("sa_items", [])),
                             "residual_csa_count": len(working_packet.get("csa_items", [])),
                             "active_item_count": self._store.size, "high_cp_item_count": high_cp,
@@ -721,6 +753,8 @@ class StatePool:
                 "updated_item_count": updated_count,
                 "merged_item_count": merged_count,
                 "priority_neutralized_item_count": priority_neutralized_item_count,
+                "priority_neutralization_diagnostics": priority_neutralization_diagnostics,
+                **priority_event_component_summary,
                 "neutralized_item_count": neut_count,
                 "rejected_object_count": rejected_count,
                 "script_broadcast_sent": broadcast_sent,
@@ -728,6 +762,7 @@ class StatePool:
                 "state_delta_summary": {
                     "total_delta_er": round(total_delta_er, 6),
                     "total_delta_ev": round(total_delta_ev, 6),
+                    "total_delta_cp": round(total_delta_cp, 6),
                     "high_cp_item_count": high_cp,
                 },
             },
@@ -1281,6 +1316,35 @@ class StatePool:
         diagnostics: list[dict] = []
         neutralized_item_count = 0
         consumed_any = False
+        event_component_neutralization_count = 0
+        event_component_neutralization_er_added_sum = 0.0
+        event_component_neutralization_ev_added_sum = 0.0
+        event_component_cp_drop_sum = 0.0
+
+        # PERF: 构建一次 packet 的结构 profile，避免在候选遍历中重复切分/归一化。
+        # packet_groups 会根据“剩余能量”过滤 0 能量单元，所以在能量发生变化后仍需重建。
+        packet_profile = cut_engine.build_sequence_profile_from_stimulus_packet(stimulus_packet)
+        packet_energy_ref_by_id: dict[str, dict] = {}
+        for sa_item in stimulus_packet.get("sa_items", []):
+            if isinstance(sa_item, dict) and sa_item.get("id"):
+                packet_energy_ref_by_id[str(sa_item.get("id", ""))] = sa_item.setdefault("energy", {})
+
+        packet_profile_has_fallback_unit = False
+        for group in packet_profile.get("sequence_groups", []) or []:
+            for unit in group.get("units", []) or []:
+                unit_id = str((unit or {}).get("unit_id", "") or "")
+                if unit_id and unit_id not in packet_energy_ref_by_id:
+                    packet_profile_has_fallback_unit = True
+                    break
+            if packet_profile_has_fallback_unit:
+                break
+
+        # 若 profile 中存在“fallback unit”（unit_id 不在 sa_items），旧实现会在每次候选检查时重新生成
+        # 这类 unit 的 energy_ref，从而行为上等价于“每次都重置这类 unit 的能量”。为了保证结果不变，
+        # 我们在这种情况下保持每轮都重建 packet_groups。
+        always_rebuild_packet_groups = packet_profile_has_fallback_unit
+        packet_groups: list[dict] = []
+        packet_groups_dirty = True
 
         for item in candidate_items:
             cp_delta = float(item.get("energy", {}).get("cognitive_pressure_delta", 0.0))
@@ -1291,17 +1355,60 @@ class StatePool:
             if not structure_groups:
                 continue
 
-            packet_groups = self._build_packet_groups_for_neutralization(
-                stimulus_packet,
-                cut_engine=cut_engine,
-            )
+            if always_rebuild_packet_groups or packet_groups_dirty:
+                packet_groups = self._build_packet_groups_for_neutralization(
+                    stimulus_packet,
+                    cut_engine=cut_engine,
+                    _cached_profile=packet_profile,
+                    _energy_ref_by_id=packet_energy_ref_by_id,
+                )
+                packet_groups_dirty = False
             if not packet_groups:
                 break
 
-            common_part = cut_engine.maximum_common_part(structure_groups, packet_groups)
-            structure_signature = cut_engine.sequence_groups_to_signature(structure_groups)
+            component_result = self._priority_neutralize_cognitive_stitching_event(
+                item=item,
+                packet_groups=packet_groups,
+                tick_number=tick_number,
+                min_effect=min_effect,
+                source_module=source_module,
+                trace_id=trace_id,
+                tick_id=tick_id,
+            )
+            if component_result.get("handled", False):
+                diagnostic = component_result.get("diagnostic")
+                if isinstance(diagnostic, dict):
+                    diagnostics.append(diagnostic)
+                event_component_neutralization_count += int(component_result.get("component_neutralization_count", 0) or 0)
+                event_component_neutralization_er_added_sum = round(
+                    event_component_neutralization_er_added_sum + float(component_result.get("total_delta_er", 0.0) or 0.0),
+                    8,
+                )
+                event_component_neutralization_ev_added_sum = round(
+                    event_component_neutralization_ev_added_sum + float(component_result.get("total_delta_ev", 0.0) or 0.0),
+                    8,
+                )
+                event_component_cp_drop_sum = round(
+                    event_component_cp_drop_sum + float(component_result.get("component_cp_drop_sum", 0.0) or 0.0),
+                    8,
+                )
+                if component_result.get("consumed_any", False) and not always_rebuild_packet_groups:
+                    packet_groups_dirty = True
+                component_event = component_result.get("event")
+                if isinstance(component_event, dict):
+                    events.append(component_event)
+                    neutralized_item_count += 1
+                    consumed_any = True
+                continue
+
+            ref_snapshot = item.get("ref_snapshot", {}) or {}
+            structure_signature = str(ref_snapshot.get("content_signature", "") or "").strip() or cut_engine.sequence_groups_to_signature(
+                structure_groups
+            )
             if not structure_signature:
                 continue
+
+            common_part = cut_engine.maximum_common_part(structure_groups, packet_groups)
             if common_part.get("common_signature", "") != structure_signature:
                 continue
 
@@ -1348,6 +1455,9 @@ class StatePool:
                 delta_er = 0.0
                 delta_ev = consumed_amount
                 reason = "priority_stimulus_virtual_confirmation"
+
+            if consumed_amount > 0.0 and not always_rebuild_packet_groups:
+                packet_groups_dirty = True
 
             diagnostics.append(
                 {
@@ -1410,15 +1520,33 @@ class StatePool:
             "events": events,
             "diagnostics": diagnostics,
             "neutralized_item_count": neutralized_item_count,
+            "event_component_neutralization_count": event_component_neutralization_count,
+            "event_component_neutralization_er_added_sum": round(event_component_neutralization_er_added_sum, 8),
+            "event_component_neutralization_ev_added_sum": round(event_component_neutralization_ev_added_sum, 8),
+            "event_component_cp_drop_sum": round(event_component_cp_drop_sum, 8),
         }
 
-    def _build_packet_groups_for_neutralization(self, stimulus_packet: dict, *, cut_engine) -> list[dict]:
+    def _build_packet_groups_for_neutralization(
+        self,
+        stimulus_packet: dict,
+        *,
+        cut_engine,
+        _cached_profile: dict | None = None,
+        _energy_ref_by_id: dict[str, dict] | None = None,
+    ) -> list[dict]:
         """把刺激包转成与 cut engine 一致的完整 SA/CSA 视图。"""
-        profile = cut_engine.build_sequence_profile_from_stimulus_packet(stimulus_packet)
-        energy_ref_by_id = {}
-        for item in stimulus_packet.get("sa_items", []):
-            if isinstance(item, dict) and item.get("id"):
-                energy_ref_by_id[str(item.get("id", ""))] = item.setdefault("energy", {})
+        profile = (
+            _cached_profile
+            if isinstance(_cached_profile, dict)
+            else cut_engine.build_sequence_profile_from_stimulus_packet(stimulus_packet)
+        )
+        if isinstance(_energy_ref_by_id, dict):
+            energy_ref_by_id = _energy_ref_by_id
+        else:
+            energy_ref_by_id = {}
+            for item in stimulus_packet.get("sa_items", []):
+                if isinstance(item, dict) and item.get("id"):
+                    energy_ref_by_id[str(item.get("id", ""))] = item.setdefault("energy", {})
 
         packet_groups = []
         for group in profile.get("sequence_groups", []):
@@ -1455,6 +1583,10 @@ class StatePool:
                     "source_type": group.get("source_type", ""),
                     "origin_frame_id": group.get("origin_frame_id", ""),
                     "tokens": [str(unit.get("token", "")) for unit in units if str(unit.get("token", ""))],
+                    "display_text": group.get("display_text", ""),
+                    "order_sensitive": bool(group.get("order_sensitive", False)),
+                    "string_unit_kind": str(group.get("string_unit_kind", "") or ""),
+                    "string_token_text": str(group.get("string_token_text", "") or ""),
                     "units": units,
                     "csa_bundles": [dict(bundle) for bundle in group.get("csa_bundles", [])],
                 }
@@ -1467,7 +1599,9 @@ class StatePool:
         ref_snapshot = item.get("ref_snapshot", {})
         sequence_groups = list(ref_snapshot.get("sequence_groups", []))
         if sequence_groups:
-            return copy.deepcopy(sequence_groups)
+            # PERF: CutEngine.maximum_common_part() 内部会归一化并拷贝输入，不会就地修改原对象。
+            # 这里深拷贝会随着结构规模增长产生明显开销。
+            return sequence_groups
 
         flat_tokens = list(ref_snapshot.get("flat_tokens", []))
         if not flat_tokens:
@@ -1480,6 +1614,419 @@ class StatePool:
                 "tokens": flat_tokens,
             }
         ]
+
+    def _priority_neutralize_cognitive_stitching_event(
+        self,
+        *,
+        item: dict,
+        packet_groups: list[dict],
+        tick_number: int,
+        min_effect: float,
+        source_module: str,
+        trace_id: str,
+        tick_id: str,
+    ) -> dict:
+        if not self._config.get("enable_event_component_neutralization", True):
+            return {"handled": False}
+        if not self._is_cognitive_stitching_event_item(item):
+            return {"handled": False}
+
+        component_matches = self._collect_cognitive_stitching_component_matches(
+            item=item,
+            packet_groups=packet_groups,
+        )
+        if not component_matches:
+            return {"handled": False}
+
+        ratio_cap = max(0.0, min(1.0, float(self._config.get("event_component_neutralization_ratio_cap", 1.0))))
+        ref_snapshot = item.get("ref_snapshot", {}) or {}
+        structure_signature = str(ref_snapshot.get("content_signature", "") or item.get("ref_object_id", "") or "").strip()
+        target_display = (
+            ref_snapshot.get("content_display", "")
+            or ref_snapshot.get("content_display_detail", "")
+            or item.get("ref_object_id", "")
+            or item.get("id", "")
+        )
+
+        total_delta_er = 0.0
+        total_delta_ev = 0.0
+        component_cp_drop_sum = 0.0
+        total_required = 0.0
+        total_available = 0.0
+        total_consumed = 0.0
+        total_shortfall = 0.0
+        matched_unit_count = 0
+        component_neutralization_count = 0
+        matched_components: list[str] = []
+        matched_tokens: list[str] = []
+        component_updates: list[dict] = []
+        energy_keys_used: list[str] = []
+
+        for match in component_matches:
+            ledger_entry = match["ledger_entry"]
+            matched_units = list(match.get("matched_units", []) or [])
+            if not matched_units:
+                continue
+
+            before_er = round(max(0.0, float(ledger_entry.get("er", 0.0) or 0.0)), 8)
+            before_ev = round(max(0.0, float(ledger_entry.get("ev", 0.0) or 0.0)), 8)
+            before_cp = round(abs(before_er - before_ev), 8)
+
+            if before_ev > before_er:
+                energy_key = "er"
+                required_amount = round((before_ev - before_er) * ratio_cap, 8)
+                available_amount = round(
+                    sum(max(0.0, float(unit.get("er", 0.0) or 0.0)) for unit in matched_units),
+                    8,
+                )
+                consumed_amount = self._consume_packet_unit_energy(
+                    matched_units=matched_units,
+                    energy_key="er",
+                    amount=required_amount,
+                )
+                after_er = round(before_er + consumed_amount, 8)
+                after_ev = before_ev
+                total_delta_er = round(total_delta_er + consumed_amount, 8)
+            elif before_er > before_ev:
+                energy_key = "ev"
+                required_amount = round((before_er - before_ev) * ratio_cap, 8)
+                available_amount = round(
+                    sum(max(0.0, float(unit.get("ev", 0.0) or 0.0)) for unit in matched_units),
+                    8,
+                )
+                consumed_amount = self._consume_packet_unit_energy(
+                    matched_units=matched_units,
+                    energy_key="ev",
+                    amount=required_amount,
+                )
+                after_er = before_er
+                after_ev = round(before_ev + consumed_amount, 8)
+                total_delta_ev = round(total_delta_ev + consumed_amount, 8)
+            else:
+                energy_key = "balanced"
+                required_amount = 0.0
+                available_amount = 0.0
+                consumed_amount = 0.0
+                after_er = before_er
+                after_ev = before_ev
+
+            ledger_entry["er"] = after_er
+            ledger_entry["ev"] = after_ev
+            ledger_entry["cp_abs"] = round(abs(after_er - after_ev), 8)
+            cp_drop = round(max(0.0, before_cp - ledger_entry["cp_abs"]), 8)
+
+            total_required = round(total_required + required_amount, 8)
+            total_available = round(total_available + available_amount, 8)
+            total_consumed = round(total_consumed + consumed_amount, 8)
+            total_shortfall = round(total_shortfall + max(0.0, required_amount - consumed_amount), 8)
+            component_cp_drop_sum = round(component_cp_drop_sum + cp_drop, 8)
+            matched_unit_count += len(matched_units)
+            if consumed_amount > 0.0:
+                component_neutralization_count += 1
+                if energy_key in ("er", "ev"):
+                    energy_keys_used.append(energy_key)
+
+            matched_components.append(str(ledger_entry.get("display", "") or ledger_entry.get("ref_id", "")))
+            matched_tokens.extend(
+                str(unit.get("token", ""))
+                for unit in matched_units
+                if str(unit.get("token", ""))
+            )
+            component_updates.append(
+                {
+                    "component_index": int(ledger_entry.get("index", 0) or 0),
+                    "component_ref_id": str(ledger_entry.get("ref_id", "") or ""),
+                    "component_display": str(ledger_entry.get("display", "") or ledger_entry.get("ref_id", "")),
+                    "required_energy_key": energy_key,
+                    "required_amount": round(required_amount, 8),
+                    "available_amount": round(available_amount, 8),
+                    "consumed_amount": round(consumed_amount, 8),
+                    "shortfall_amount": round(max(0.0, required_amount - consumed_amount), 8),
+                    "before_er": before_er,
+                    "before_ev": before_ev,
+                    "after_er": after_er,
+                    "after_ev": after_ev,
+                    "before_cp_abs": before_cp,
+                    "after_cp_abs": ledger_entry["cp_abs"],
+                    "cp_drop": cp_drop,
+                    "matched_tokens": [
+                        str(unit.get("token", ""))
+                        for unit in matched_units
+                        if str(unit.get("token", ""))
+                    ],
+                }
+            )
+
+        matched_components = self._deduplicate_strings(matched_components)
+        matched_tokens = self._deduplicate_strings(matched_tokens)
+        consumed_key = self._merge_consumed_energy_keys(energy_keys_used)
+        diagnostic = {
+            "target_item_id": item.get("id", ""),
+            "target_ref_object_id": item.get("ref_object_id", ""),
+            "target_ref_object_type": item.get("ref_object_type", ""),
+            "target_display": target_display,
+            "matched_structure_signature": structure_signature,
+            "neutralization_mode": "event_component_complementary",
+            "required_energy_key": consumed_key,
+            "required_amount": round(total_required, 8),
+            "available_amount": round(total_available, 8),
+            "consumed_amount": round(total_consumed, 8),
+            "shortfall_amount": round(total_shortfall, 8),
+            "matched_unit_count": matched_unit_count,
+            "matched_component_count": len(component_matches),
+            "matched_components": matched_components,
+            "matched_tokens": matched_tokens,
+            "component_cp_drop_sum": round(component_cp_drop_sum, 8),
+            "component_updates": component_updates,
+        }
+
+        if total_consumed < float(min_effect):
+            return {
+                "handled": True,
+                "diagnostic": diagnostic,
+                "event": None,
+                "consumed_any": False,
+                "component_neutralization_count": 0,
+                "total_delta_er": 0.0,
+                "total_delta_ev": 0.0,
+                "component_cp_drop_sum": round(component_cp_drop_sum, 8),
+            }
+
+        cs_meta = self._get_cognitive_stitching_event_meta(item, ensure=True)
+        cs_meta["component_ledger"] = self._ensure_cognitive_stitching_component_ledger(item)
+        cs_meta["last_component_neutralization_tick"] = int(tick_number)
+
+        event = self._energy.apply_energy_delta(
+            item=item,
+            delta_er=total_delta_er,
+            delta_ev=total_delta_ev,
+            tick_number=tick_number,
+            reason="priority_event_component_neutralization",
+            source_module=source_module,
+            trace_id=trace_id,
+            tick_id=tick_id,
+        )
+        event["event_type"] = "priority_event_component_neutralization"
+        event["matched_structure_signature"] = structure_signature
+        event["matched_unit_count"] = matched_unit_count
+        event["target_display"] = target_display
+        event["extra_context"] = {
+            "neutralization_mode": "event_component_complementary",
+            "consumed_energy_key": consumed_key,
+            "consumed_amount": round(total_consumed, 8),
+            "matched_unit_count": matched_unit_count,
+            "matched_component_count": len(component_matches),
+            "matched_components": matched_components,
+            "matched_tokens": matched_tokens,
+            "component_cp_drop_sum": round(component_cp_drop_sum, 8),
+            "component_neutralization_count": component_neutralization_count,
+            "component_updates": component_updates,
+        }
+        return {
+            "handled": True,
+            "diagnostic": diagnostic,
+            "event": event,
+            "consumed_any": True,
+            "component_neutralization_count": component_neutralization_count,
+            "total_delta_er": round(total_delta_er, 8),
+            "total_delta_ev": round(total_delta_ev, 8),
+            "component_cp_drop_sum": round(component_cp_drop_sum, 8),
+        }
+
+    def _is_cognitive_stitching_event_item(self, item: dict) -> bool:
+        if str(item.get("ref_object_type", "") or "") != "st":
+            return False
+        prefix = "cs_event::"
+        ref_object_id = str(item.get("ref_object_id", "") or "")
+        if ref_object_id.startswith(prefix):
+            return True
+
+        # HDB-backed CS events use structure_id as ref_object_id. The canonical event_ref_id
+        # is stored in structure.content_signature (ref_snapshot.content_signature).
+        ref_snapshot = item.get("ref_snapshot", {}) or {}
+        try:
+            snap_sig = str(ref_snapshot.get("content_signature", "") or "").strip()
+        except Exception:
+            snap_sig = ""
+        if snap_sig.startswith(prefix):
+            return True
+
+        # Fall back to explicit CS metadata if present.
+        structure_ext = ref_snapshot.get("structure_ext", {}) or {}
+        cs_meta = structure_ext.get("cognitive_stitching")
+        if isinstance(cs_meta, dict):
+            event_ref_id = str(cs_meta.get("event_ref_id", "") or cs_meta.get("cs_event_ref_id", "") or "").strip()
+            if event_ref_id.startswith(prefix):
+                return True
+
+        meta_ext = (item.get("meta", {}) or {}).get("ext", {}) or {}
+        cs_meta2 = meta_ext.get("cognitive_stitching")
+        if isinstance(cs_meta2, dict):
+            event_ref_id2 = str(cs_meta2.get("event_ref_id", "") or cs_meta2.get("cs_event_ref_id", "") or "").strip()
+            if event_ref_id2.startswith(prefix):
+                return True
+
+        return False
+
+    def _get_cognitive_stitching_event_meta(self, item: dict, *, ensure: bool = False) -> dict | None:
+        meta = item.setdefault("meta", {}) if ensure else item.get("meta", {})
+        if not isinstance(meta, dict):
+            return None
+        meta_ext = meta.setdefault("ext", {}) if ensure else meta.get("ext", {})
+        if not isinstance(meta_ext, dict):
+            return None
+        existing = meta_ext.get("cognitive_stitching")
+        if isinstance(existing, dict):
+            return existing
+
+        ref_snapshot = item.get("ref_snapshot", {}) or {}
+        structure_ext = ref_snapshot.get("structure_ext", {}) or {}
+        ref_meta = structure_ext.get("cognitive_stitching")
+        if isinstance(ref_meta, dict):
+            copied = copy.deepcopy(ref_meta)
+            if ensure:
+                meta_ext["cognitive_stitching"] = copied
+            return copied
+
+        if ensure:
+            meta_ext["cognitive_stitching"] = {}
+            return meta_ext["cognitive_stitching"]
+        return None
+
+    def _ensure_cognitive_stitching_component_ledger(self, item: dict) -> list[dict]:
+        cs_meta = self._get_cognitive_stitching_event_meta(item, ensure=True) or {}
+        existing_ledger = list(cs_meta.get("component_ledger", []) or [])
+        if existing_ledger:
+            normalized = []
+            for index, entry in enumerate(existing_ledger):
+                if not isinstance(entry, dict):
+                    continue
+                ref_id = str(entry.get("ref_id", "") or "")
+                display = str(entry.get("display", "") or ref_id)
+                er = round(max(0.0, float(entry.get("er", 0.0) or 0.0)), 8)
+                ev = round(max(0.0, float(entry.get("ev", 0.0) or 0.0)), 8)
+                normalized.append(
+                    {
+                        "index": int(entry.get("index", index) or index),
+                        "ref_id": ref_id,
+                        "display": display,
+                        "tokens": list(entry.get("tokens", []) or ([display] if display else [])),
+                        "profile_share": round(max(0.0, float(entry.get("profile_share", 0.0) or 0.0)), 8),
+                        "er": er,
+                        "ev": ev,
+                        "cp_abs": round(abs(er - ev), 8),
+                    }
+                )
+            cs_meta["component_ledger"] = normalized
+            return normalized
+
+        ref_snapshot = item.get("ref_snapshot", {}) or {}
+        member_refs = list(ref_snapshot.get("member_refs", []) or cs_meta.get("member_refs", []) or [])
+        if not member_refs:
+            ref_object_id = str(item.get("ref_object_id", "") or "")
+            if ref_object_id.startswith("cs_event::"):
+                member_refs = [part for part in ref_object_id.split("::")[1:] if part]
+        displays = list(ref_snapshot.get("flat_tokens", []) or [])
+        component_count = max(len(member_refs), len(displays))
+        if component_count <= 0:
+            cs_meta["component_ledger"] = []
+            return []
+
+        total_er = round(max(0.0, float(item.get("energy", {}).get("er", 0.0) or 0.0)), 8)
+        total_ev = round(max(0.0, float(item.get("energy", {}).get("ev", 0.0) or 0.0)), 8)
+        fallback_share = round(1.0 / float(component_count), 8)
+        normalized = []
+        for index in range(component_count):
+            ref_id = str(member_refs[index] if index < len(member_refs) else "")
+            display = str(displays[index] if index < len(displays) else ref_id)
+            er = round(total_er * fallback_share, 8)
+            ev = round(total_ev * fallback_share, 8)
+            normalized.append(
+                {
+                    "index": index,
+                    "ref_id": ref_id,
+                    "display": display or ref_id,
+                    "tokens": [display] if display else [],
+                    "profile_share": fallback_share,
+                    "er": er,
+                    "ev": ev,
+                    "cp_abs": round(abs(er - ev), 8),
+                }
+            )
+        cs_meta["member_refs"] = list(member_refs)
+        cs_meta["component_profile"] = [
+            {
+                "index": entry["index"],
+                "ref_id": entry.get("ref_id", ""),
+                "display": entry.get("display", ""),
+                "share": entry.get("profile_share", fallback_share),
+            }
+            for entry in normalized
+        ]
+        cs_meta["component_ledger"] = normalized
+        return normalized
+
+    def _collect_cognitive_stitching_component_matches(self, *, item: dict, packet_groups: list[dict]) -> list[dict]:
+        ledger = self._ensure_cognitive_stitching_component_ledger(item)
+        if not ledger:
+            return []
+
+        claimed_unit_ids: set[str] = set()
+        matches: list[dict] = []
+        for entry in ledger:
+            token_candidates = self._deduplicate_strings(
+                list(entry.get("tokens", []) or [])
+                + [entry.get("display", ""), entry.get("ref_id", "")]
+            )
+            if not token_candidates:
+                continue
+
+            matched_units = []
+            for packet_group in packet_groups:
+                for unit in packet_group.get("units", []):
+                    unit_id = str(unit.get("unit_id", "") or "")
+                    token = str(unit.get("token", "") or "")
+                    if not token or unit_id in claimed_unit_ids:
+                        continue
+                    if token not in token_candidates:
+                        continue
+                    matched_units.append(unit)
+                    if unit_id:
+                        claimed_unit_ids.add(unit_id)
+
+            if matched_units:
+                matches.append(
+                    {
+                        "ledger_entry": entry,
+                        "matched_units": matched_units,
+                    }
+                )
+        return matches
+
+    @staticmethod
+    def _deduplicate_strings(values: list[str]) -> list[str]:
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            text = str(value or "")
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            ordered.append(text)
+        return ordered
+
+    @staticmethod
+    def _merge_consumed_energy_keys(keys: list[str]) -> str:
+        normalized = [str(key or "") for key in keys if str(key or "")]
+        if not normalized:
+            return "balanced"
+        uniq: list[str] = []
+        for key in normalized:
+            if key not in uniq:
+                uniq.append(key)
+        if len(uniq) == 1:
+            return uniq[0]
+        return "mixed"
 
     @staticmethod
     def _collect_matched_units_from_common_part(*, packet_groups: list[dict], common_part: dict) -> list[dict]:
@@ -1903,8 +2450,24 @@ class StatePool:
         existing_snapshot = existing_item.setdefault("ref_snapshot", {})
         candidate_snapshot = candidate_item.get("ref_snapshot", {})
         list_fields = {"attribute_displays", "feature_displays", "bound_attribute_displays", "member_summaries"}
+        richer_snapshot_fields = {"sequence_groups", "flat_tokens", "content_signature", "content_display", "content_display_detail", "structure_ext", "member_refs", "token_count"}
 
         for key, value in candidate_snapshot.items():
+            if key in richer_snapshot_fields:
+                existing_groups = existing_snapshot.get("sequence_groups", []) or []
+                candidate_groups = candidate_snapshot.get("sequence_groups", []) or []
+                existing_has_string = any(isinstance(g, dict) and bool(g.get("order_sensitive", False)) and str(g.get("string_unit_kind", "") or "") == "char_sequence" for g in existing_groups)
+                candidate_has_string = any(isinstance(g, dict) and bool(g.get("order_sensitive", False)) and str(g.get("string_unit_kind", "") or "") == "char_sequence" for g in candidate_groups)
+                should_replace = False
+                if key == "sequence_groups":
+                    should_replace = bool(candidate_groups) and (not existing_groups or candidate_has_string or len(candidate_groups) > len(existing_groups))
+                elif key == "flat_tokens":
+                    should_replace = bool(value) and (not existing_snapshot.get(key) or candidate_has_string)
+                else:
+                    should_replace = value not in ("", None, [], {}) and (existing_snapshot.get(key) in ("", None, [], {}) or candidate_has_string)
+                if should_replace:
+                    existing_snapshot[key] = value
+                continue
             if key in list_fields:
                 merged_list = list(existing_snapshot.get(key, []))
                 for entry in value or []:

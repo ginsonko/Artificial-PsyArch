@@ -76,8 +76,46 @@
               <button id="checkBtn" class="secondary">执行自检</button>
               <button id="repairBtn" class="ghost">局部修复</button>
               <button id="repairAllBtn" class="ghost">全局快速修复</button>
+              <button id="idleConsolidateBtn" class="ghost">闲时巩固/压缩</button>
               <button id="stopRepairBtn" class="ghost danger">停止修复</button>
             </div>
+          </div>
+          <div class="subpanel">
+            <h4>流程开关（认知拼接 / 结构级查存一体 / 能量平衡 / 时间延迟任务）</h4>
+            <div class="soft-note">
+              说明：这里提供“本地联调”常用的流程阶段开关，便于你在不改代码的情况下快速做对照实验。开关会写入配置文件并热加载生效。
+              <br />
+              术语说明：认知拼接（Cognitive Stitching，缩写 CS）用于把多个结构拼成更长的事件链；结构级查存一体（Structure-level Retrieval-Storage）是旧链路中的结构级检索与局部库存储阶段。
+              <br />
+              能量平衡控制器（Energy Balance Controller，缩写 EBC）用于把“实能量（Reality Energy，缩写 ER）/虚能量（Virtual Energy，缩写 EV）比例”拉回目标附近，避免长期偏虚或偏实导致系统失稳。
+              <br />
+              时间感受器延迟任务（Delayed Tasks）用于“节奏感”实验：把未来应当发生的赋能/反应以任务形式延迟执行，而不是每 tick 都立即触发。
+            </div>
+            <label class="toggle-row">
+              <input id="pipelineEnableCognitiveStitchingChk" type="checkbox" />
+              <span>启用认知拼接（Cognitive Stitching，缩写 CS）</span>
+            </label>
+            <label class="toggle-row">
+              <input id="pipelineEnableStructureLevelChk" type="checkbox" />
+              <span>启用结构级查存一体（Structure-level Retrieval-Storage）</span>
+            </label>
+            <label class="toggle-row">
+              <input id="pipelineEnableGoalBCharSaStringModeChk" type="checkbox" />
+              <span>使用字符串方案（字符串作为顺序敏感结构）</span>
+            </label>
+            <label class="toggle-row">
+              <input id="pipelineEnableEnergyBalanceChk" type="checkbox" />
+              <span>启用能量平衡控制器（Energy Balance Controller，缩写 EBC）</span>
+            </label>
+            <label class="toggle-row">
+              <input id="pipelineEnableDelayedTasksChk" type="checkbox" />
+              <span>启用时间感受器延迟任务（Delayed Tasks）</span>
+            </label>
+            <div class="actions">
+              <button id="pipelineSwitchApplyBtn" class="primary" type="button">应用并热加载</button>
+              <button id="pipelineSwitchResetBtn" class="ghost" type="button">重置为当前生效值</button>
+            </div>
+            <div id="pipelineSwitchFeedback" class="meta"></div>
           </div>
         </div>
         <div id="actionFeedback" class="feedback"></div>
@@ -412,3 +450,4 @@
   <script src="/app.js"></script>
 </body>
 </html>
+

@@ -1,4 +1,4 @@
-﻿const S = { d: null, r: null, settingsTab: "observatory", settingsDrafts: {} };
+const S = { d: null, r: null, settingsTab: "observatory", settingsDrafts: {} };
 S.innateRulesBundle = null;
 S.innateRulesDoc = null;
 S.innateRulesSelectedId = null;
@@ -53,6 +53,14 @@ document.addEventListener("DOMContentLoaded", async () => {
     "tickCount",
     "checkTarget",
     "repairJobId",
+    "pipelineEnableCognitiveStitchingChk",
+    "pipelineEnableStructureLevelChk",
+    "pipelineEnableGoalBCharSaStringModeChk",
+    "pipelineEnableEnergyBalanceChk",
+    "pipelineEnableDelayedTasksChk",
+    "pipelineSwitchApplyBtn",
+    "pipelineSwitchResetBtn",
+    "pipelineSwitchFeedback",
     "actionFeedback",
     "sensorCards",
     "sensorUnits",
@@ -149,6 +157,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     target ? act("/api/repair", { target }, `已执行修复 ${target}。`) : fb("请填写修复目标 ID。", true);
   });
   B("repairAllBtn", () => act("/api/repair_all", {}, "已启动全局快速修复。"));
+  B("idleConsolidateBtn", () => idleConsolidate());
+  B("pipelineSwitchApplyBtn", () => applyPipelineSwitchesFromUi());
+  B("pipelineSwitchResetBtn", () => resetPipelineSwitchesToEffective());
   B("stopRepairBtn", () => {
     const jobId = (E.repairJobId?.value || "").trim();
     jobId ? act("/api/stop_repair", { repair_job_id: jobId }, `已请求停止 ${jobId}。`) : fb("请填写修复任务 ID。", true);
@@ -298,8 +309,9 @@ function B(id, fn) {
 }
 
 function n(value) {
-  const num = +value || 0;
-  return Number.isFinite(num) ? num.toFixed(4) : "0.0000";
+  if (value === null || value === undefined || value === "") return "-";
+  const num = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(num) ? num.toFixed(4) : "-";
 }
 
 function y(value) {
@@ -327,6 +339,20 @@ function tm(value) {
   } catch {
     return String(value);
   }
+}
+
+function fmtBytes(value) {
+  const num = Number(value ?? 0) || 0;
+  if (!(num > 0)) return "0B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let n0 = num;
+  let u = 0;
+  while (n0 >= 1024 && u < units.length - 1) {
+    n0 /= 1024;
+    u += 1;
+  }
+  const fixed = n0 >= 100 ? 0 : n0 >= 10 ? 1 : 2;
+  return `${n0.toFixed(fixed)}${units[u]}`;
 }
 
 function pp(value) {
@@ -745,7 +771,7 @@ function fmtStateTitle(item) {
 
 function fmtGroupText(group) {
   if (!group) return "";
-  if (!a(group?.units).length && typeof group?.display_text === "string" && group.display_text.trim()) {
+  if (typeof group?.display_text === "string" && group.display_text.trim()) {
     return group.display_text.trim();
   }
 
@@ -782,7 +808,15 @@ function fmtGroupText(group) {
 
   const emittedBundleIds = new Set();
   const coveredUnitIds = new Set();
-  const segments = [];
+  const rawSegments = [];
+  const segmentKey = (unit) => [
+    String(unit?.source_type || ""),
+    String(unit?.origin_frame_id || ""),
+    String(unit?.source_group_index ?? unit?.group_index ?? 0),
+    String(Boolean(unit?.order_sensitive || group?.order_sensitive)),
+    String(unit?.string_unit_kind || group?.string_unit_kind || ""),
+    String(unit?.string_token_text || group?.string_token_text || ""),
+  ].join("");
 
   orderedUnits.forEach((unit) => {
     const unitId = String(unit?.unit_id || unit?.id || "");
@@ -796,7 +830,7 @@ function fmtGroupText(group) {
         .map((member) => member?.token || member?.display_text || "")
         .filter(Boolean);
       if (memberTokens.length) {
-        segments.push(`(${memberTokens.join(" + ")})`);
+        rawSegments.push({ text: `(${memberTokens.join(" + ")})`, grouped: false });
         emittedBundleIds.add(bundleId);
         a(bundle?.member_unit_ids).forEach((memberId) => {
           const text = String(memberId || "");
@@ -809,10 +843,37 @@ function fmtGroupText(group) {
     const token = String(unit?.token || unit?.display_text || "").trim();
     if (!token) return;
     if (unitId) coveredUnitIds.add(unitId);
-    segments.push(token);
+    rawSegments.push({
+      text: token,
+      grouped: Boolean(unit?.order_sensitive || group?.order_sensitive) && String(unit?.string_unit_kind || group?.string_unit_kind || "") === "char_sequence",
+      key: segmentKey(unit),
+    });
   });
 
-  return segments.length ? `{${segments.join(" + ")}}` : "";
+  const segments = [];
+  for (let i = 0; i < rawSegments.length; i += 1) {
+    const current = rawSegments[i];
+    if (!current?.grouped) {
+      segments.push(current?.text || "");
+      continue;
+    }
+    const chars = [current.text || ""];
+    while (i + 1 < rawSegments.length && rawSegments[i + 1]?.grouped && rawSegments[i + 1]?.key === current.key) {
+      i += 1;
+      chars.push(rawSegments[i]?.text || "");
+    }
+    segments.push(chars.join(""));
+  }
+  const deduped = [];
+  const seen = new Set();
+  segments.forEach((segment) => {
+    const text = String(segment || "").trim();
+    if (!text || seen.has(text)) return;
+    seen.add(text);
+    deduped.push(text);
+  });
+
+  return deduped.length ? `{${deduped.join(" + ")}}` : "";
 }
 
 function fmtSequenceGroups(groups) {
@@ -902,7 +963,8 @@ function fmtStimulusGroup(group) {
       `Tokens ${listOr(group.tokens, "-", " / ")}\n` +
       `Visible ${listOr(group.visible_tokens, "-", " / ")}\n` +
       `SA ${group.sa_count || 0} | CSA bundles ${group.csa_count || 0} | ER ${n(group.total_er)} | EV ${n(group.total_ev)}\n` +
-      `Bundles ${listOr(group.csa_bundles, "-", " | ")}`,
+      `Bundles ${listOr(group.csa_bundles, "-", " | ")}\n` +
+      `来源统计（source_type_counts）${fmtKvInline(group.source_type_counts || {})}（用于检查外源/内源是否合流进入同一时序组）`,
   };
 }
 
@@ -1469,7 +1531,12 @@ async function P(url, body) {
     body: JSON.stringify(body || {}),
   });
   const data = await response.json();
-  if (!response.ok || data.success === false) throw new Error(data.message || url);
+  if (!response.ok || data.success === false) {
+    const parts = [data.message || url];
+    if (data.error_type) parts.push(`type=${data.error_type}`);
+    if (data.traceback) parts.push(data.traceback);
+    throw new Error(parts.filter(Boolean).join("\n"));
+  }
   return data;
 }
 
@@ -1484,6 +1551,119 @@ async function refreshDashboard(silent = false) {
     if (!silent) fb("已刷新观测台 / Dashboard refreshed.");
   } catch (error) {
     fb(`刷新失败 / Refresh failed: ${error.message}`, true);
+  }
+}
+
+// =====================================================================
+// Pipeline Switches / 流程阶段开关（前端快捷入口）
+// =====================================================================
+
+function pipelineEffectiveSwitches() {
+  const effective = S.d?.module_configs?.observatory?.effective || {};
+  const ebc = S.d?.module_configs?.energy_balance?.effective || {};
+  const ts = S.d?.module_configs?.time_sensor?.effective || {};
+  return {
+    enableCognitiveStitching: Boolean(effective.enable_cognitive_stitching),
+    enableStructureLevelRetrievalStorage: Boolean(effective.enable_structure_level_retrieval_storage),
+    enableGoalBCharSaStringMode: Boolean(effective.enable_goal_b_char_sa_string_mode),
+    enableEnergyBalanceController: Boolean(ebc.enabled),
+    enableDelayedTasks: Boolean(ts.enable_delayed_tasks),
+    configPath: String(S.d?.module_configs?.observatory?.path || "").trim(),
+    energyBalanceConfigPath: String(S.d?.module_configs?.energy_balance?.path || "").trim(),
+    timeSensorConfigPath: String(S.d?.module_configs?.time_sensor?.path || "").trim(),
+  };
+}
+
+function renderPipelineSwitchesPanel() {
+  if (!E.pipelineEnableCognitiveStitchingChk || !E.pipelineEnableStructureLevelChk) return;
+  const sw = pipelineEffectiveSwitches();
+  // Sync UI to effective values (not file values) / 同步到“生效值”，而不是“文件值”。
+  // Note: This panel is a quick switchboard; it should reflect the true runtime loop status.
+  E.pipelineEnableCognitiveStitchingChk.checked = Boolean(sw.enableCognitiveStitching);
+  E.pipelineEnableStructureLevelChk.checked = Boolean(sw.enableStructureLevelRetrievalStorage);
+  if (E.pipelineEnableGoalBCharSaStringModeChk) E.pipelineEnableGoalBCharSaStringModeChk.checked = Boolean(sw.enableGoalBCharSaStringMode);
+  if (E.pipelineEnableEnergyBalanceChk) E.pipelineEnableEnergyBalanceChk.checked = Boolean(sw.enableEnergyBalanceController);
+  if (E.pipelineEnableDelayedTasksChk) E.pipelineEnableDelayedTasksChk.checked = Boolean(sw.enableDelayedTasks);
+  if (E.pipelineSwitchFeedback) {
+    const parts = [
+      `当前生效值（Effective values）`,
+      `认知拼接（Cognitive Stitching，缩写 CS）=${y(sw.enableCognitiveStitching)}`,
+      `结构级查存一体（Structure-level Retrieval-Storage）=${y(sw.enableStructureLevelRetrievalStorage)}`,
+      `使用字符串方案（字符串作为顺序敏感结构）=${y(sw.enableGoalBCharSaStringMode)}`,
+      `能量平衡控制器（Energy Balance Controller，缩写 EBC）=${y(sw.enableEnergyBalanceController)}`,
+      `时间感受器延迟任务（Delayed Tasks）=${y(sw.enableDelayedTasks)}`,
+      sw.configPath ? `配置文件=${sw.configPath}` : "",
+      sw.energyBalanceConfigPath ? `能量平衡配置文件=${sw.energyBalanceConfigPath}` : "",
+      sw.timeSensorConfigPath ? `时间感受器配置文件=${sw.timeSensorConfigPath}` : "",
+    ].filter(Boolean);
+    E.pipelineSwitchFeedback.textContent = parts.join(" | ");
+  }
+}
+
+function resetPipelineSwitchesToEffective() {
+  const sw = pipelineEffectiveSwitches();
+  if (E.pipelineEnableCognitiveStitchingChk) E.pipelineEnableCognitiveStitchingChk.checked = Boolean(sw.enableCognitiveStitching);
+  if (E.pipelineEnableStructureLevelChk) E.pipelineEnableStructureLevelChk.checked = Boolean(sw.enableStructureLevelRetrievalStorage);
+  if (E.pipelineEnableGoalBCharSaStringModeChk) E.pipelineEnableGoalBCharSaStringModeChk.checked = Boolean(sw.enableGoalBCharSaStringMode);
+  if (E.pipelineEnableEnergyBalanceChk) E.pipelineEnableEnergyBalanceChk.checked = Boolean(sw.enableEnergyBalanceController);
+  if (E.pipelineEnableDelayedTasksChk) E.pipelineEnableDelayedTasksChk.checked = Boolean(sw.enableDelayedTasks);
+  if (E.pipelineSwitchFeedback) E.pipelineSwitchFeedback.textContent = "已重置为当前生效值（Effective values）。";
+}
+
+async function applyPipelineSwitchesFromUi() {
+  const wantCs = Boolean(E.pipelineEnableCognitiveStitchingChk?.checked);
+  const wantStructure = Boolean(E.pipelineEnableStructureLevelChk?.checked);
+  const wantGoalB = Boolean(E.pipelineEnableGoalBCharSaStringModeChk?.checked);
+  const wantEbc = Boolean(E.pipelineEnableEnergyBalanceChk?.checked);
+  const wantDelayed = Boolean(E.pipelineEnableDelayedTasksChk?.checked);
+  if (E.pipelineSwitchFeedback) E.pipelineSwitchFeedback.textContent = "正在保存并热加载（Saving + reloading）…";
+  try {
+    // 1) Observatory is the master switch for pipeline stages.
+    await P("/api/config/save", {
+      module: "observatory",
+      values: {
+        enable_cognitive_stitching: wantCs,
+        enable_structure_level_retrieval_storage: wantStructure,
+        enable_goal_b_char_sa_string_mode: wantGoalB,
+      },
+    });
+
+    // 2) Keep cognitive_stitching's file value in sync for human inspection.
+    // 注意：运行时会被 Observatory 的 runtime_override 覆盖（以观测台开关为准）。
+    // 这里同步文件值，只是为了减少“文件值与生效值不一致”的困惑。
+    try {
+      await P("/api/config/save", { module: "cognitive_stitching", values: { enabled: wantCs } });
+    } catch (error) {
+      if (E.pipelineSwitchFeedback) {
+        E.pipelineSwitchFeedback.textContent = `已保存观测台开关，但同步认知拼接模块配置失败：${error.message}（不影响本轮生效值）。`;
+      }
+    }
+
+    // 3) Energy balance controller switch.
+    try {
+      await P("/api/config/save", { module: "energy_balance", values: { enabled: wantEbc } });
+    } catch (error) {
+      if (E.pipelineSwitchFeedback) {
+        E.pipelineSwitchFeedback.textContent = `已保存流程开关，但同步能量平衡控制器配置失败：${error.message}（不影响本轮生效值）。`;
+      }
+    }
+
+    // 4) Time sensor delayed tasks switch (rhythm experiment key).
+    try {
+      await P("/api/config/save", { module: "time_sensor", values: { enable_delayed_tasks: wantDelayed } });
+    } catch (error) {
+      if (E.pipelineSwitchFeedback) {
+        E.pipelineSwitchFeedback.textContent = `已保存流程开关，但同步时间感受器延迟任务配置失败：${error.message}（不影响本轮生效值）。`;
+      }
+    }
+
+    await refreshDashboard(true);
+    if (E.pipelineSwitchFeedback) E.pipelineSwitchFeedback.textContent = "已保存并热加载开关（Applied）。";
+    fb("已应用流程阶段开关。");
+  } catch (error) {
+    if (E.pipelineSwitchFeedback) E.pipelineSwitchFeedback.textContent = `保存失败：${error.message}`;
+    fb(`保存流程阶段开关失败: ${error.message}`, true);
+    await refreshDashboard(true);
   }
 }
 
@@ -1655,6 +1835,7 @@ function stopActionRuntimeAutoRefresh() {
 
 function draw() {
   overview();
+  renderPipelineSwitchesPanel();
   sensor();
   timeSensorView();
   flow();
@@ -1679,6 +1860,24 @@ function renderOverviewMemorySummary() {
   const snapshot = S.d.state_snapshot || {};
   const energy = S.d.state_energy_summary || {};
   const hdb = S.d.hdb_snapshot?.summary || {};
+  const maint = S.d.maintenance_runtime || {};
+  const hdbIdle = maint.hdb_last_idle_consolidation || null;
+  const csIdle = maint.cs_last_idle_consolidation || null;
+  const hdbTs = Number(hdbIdle?.data?.timestamp_ms ?? 0) || 0;
+  const csTs = Number(csIdle?.data?.timestamp_ms ?? 0) || 0;
+  const idleTs = Math.max(hdbTs, csTs);
+  const idleWhen = idleTs ? tm(idleTs) : "尚未执行";
+  const idleDetailParts = [];
+  if (hdbIdle?.data) {
+    idleDetailParts.push(`HDB trim diff ${hdbIdle.data.trimmed_diff_entry_total ?? 0} | group ${hdbIdle.data.trimmed_group_entry_total ?? 0}`);
+  }
+  if (csIdle?.data) {
+    const before = csIdle.data.avg_parent_depth_before ?? 0;
+    const after = csIdle.data.avg_parent_depth_after ?? 0;
+    const released = csIdle.data.released_cache_est_bytes ?? 0;
+    idleDetailParts.push(`CS depth ${Number(before).toFixed?.(2) ?? before}→${Number(after).toFixed?.(2) ?? after} | cache≈${fmtBytes(released)}`);
+  }
+  const idleDetail = idleDetailParts.length ? idleDetailParts.join(" | ") : "点击右侧按钮可手动触发。";
   const timing = report.timing || {};
   const totalMs = Number(timing.total_logic_ms ?? timing.total_ms ?? 0) || 0;
   const timeNote = totalMs ? ` | 耗时 ${Math.round(totalMs)}ms` : "";
@@ -1693,6 +1892,7 @@ function renderOverviewMemorySummary() {
       hdb.memory_activation_count || 0,
       `ER ${n(hdb.memory_activation_total_er)} | EV ${n(hdb.memory_activation_total_ev)} | Total ${n(hdb.memory_activation_total_energy)}`,
     ),
+    card("闲时巩固 / Idle Consolidation", idleWhen, idleDetail),
     card("历史轮次 / Recent Cycles", a(S.d.recent_cycles).length, `启动于 / Started ${tm(S.d.meta?.started_at)}`),
   ].join("");
 }
@@ -1729,7 +1929,8 @@ function renderRecentCyclesMemorySummary() {
       title: `${cycle.trace_id || "-"} 路 ${cycle.input_text || "空 Tick"}`,
       desc:
         `记忆体 ${cycle.attention_memory_count || 0} | 记忆赋能 ${cycle.memory_activation_applied_count || 0} | 记忆反哺 ${cycle.memory_feedback_applied_count || 0}\n` +
-        `结构级 ${cycle.structure_rounds || 0} 轮 | 刺激级 ${cycle.stimulus_rounds || 0} 轮\n` +
+        `认知拼接（Cognitive Stitching，缩写 CS）候选 ${cycle.cs_candidate_count ?? "-"} | 动作 ${cycle.cs_action_count ?? "-"} | 退化 ${cycle.cs_degenerated_event_count ?? "-"}\n` +
+        `刺激级查存轮次 ${cycle.stimulus_rounds ?? "-"} | 结构级查存轮次 ${cycle.structure_rounds ?? "-"}\n` +
         `命中结构 ${fmtRefs(cycle.matched_structure_refs)}\n` +
         `新结构 ${fmtRefs(cycle.new_structure_refs)}\n` +
         `memory_pool ER ${n(cycle.memory_activation_total_er)} | EV ${n(cycle.memory_activation_total_ev)}\n` +
@@ -1745,6 +1946,17 @@ function overview() {
   const snapshot = S.d.state_snapshot || {};
   const energy = S.d.state_energy_summary || {};
   const hdb = S.d.hdb_snapshot?.summary || {};
+  const maint = S.d.maintenance_runtime || {};
+  const hdbIdle = maint.hdb_last_idle_consolidation || null;
+  const csIdle = maint.cs_last_idle_consolidation || null;
+  const hdbTs = Number(hdbIdle?.data?.timestamp_ms ?? 0) || 0;
+  const csTs = Number(csIdle?.data?.timestamp_ms ?? 0) || 0;
+  const idleTs = Math.max(hdbTs, csTs);
+  const idleWhen = idleTs ? tm(idleTs) : "尚未执行";
+  const idleDetailParts = [];
+  if (hdbIdle?.data) idleDetailParts.push(`HDB trim diff ${hdbIdle.data.trimmed_diff_entry_total ?? 0}`);
+  if (csIdle?.data) idleDetailParts.push(`CS depth ${n(csIdle.data.avg_parent_depth_before)}→${n(csIdle.data.avg_parent_depth_after)}`);
+  const idleDetail = idleDetailParts.length ? idleDetailParts.join(" | ") : "点击按钮可触发";
   E.overviewCards.innerHTML = [
     card("最近轮次", S.d.meta?.last_cycle_id || "尚未运行", `输入: ${report.sensor?.input_text || "空 Tick"}`),
     card("状态池对象", snapshot.summary?.active_item_count || 0, `高认知压 ${snapshot.summary?.high_cp_item_count || 0}`),
@@ -1752,6 +1964,7 @@ function overview() {
     card("记忆体", report.attention?.memory_item_count || 0, `抽取消耗 ${n(report.attention?.consumed_total_energy)}`),
     card("HDB", `ST ${hdb.structure_count || 0} / SG ${hdb.group_count || 0}`, `EM ${hdb.episodic_count || 0}`),
     card("记忆赋能池", hdb.memory_activation_count || 0, `总EV ${n(hdb.memory_activation_total_ev)}`),
+    card("闲时巩固", idleWhen, idleDetail),
     card("历史轮次", a(S.d.recent_cycles).length, `启动于 ${tm(S.d.meta?.started_at)}`),
   ].join("");
 }
@@ -2129,6 +2342,15 @@ function flow() {
   const structureLevel = report.structure_level?.result || {};
   const structureDebug = structureLevel.debug || {};
   const mergedStimulus = report.merged_stimulus || {};
+  // "merged_stimulus" in summary mode is a head preview (groups<=10, units<=24) plus totals.
+  // 为避免误读，这里同时展示“预览数量”和“总计数量”。
+  const mergedStimulusPreviewGroupCount = a(mergedStimulus.groups).length;
+  const mergedStimulusPreviewUnitCount = a(mergedStimulus.feature_units).length;
+  const mergedStimulusTotalGroupCount = mergedStimulus.group_count ?? mergedStimulusPreviewGroupCount;
+  const mergedStimulusTotalUnitCount = mergedStimulus.unit_count ?? mergedStimulusPreviewUnitCount;
+  const mergedStimulusPreviewTruncated =
+    mergedStimulusTotalGroupCount > mergedStimulusPreviewGroupCount ||
+    mergedStimulusTotalUnitCount > mergedStimulusPreviewUnitCount;
   const cache = report.cache_neutralization || {};
   const stimulusLevel = report.stimulus_level?.result || {};
   const stimulusDebug = stimulusLevel.debug || {};
@@ -2188,7 +2410,7 @@ function flow() {
     ? a(structureDebug.round_details)
         .map((round) => {
           const selected = round.selected_group;
-          return `<article class="detail-card nested"><h5>结构级 Round ${esc(round.round_index || 0)}</h5><div class="kv-list"><div class="kv-row"><div class="k">预算前 / Budget Before</div><div class="v">${fmtBudget(round.budget_before)}</div></div><div class="kv-row"><div class="k">预算后 / Budget After</div><div class="v">${fmtBudget(round.budget_after)}</div></div><div class="kv-row"><div class="k">选中结构组 / Selected Group</div><div class="v">${selected ? htmlLines([`${pickGroupedText(selected, selected.group_id || "-")} | ${selected.group_id || "-"} | score ${n(selected.score)}`, `必要结构 / Required: ${fmtRefs(selected.required_structures)}`, `偏置结构 / Bias: ${fmtRefs(selected.bias_structures)}`, `共同部分 / Common: ${fmtCommon(selected.common_part)}`]) : "本轮未命中结构组 / No group match"}</div></div><div class="kv-row"><div class="k">偏置结构 / Bias Structures</div><div class="v">${htmlLines([fmtRefs(round.bias_structures)])}</div></div><div class="kv-row"><div class="k">内源片段 / Internal Fragments</div><div class="v">${htmlLines(a(round.internal_fragments).map((fragment) => `${pickGroupedText(fragment, fragment.display_text || fragment.fragment_id || "-")} | ER ${n(fragment.er_hint)} | EV ${n(fragment.ev_hint)} | Total ${n(fragment.energy_hint)}`))}</div></div><div class="kv-row"><div class="k">链式打开 / Chain</div><div class="v">${fmtChain(round.chain_steps, "structure")}</div></div><div class="kv-row"><div class="k">局部库动作 / Local DB Actions</div><div class="v">${fmtStorageSummary(round.storage_summary)}</div></div></div><div class="sub-section"><div class="sub-title">候选结构组 / Candidate Groups</div>${rows(a(round.candidate_groups).map((item) => ({ title: `${pickGroupedText(item, item.group_id || "-")} | ${item.group_id || "-"} | score ${n(item.score)}`, desc: `必要结构 / Required: ${fmtRefs(item.required_structures)}\n偏置结构 / Bias: ${fmtRefs(item.bias_structures)}\n共同部分 / Common: ${fmtCommon(item.common_part)}\n可用 / Eligible ${y(item.eligible)} | owner ${item.owner_kind || "-"} / ${item.owner_id || "-"} | depth ${item.chain_depth ?? 0}\nsimilarity ${n(item.similarity)} | base ${n(item.base_similarity)} | coverage ${n(item.coverage_ratio)} | structure ${n(item.structure_ratio)}\nwave ${n(item.wave_similarity)} | path ${n(item.path_strength)} | runtime ${n(item.runtime_weight)} | W ${n(item.base_weight)} | G ${n(item.recent_gain)} | fatigue ${n(item.fatigue)}` })), "本轮没有候选结构组 / No structure-group candidates.")}</div></article>`;
+          return `<article class="detail-card nested"><h5>结构级 Round ${esc(round.round_index || 0)}</h5><div class="kv-list"><div class="kv-row"><div class="k">预算前 / Budget Before</div><div class="v">${fmtBudget(round.budget_before)}</div></div><div class="kv-row"><div class="k">预算后 / Budget After</div><div class="v">${fmtBudget(round.budget_after)}</div></div><div class="kv-row"><div class="k">选中结构组 / Selected Group</div><div class="v">${selected ? htmlLines([`${pickGroupedText(selected, selected.group_id || "-")} | ${selected.group_id || "-"} | score ${n(selected.score)}`, `必要结构 / Required: ${fmtRefs(selected.required_structures)}`, `偏置结构 / Bias: ${fmtRefs(selected.bias_structures)}`, `共同部分 / Common: ${fmtCommon(selected.common_part)}`]) : "本轮未命中结构组 / No group match"}</div></div><div class="kv-row"><div class="k">偏置结构 / Bias Structures</div><div class="v">${htmlLines([fmtRefs(round.bias_structures)])}</div></div><div class="kv-row"><div class="k">内源片段 / Internal Fragments</div><div class="v">${htmlLines(a(round.internal_fragments).map((fragment) => `${pickGroupedText(fragment, fragment.display_text || fragment.fragment_id || "-")} | ER ${n(fragment.er_hint)} | EV ${n(fragment.ev_hint)} | Total ${n(fragment.energy_hint)}${fragment.ext?.goal_b_has_string_group ? ` | GoalB字符串 ${listOr(fragment.ext?.goal_b_string_texts, "-", " + ")}` : ""}${fragment.ext?.display_fallback_char_split ? ` | fallback_split ${y(fragment.ext?.display_fallback_char_split)}` : ""}${fragment.ext?.sequence_group_count != null ? ` | seq_groups ${fragment.ext.sequence_group_count}` : ""}`))}</div></div><div class="kv-row"><div class="k">链式打开 / Chain</div><div class="v">${fmtChain(round.chain_steps, "structure")}</div></div><div class="kv-row"><div class="k">局部库动作 / Local DB Actions</div><div class="v">${fmtStorageSummary(round.storage_summary)}</div></div></div><div class="sub-section"><div class="sub-title">候选结构组 / Candidate Groups</div>${rows(a(round.candidate_groups).map((item) => ({ title: `${pickGroupedText(item, item.group_id || "-")} | ${item.group_id || "-"} | score ${n(item.score)}`, desc: `必要结构 / Required: ${fmtRefs(item.required_structures)}\n偏置结构 / Bias: ${fmtRefs(item.bias_structures)}\n共同部分 / Common: ${fmtCommon(item.common_part)}\n可用 / Eligible ${y(item.eligible)} | owner ${item.owner_kind || "-"} / ${item.owner_id || "-"} | depth ${item.chain_depth ?? 0}\nsimilarity ${n(item.similarity)} | base ${n(item.base_similarity)} | coverage ${n(item.coverage_ratio)} | structure ${n(item.structure_ratio)}\nwave ${n(item.wave_similarity)} | path ${n(item.path_strength)} | runtime ${n(item.runtime_weight)} | W ${n(item.base_weight)} | G ${n(item.recent_gain)} | fatigue ${n(item.fatigue)}` })), "本轮没有候选结构组 / No structure-group candidates.")}</div></article>`;
         })
         .join("")
     : empty("本轮没有结构级轮次细节 / No structure rounds.");
@@ -2275,11 +2497,86 @@ function flow() {
       ? `输出 scales ${Object.entries(energyBalance.hdb_scales_out).map(([k, v]) => `${k}=${n(v)}`).join(" / ")}`
       : `输出 scales -（${energyBalance.skipped_reason || "no_output"}）`;
 
+  // Pipeline switches (effective values) / 流程阶段开关（以“生效值”为准）：
+  // - 认知拼接（Cognitive Stitching，缩写 CS）
+  // - 结构级查存一体（Structure-level Retrieval-Storage）
+  const pipelineSwitches = pipelineEffectiveSwitches();
+  const showCognitiveStitchingPanel = Boolean(pipelineSwitches.enableCognitiveStitching);
+  const showStructureLevelPanel = Boolean(pipelineSwitches.enableStructureLevelRetrievalStorage);
+
+  // Cognitive Stitching panel data (narrative-friendly).
+  // 认知拼接（Cognitive Stitching）面板：用于“叙事化想法”验收与调参观察。
+  const cs = report.cognitive_stitching || {};
+  const csTop = a(cs.narrative_top_items);
+  const csActions = a(cs.actions);
+  const csCandidates = a(cs.candidate_preview);
+  const csEventGrasp = cs.event_grasp || {};
+  const csDegeneration = cs.event_degeneration || {};
+  const csDegenerationActions = a(csDegeneration.actions_preview);
+
+  const csActionFamilyLabel = (family, actionName) => {
+    const f = String(family || "").trim();
+    const a0 = String(actionName || "").trim();
+    if (a0.startsWith("reinforce_")) return "强化事件（Reinforce Event）";
+    if (f === "create_event") return "新建事件（Create Event）";
+    if (f === "extend_event") return "扩展事件（Extend Event）";
+    if (f === "merge_event") return "桥接合并事件（Bridge Merge Event）";
+    return f || "-";
+  };
+
+  const csNarrativeRows = csTop.map((item, idx) => {
+    const title =
+      `Top${idx + 1} · 总能量 ${n(item.total_energy)} · 实能量（Reality Energy，缩写 ER）${n(item.er)} / ` +
+      `虚能量（Virtual Energy，缩写 EV）${n(item.ev)}`;
+    const desc =
+      `事件内容 ${item.display || item.ref_object_id || "-"}\n` +
+      `事件引用签名（event_ref_id）${item.ref_object_id || "-"}\n` +
+      `事件结构ID（HDB structure_id）${item.structure_id || "-"}\n` +
+      `认知压力（Cognitive Pressure，缩写 CP）${n(item.cp_abs)} | 显著性（salience_score）${n(item.salience_score)} | 把握感（event_grasp）${n(item.event_grasp)}\n` +
+      `组分数量（component_count）${item.component_count || 0}\n` +
+      `事件结构数据库（Event Structure DataBase，缩写 ESDB）父链深度 ${item.esdb_parent_depth ?? 0} | 父引用数 ${item.esdb_parent_count ?? 0} | 增量残差边 ${item.esdb_delta_entry_count ?? 0} | materialized ${y(item.esdb_materialized)} | 更新次数 ${item.esdb_update_count ?? 0}`;
+    return { title, desc };
+  });
+
+  const csActionRows = csActions.slice(0, 16).map((action) => ({
+    title: `${csActionFamilyLabel(action.action_family, action.action)} · score ${n(action.score)} · absorb_ratio ${n(action.absorb_ratio)}`,
+    desc:
+      `事件 ${action.event_display || action.event_ref_id || "-"}\n` +
+      `事件引用签名（event_ref_id）${action.event_ref_id || "-"} | 事件结构ID（HDB structure_id）${action.event_structure_id || "-"}\n` +
+      `组分数量（component_count）${action.event_component_count || 0}\n` +
+      `来源（source）${action.source_kind || "-"}: ${action.source_display || action.source_ref_id || "-"}\n` +
+      `目标（target）${action.target_kind || "-"}: ${action.target_display || action.target_ref_id || "-"}\n` +
+      `匹配模式（match_mode）${action.match_mode || "-"} | 匹配跨度（matched_span）${action.matched_span ?? 0} | 前缀组分（prefix_components）${action.prefix_components ?? 0}\n` +
+      `上下文命中数量（context_k）${action.context_k ?? 0} | 最近距离（context_distance）${action.context_distance ?? 0} | 边权重占比（edge_weight_ratio）${n(action.edge_weight_ratio)}\n` +
+      `吸收能量（absorbed）ER ${n(action.absorbed_er)} / EV ${n(action.absorbed_ev)} | 总 ${n(action.absorbed_total)}\n` +
+      `疲劳（fatigue）${n(action.fatigue_before)} -> ${n(action.fatigue_after)}`,
+  }));
+
+  const csCandidateRows = csCandidates.slice(0, 12).map((cand, idx) => ({
+    title: `候选 ${idx + 1} · ${csActionFamilyLabel(cand.action_type, "")} · score ${n(cand.score)}`,
+    desc:
+      `来源（source）${cand.source_kind || "-"}: ${cand.source_display || "-"}\n` +
+      `目标（target）${cand.target_kind || "-"}: ${cand.target_display || "-"}\n` +
+      `匹配模式（match_mode）${cand.match_mode || "-"} | 上下文命中数量（context_k）${cand.context_k ?? 0} | 匹配跨度（matched_span）${cand.matched_span ?? 0}\n` +
+      `边权重占比（edge_weight_ratio）${n(cand.edge_weight_ratio)} | 匹配强度（match_strength）${n(cand.match_strength)} | 疲劳（fatigue_before）${n(cand.fatigue_before)}`,
+  }));
+
+  const csDegenerationActionRows = csDegenerationActions.slice(0, 12).map((act, idx) => ({
+    title: `退化动作 ${idx + 1} · 转移能量 ER ${n(act.transferred_er)} / EV ${n(act.transferred_ev)} · created_target_item ${y(act.created_target_item)}`,
+    desc:
+      `源事件引用签名（source_event_ref_id）${act.source_event_ref_id || "-"}\n` +
+      `目标事件引用签名（target_event_ref_id）${act.target_event_ref_id || "-"}\n` +
+      `源事件结构ID（source_structure_id）${act.source_structure_id || "-"}\n` +
+      `目标事件结构ID（target_structure_id）${act.target_structure_id || "-"}\n` +
+      `移除组分（removed_component_refs）${listOr(act.removed_component_refs, "（无）", " / ")}\n` +
+      `保留组分（kept_component_refs）${listOr(act.kept_component_refs, "（无）", " / ")}`,
+  }));
+
   E.flowTimeline.innerHTML = [
     fBlock("0. 新手总览（类人感受与闭环）", "把“违和感/期待/压力/惊/正确感/把握感”等认知感受做成一眼可读的面板，便于你公开到 GitHub 后让新测试者快速理解系统在“感受什么”。", [
       dCard("关键认知感受（重点）", rows(importantFeelingRows, "本轮没有认知感受信号。")),
       dCard("认知感受按类型汇总（Top kinds）", rows(kindSummaryRows, "本轮没有认知感受信号。")),
-      dCard("实虚能量平衡控制器（EBC，可插拔）", rows([
+      dCard("实能量与虚能量平衡控制器（Energy Balance Controller，缩写 EBC，可插拔）", rows([
         { title: `启用 ${ebcEnabled}`, desc: `${ebcLine1}\n${ebcLine2}\n${ebcLine3}` },
       ], "本轮没有 EBC 数据。")),
     ]),
@@ -2301,7 +2598,44 @@ function flow() {
       })), "本轮维护没有记录额外事件。")),
     ]),
 
-    fBlock("2. 注意力滤波（AF）", "聚焦优先 + 动态阈值抑制 + 有代价抽取，形成 CAM（当前注意记忆体）。", [
+    showCognitiveStitchingPanel
+      ? fBlock("2. 认知拼接（Cognitive Stitching，缩写 CS）", "在状态池维护之后，把多个结构对象或事件对象拼接成更长的事件链，形成可叙事的“当前认知候选”。字段解释：实能量（Reality Energy，缩写 ER）、虚能量（Virtual Energy，缩写 EV）、认知压力（Cognitive Pressure，缩写 CP）。", [
+          dCard("认知拼接账本（Summary）", [
+            card("启用（enabled）", y(cs.enabled), `状态（reason）${cs.reason || "-"} | 返回码（code）${cs.code || "-"} | message ${cs.message || "-"}`),
+            card("种子对象（seed）", cs.seed_structure_count || 0, `结构对象 ${cs.seed_plain_structure_count || 0} | 事件对象 ${cs.seed_event_count || 0}`),
+            card(
+              "候选/动作（candidates/actions）",
+              `${cs.candidate_count || 0} / ${cs.action_count || 0}`,
+              `新建 ${cs.created_count || 0} | 扩展 ${cs.extended_count || 0} | 合并 ${cs.merged_count || 0} | 强化 ${cs.reinforced_count || 0}`,
+            ),
+            card(
+              "事件结构数据库（Event Structure DataBase，缩写 ESDB）",
+              `${cs.esdb_event_count || 0}`,
+              `materialized ${cs.esdb_materialized_event_count || 0} | delta_entries ${cs.esdb_delta_entry_total || 0}`,
+            ),
+            card("同类拼接疲劳状态表（pair_fatigue）", cs.pair_fatigue_state_size || 0, "用于数值化抑制短时间内重复抽能；不会硬阻断。"),
+            card(
+              "事件把握感（event_grasp）",
+              csEventGrasp.emitted_count ?? "-",
+              `selected ${csEventGrasp.selected_event_count ?? "-"} | reason ${csEventGrasp.reason || "-"}`,
+            ),
+          ].join(""), "detail-grid"),
+          dCard("事件退化账本（Event Degeneration Summary）", [
+            card("启用（enabled）", y(csDegeneration.enabled), `原因（reason）${csDegeneration.reason || "-"}`),
+            card(
+              "候选/退化（candidate/degenerated）",
+              `${csDegeneration.candidate_event_count ?? "-"} / ${csDegeneration.degenerated_count ?? "-"} `,
+              `每 tick 上限 ${csDegeneration.max_events_per_tick ?? "-"} | 最少保留组分数 ${csDegeneration.min_components ?? "-"} | share 阈值 ${n(csDegeneration.share_threshold)} | 最小组分能量 ${n(csDegeneration.min_component_energy)}`,
+            ),
+          ].join(""), "detail-grid"),
+          dCard("事件退化动作预览（Actions Preview）", rows(csDegenerationActionRows, "本轮没有发生事件退化（可能是没有弱组分，或已低于最少保留组分数）。")),
+          dCard("当前拼接事件能量 Top-N（叙事化视图）", rows(csNarrativeRows, "当前状态池里没有认知拼接事件对象（可能是能量不足或本轮没有拼接）。")),
+          dCard("本轮拼接动作（最新动作）", rows(csActionRows, "本轮没有发生事件新建/扩展/合并动作。")),
+          dCard("候选预览（Candidate Preview）", rows(csCandidateRows, "本轮没有候选（可能是种子能量不足或阈值过高）。")),
+        ])
+      : "",
+
+    fBlock("3. 注意力滤波（Attention Filter，缩写 AF）", "聚焦优先 + 动态阈值抑制 + 有代价抽取，形成当前注意记忆体（Current Attention Memory，缩写 CAM）。", [
       dCard("注意力账本", [
         card(
           "候选 / 入选",
@@ -2320,15 +2654,20 @@ function flow() {
         ),
         card("抽取比例", n(attention.consume_ratio), y(attention.consume_enabled)),
         card("抽取消耗", `ER ${n(attention.consumed_total_er)} / EV ${n(attention.consumed_total_ev)}`, `总消耗 ${n(attention.consumed_total_energy)}`),
-        card("进入结构级的 ST", a(attention.structure_items).length, "只有结构对象 ST 会进入结构级查存"),
+        card(
+          "进入结构级查存的结构对象（Structure，缩写 ST）",
+          a(attention.structure_items).length,
+          "结构对象（ST）是结构级查存一体的输入；当结构级查存一体关闭时，它们仍会用于把当前注意记忆体（CAM）构造成内源刺激（并受 DARL+PARS 预算约束），但不会执行结构级存储。",
+        ),
       ].join(""), "detail-grid"),
       dCard("CAM 明细（入选对象）", rows(a(attention.top_items).slice(0, 12).map((item) => ({
         title: fmtStateTitle(item),
-        desc: `来源 ${item.selected_by || "-"} | focus_boost ${n(item.focus_boost)} | priority ${n(item.attention_priority)}\n对象 ${item.ref_object_id || item.structure_id || item.item_id || "-"} | ER ${n(item.er)} | EV ${n(item.ev)} | CP ${n(item.cp_abs)} | Total ${n(te(item))}\nfatigue ${n(item.fatigue)} | recency ${n(item.recency_gain)} | 更新 ${item.update_count || 0} 次${item.memory_er !== undefined ? `\n抽取: 池前 ER ${n(item.pool_before_er)} / EV ${n(item.pool_before_ev)} -> 抽取 ER ${n(item.memory_er)} / EV ${n(item.memory_ev)} -> 池后 ER ${n(item.pool_after_er)} / EV ${n(item.pool_after_ev)}` : ""}`,
+        desc: `来源 ${item.selected_by || "-"} | focus_boost ${n(item.focus_boost)} | priority ${n(item.attention_priority)}\n对象 ${item.ref_object_id || item.structure_id || item.item_id || "-"} | ER ${n(item.er)} | EV ${n(item.ev)} | CP ${n(item.cp_abs)} | Total ${n(te(item))}\n结构模式 ${item.structure_sequence_mode || "-"} | GoalB 混合结构 ${y(item.goal_b_mixed_structure)}\nfatigue ${n(item.fatigue)} | recency ${n(item.recency_gain)} | 更新 ${item.update_count || 0} 次${item.memory_er !== undefined ? `\n抽取: 池前 ER ${n(item.pool_before_er)} / EV ${n(item.pool_before_ev)} -> 抽取 ER ${n(item.memory_er)} / EV ${n(item.memory_ev)} -> 池后 ER ${n(item.pool_after_er)} / EV ${n(item.pool_after_ev)}` : ""}`,
       })), "当前没有 CAM 入选对象。")),
     ]),
 
-    fBlock("3. 结构级查存一体", "结构级以 ST 粒度做链式查存、局部库存储和残差下沉。", [
+    showStructureLevelPanel
+      ? fBlock("4. 结构级查存一体（Structure-level Retrieval-Storage）", "结构级以结构对象（Structure，缩写 ST）粒度做链式查存、局部库存储和残差下沉。", [
       dCard("命中与预算 / Matches & Budget", [
         card("CAM 结构数", structureLevel.cam_stub_count || 0, `轮次 ${structureLevel.round_count || 0}`),
         card("命中结构组", a(structureLevel.matched_group_ids).length, listOr(structureLevel.matched_group_ids, "无", ", ")),
@@ -2344,19 +2683,29 @@ function flow() {
         title: `${pickGroupedText(group, group.group_id || "-")} | ${group.group_id || "-"}`,
         desc: `必要结构 / Required: ${fmtRefs(group.required_structures)}\n偏置结构 / Bias: ${fmtRefs(group.bias_structures)}\n平均能量画像 / Avg profile ${fmtKvInline(group.avg_energy_profile || {})}\nW ${n(group.base_weight)} | G ${n(group.recent_gain)} | fatigue ${n(group.fatigue)} | match ${group.match_count_total || 0}`,
       })), "本轮没有新建结构组。")),
-    ]),
+      ])
+      : "",
 
-    fBlock("4. 完整刺激合流", "外源刺激与结构级内源片段在这里合流。", [
+    fBlock(
+      "5. 完整刺激合流",
+      "外源刺激与内源刺激在这里合流。内源刺激来源：若启用结构级查存一体，则使用结构级输出的内源片段；若关闭结构级查存一体，则把当前注意记忆体（Current Attention Memory，缩写 CAM）直接构造成内源共现刺激包（并通过内源分辨率预算 DARL+PARS 做成本约束）。",
+      [
       dCard("完整刺激账本", [
         card("显示文本", mergedStimulus.display_text || "空", `packet ${mergedStimulus.packet_id || "-"}`),
         card("ER / EV", `${n(mergedStimulus.total_er)} / ${n(mergedStimulus.total_ev)}`, `flat tokens ${a(mergedStimulus.flat_tokens).length}`),
-        card("刺激组 / 单元", `${a(mergedStimulus.groups).length} / ${a(mergedStimulus.feature_units).length}`, "外源与内源统一工作集"),
+        card(
+          "刺激组 / 单元（预览/总计）",
+          `${mergedStimulusPreviewGroupCount} / ${mergedStimulusPreviewUnitCount}`,
+          `总计 ${mergedStimulusTotalGroupCount} / ${mergedStimulusTotalUnitCount}${mergedStimulusPreviewTruncated ? "（预览已截断）" : ""} | 外源与内源统一工作集`,
+        ),
+        card("来源统计（source_type_counts）", fmtKvInline(mergedStimulus.source_type_counts || {}), "按 unit.source_type 统计，用于检查外源/内源混入与来源比例。"),
       ].join(""), "detail-grid"),
       dCard("刺激组明细", rows(a(mergedStimulus.groups).map(fmtStimulusGroup), "当前完整刺激为空。")),
       dCard("刺激单元明细", rows(a(mergedStimulus.feature_units).map(fmtSensorUnit), "当前没有刺激单元。")),
-    ]),
+    ],
+    ),
 
-    fBlock("5. 缓存中和", "结构级实时生效后，完整刺激先做缓存中和。", [
+    fBlock("6. 缓存中和", "完整刺激在进入刺激级查存一体之前，会先做缓存中和（优先中和事件会消耗对向能量，避免把明显可中和的部分带入学习）。", [
       dCard("中和指标 / Neutralization", [
         card("缓存中和", cache.priority_summary?.priority_neutralized_item_count || 0, `事件 ${a(cache.priority_events).length}`),
         card("包体差额", `ER ${n(cache.priority_summary?.consumed_er)} / EV ${n(cache.priority_summary?.consumed_ev)}`, `tokens ${cache.priority_summary?.input_flat_token_count || 0} -> ${cache.priority_summary?.residual_flat_token_count || 0}`),
@@ -2389,7 +2738,7 @@ function flow() {
   }).join("") : empty("本轮没有刺激级轮次细节 / No stimulus rounds.");
 
   E.flowTimeline.innerHTML += [
-    fBlock("6. 刺激级查存一体", "刺激级按 anchor 局部组做贪婪链式匹配。", [
+    fBlock("7. 刺激级查存一体", "刺激级按 anchor 局部组做贪婪链式匹配。", [
       dCard("匹配与切割", [
         card("轮次", stimulusLevel.round_count || 0, `剩余 SA ${stimulusLevel.remaining_stimulus_sa_count || 0}`),
         card("命中结构", a(stimulusLevel.matched_structure_ids).length, listOr(stimulusLevel.matched_structure_ids, "无", ", ")),
@@ -2402,7 +2751,7 @@ function flow() {
   ].join("");
 
   E.flowTimeline.innerHTML += [
-    fBlock("7. 状态池回写与结构投影", "刺激级结束后再统一回写剩余刺激与结构投影。", [
+    fBlock("8. 状态池回写与结构投影", "刺激级结束后再统一回写剩余刺激与结构投影。", [
       dCard("回写指标", [
         card("新建 / 更新", `${poolApply.apply_result?.new_item_count || 0} / ${poolApply.apply_result?.updated_item_count || 0}`, `合并 ${poolApply.apply_result?.merged_item_count || 0}`),
         card("状态增量", `ΔER ${n(poolApply.apply_result?.state_delta_summary?.total_delta_er)}`, `ΔEV ${n(poolApply.apply_result?.state_delta_summary?.total_delta_ev)}`),
@@ -2417,7 +2766,7 @@ function flow() {
       dCard("运行态结构/记忆投影", rows(a(poolApply.runtime_projection).map(fmtProjectionCard), "本轮没有刺激级运行态投影。")),
     ]),
 
-    fBlock("8. 感应赋能", "EV 传播消耗源 EV，ER 诱发不消耗源 ER。", [
+    fBlock("9. 感应赋能", "EV 传播消耗源 EV，ER 诱发不消耗源 ER。", [
       dCard("传播与诱发", [
         card("源结构数", induction.source_item_count || 0, `权重更新 ${induction.updated_weight_count || 0}`),
         card("EV 传播 / ER 诱发", `${induction.propagated_target_count || 0} / ${induction.induced_target_count || 0}`, `fallback ${y(induction.fallback_used)}`),
@@ -2435,7 +2784,7 @@ function flow() {
   ].join("");
 
   E.flowTimeline.innerHTML += [
-    fBlock("9. 记忆反哺（Memory Feedback）", "记忆赋能池（MAP）条目会把本轮新增 ER/EV 按记忆内部能量分布拆解回流到状态池；情景记忆（EM）本身不会进入运行态。", [
+    fBlock("10. 记忆反哺（Memory Feedback）", "记忆赋能池（MAP）条目会把本轮新增 ER/EV 按记忆内部能量分布拆解回流到状态池；情景记忆（EM）本身不会进入运行态。", [
       dCard("反哺概览（Feedback Summary）", [
         card("本轮反哺（Applied）", memoryFeedback.applied_count || 0, `刺激流 ${memoryFeedbackStimulusCount} | 结构 ${memoryFeedbackStructureCount}`),
         card("回流能量（Returned Energy）", `ER ${n(memoryFeedback.total_feedback_er)} / EV ${n(memoryFeedback.total_feedback_ev)}`, `总 ${n(memoryFeedback.total_feedback_energy)}`),
@@ -2455,11 +2804,25 @@ function flow() {
   ].join("");
 
   E.flowTimeline.innerHTML += [
-    fBlock("10. 认知感受系统（CFS 认知感受信号）", "从状态池与注意力记忆体中生成元认知信号（违和感/正确感/期待/压力/置信度等），并写回运行态供下一 tick（节拍）消费。", [
+    fBlock("11. 认知感受系统（CFS 认知感受信号）", "从状态池与注意力记忆体中生成元认知信号（违和感/正确感/期待/压力/置信度等），并写回运行态供下一 tick（节拍）消费。", [
       dCard("认知感受概览（CFS）", [
         card("信号数", cfsSignals.length, `tick（节拍） ${cfs.meta?.tick_number ?? "-"}`),
         card("写回节点", cfsRuntimeNodes.length, `属性绑定 ${cfsAttrBindings.length}`),
       ].join(""), "detail-grid"),
+      dCard(
+        "运行态认知感受实时状态（绑定属性总量）",
+        rows(
+          Object.values(finalStateSnapshot?.summary?.bound_attribute_energy_totals || {})
+            .filter((row) => String(row?.attribute_name || "").startsWith("cfs_"))
+            .sort((l, r) => (+r?.total_energy || 0) - (+l?.total_energy || 0))
+            .slice(0, 18)
+            .map((row) => ({
+              title: `${row.attribute_name || "-"} · 总 ${n(row.total_energy)}`,
+              desc: `ER ${n(row.total_er)} | EV ${n(row.total_ev)} | 覆盖对象 ${row.item_count ?? 0} | 属性条目 ${row.attribute_count ?? 0}`,
+            })),
+          "当前没有运行态绑定属性汇总（bound_attribute_energy_totals）记录。"
+        )
+      ),
       dCard("认知感受信号（CFS）", rows(cfsSignals.slice().sort((l, r) => (+r?.strength || 0) - (+l?.strength || 0)).slice(0, 16).map((sig) => ({
         title: `${cfsKindLabel(sig.kind)} · ${cfsScopeLabel(sig.scope)} · 强度 ${n(sig.strength)}`,
         desc:
@@ -2474,7 +2837,7 @@ function flow() {
       })), "本轮没有属性绑定写回。")),
     ]),
 
-    fBlock("11. 先天编码脚本管理器（IESM）", "基于状态窗口与认知感受（CFS）生成“先天触发源”，并可输出情绪增量（emotion_update）与行动触发（action_trigger）。情绪增量会在下一步 EMgr（情绪管理器）同 tick 生效。", [
+    fBlock("12. 先天编码脚本管理器（IESM）", "基于状态窗口与认知感受（CFS）生成“先天触发源”，并可输出情绪增量（emotion_update）与行动触发（action_trigger）。情绪增量会在下一步 EMgr（情绪管理器）同 tick 生效。", [
       dCard("脚本概览", [
         card("脚本版本", innateScript.active_scripts?.script_version || "-", `启用脚本 ${a(innateScript.active_scripts?.scripts).length}`),
         card("状态窗口检查", a(innateScript.state_window_checks).length, `聚焦触发源 ${focusDirectivesNew.length}`),
@@ -2528,7 +2891,7 @@ function flow() {
       dCard("审计（IESM）", renderIesmAuditHtml(focusData.audit || {})),
     ]),
 
-    fBlock("12. 情绪管理器（EMgr）与递质通道（NT）", "维护 NT（递质通道）慢变量并输出调制包；输入来自 CFS + IESM 的 emotion_update（脚本增量）。调制会在下一 tick（节拍）影响注意力/学习/行动风格。", [
+    fBlock("13. 情绪管理器（EMgr）与递质通道（NT）", "维护 NT（递质通道）慢变量并输出调制包；输入来自 CFS + IESM 的 emotion_update（脚本增量）。调制会在下一 tick（节拍）影响注意力/学习/行动风格。", [
       dCard("递质概览（NT）", [
         card("奖励/惩罚（rwd/pun）", `${n(emotion.rwd_pun_snapshot?.rwd)} / ${n(emotion.rwd_pun_snapshot?.pun)}`, `全局衰减（global_decay）${n(emotion.decay?.global_decay_ratio)}`),
         card("通道数", Object.keys(emotion.nt_state_after || {}).length, `tick（节拍）${emotion.audit?.tick_id || report.trace_id || "-"}`),
@@ -2542,7 +2905,7 @@ function flow() {
       dCard("调制输出（modulation）", renderEmotionModulationHtml(emotion.modulation || {}, emotion.nt_channel_labels || {})),
     ]),
 
-    fBlock("13. 行动管理模块（Drive 驱动力）", "对候选行动节点更新 Drive（驱动力）并竞争执行；执行时按阈值消耗 Drive（消耗而非清零）。注意：本模块会区分“先天触发（IESM）”与“内驱触发（非 IESM）”，便于审计。", [
+    fBlock("14. 行动管理模块（Drive 驱动力）", "对候选行动节点更新 Drive（驱动力）并竞争执行；执行时按阈值消耗 Drive（消耗而非清零）。注意：本模块会区分“先天触发（IESM）”与“内驱触发（非 IESM）”，便于审计。", [
       dCard("行动概览", [
         card("触发源", actionTriggers.length, "来自 CFS/IESM/复杂度等"),
         card("执行动作", executedActions.length, executedActions.length ? "已发生 Drive 消耗" : "本轮无执行"),
@@ -2582,7 +2945,13 @@ function flow() {
   if (E.recentCycles) {
     E.recentCycles.innerHTML = rows(a(S.d.recent_cycles).map((cycle) => ({
       title: `${cycle.trace_id || "-"} · ${cycle.input_text || "空 Tick"}`,
-      desc: `记忆体 ${cycle.attention_memory_count || 0} | 记忆赋能 ${cycle.memory_activation_applied_count || 0}\n结构级 ${cycle.structure_rounds || 0} 轮 | 刺激级 ${cycle.stimulus_rounds || 0} 轮\n命中结构 ${fmtRefs(cycle.matched_structure_refs)}\n新结构 ${fmtRefs(cycle.new_structure_refs)}\ndelta_ev ${n(cycle.total_delta_ev)} | memory_pool_ev ${n(cycle.memory_activation_total_ev)}`,
+      desc:
+        `记忆体 ${cycle.attention_memory_count || 0} | 记忆赋能 ${cycle.memory_activation_applied_count || 0}\n` +
+        `认知拼接（Cognitive Stitching，缩写 CS）候选 ${cycle.cs_candidate_count ?? "-"} | 动作 ${cycle.cs_action_count ?? "-"} | 退化 ${cycle.cs_degenerated_event_count ?? "-"}\n` +
+        `刺激级查存轮次 ${cycle.stimulus_rounds ?? "-"} | 结构级查存轮次 ${cycle.structure_rounds ?? "-"}\n` +
+        `命中结构 ${fmtRefs(cycle.matched_structure_refs)}\n` +
+        `新结构 ${fmtRefs(cycle.new_structure_refs)}\n` +
+        `delta_ev ${n(cycle.total_delta_ev)} | memory_pool_ev ${n(cycle.memory_activation_total_ev)}`,
     })), "当前没有最近轮次。");
   }
 }
@@ -2612,7 +2981,7 @@ function stateView() {
   if (E.stateItems) {
     E.stateItems.innerHTML = rows(a(snapshot.top_items).slice(0, 24).map((item) => ({
       title: fmtStateTitle(item),
-      desc: `对象 ${item.ref_object_id || item.structure_id || item.item_id || "-"} | 实ER ${n(item.er)} | 虚EV ${n(item.ev)} | CP ${n(item.cp_abs)} | 总 ${n(te(item))}\n疲劳（fatigue）${n(item.fatigue)} | 近因增益（recency）${n(item.recency_gain)} | 更新 ${item.update_count || 0} 次`,
+      desc: `对象 ${item.ref_object_id || item.structure_id || item.item_id || "-"} | 实ER ${n(item.er)} | 虚EV ${n(item.ev)} | CP ${n(item.cp_abs)} | 总 ${n(te(item))}\n结构模式 ${item.structure_sequence_mode || "-"} | GoalB 混合结构 ${y(item.goal_b_mixed_structure)}\n疲劳（fatigue）${n(item.fatigue)} | 近因增益（recency）${n(item.recency_gain)} | 更新 ${item.update_count || 0} 次`,
     })), "当前状态池为空。");
   }
 }
@@ -2746,6 +3115,39 @@ async function act(url, body, message) {
     draw();
   } catch (error) {
     fb(`操作失败: ${error.message}`, true);
+  }
+}
+
+async function idleConsolidate() {
+  try {
+    fb("正在启动闲时巩固/压缩…");
+    const job = (await P("/api/idle_consolidate", { background: true })).data || {};
+    S.r = job;
+    draw();
+    const jobId = String(job.job_id || "").trim();
+    if (!jobId) {
+      fb("启动失败：未获得 job_id。", true);
+      return;
+    }
+    const deadline = Date.now() + 10 * 60 * 1000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 450));
+      const j = (await G(`/api/idle_consolidate_status?job_id=${encodeURIComponent(jobId)}`)).data || {};
+      S.r = j;
+      draw();
+      const status = String(j.status || "");
+      if (status === "completed") {
+        fb("闲时巩固/压缩已完成。");
+        break;
+      }
+      if (status === "failed") {
+        fb(`闲时巩固/压缩失败: ${String(j.error || "-")}`, true);
+        break;
+      }
+    }
+    await refreshDashboard(true);
+  } catch (error) {
+    fb(`闲时巩固/压缩失败: ${error.message}`, true);
   }
 }
 
@@ -8071,5 +8473,8 @@ async function simulateInnateRules() {
     setIrBusy(false);
   }
 }
+
+
+
 
 

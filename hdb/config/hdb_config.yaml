@@ -32,8 +32,32 @@ log_max_file_bytes: 5242880
 # stimulus_level_max_rounds / 刺激级最大轮次
 # Purpose / 作用: Upper bound on greedy stimulus-level retrieval/storage rounds per cycle.
 # Meaning / 意义: Larger values let more anchors continue searching and cutting, but also increase runtime and log volume.
-# Reference / 参考: Default 6. Use 4-10 for most prototype tests.
-stimulus_level_max_rounds: 6
+# Reference / 参考: Default 20. Use 4-20 for most prototype tests (with early-stop enabled).
+stimulus_level_max_rounds: 8
+
+# stimulus_early_stop_enabled / 刺激级早停总开关
+# Purpose / 作用: Enables additional early-termination checks beyond the hard max rounds.
+# Meaning / 意义: When enabled, the stimulus-level loop can stop early if each round makes very little progress and no high-energy stimulus remains.
+# Reference / 参考: Default true.
+stimulus_early_stop_enabled: true
+
+# stimulus_early_stop_patience_rounds / 刺激级早停耐心轮次
+# Purpose / 作用: Requires this many consecutive "low progress" rounds before early-stop triggers.
+# Meaning / 意义: Higher values reduce the chance of stopping due to a single unlucky match; lower values stop faster but may skip weak tails.
+# Reference / 参考: Default 2.
+stimulus_early_stop_patience_rounds: 2
+
+# stimulus_early_stop_min_progress_ratio / 刺激级早停最低进展比
+# Purpose / 作用: Defines "low progress" as consumed_energy / remaining_energy below this ratio.
+# Meaning / 意义: Small values make early-stop less aggressive; larger values stop sooner when the loop keeps nibbling tiny fragments.
+# Reference / 参考: Default 0.03 (3%). Higher values stop sooner when the loop keeps nibbling tiny fragments.
+stimulus_early_stop_min_progress_ratio: 0.10
+
+# stimulus_early_stop_high_energy_unit_threshold / 刺激级早停“高能刺激”阈值
+# Purpose / 作用: If any remaining unit has total_energy >= this threshold, early-stop is suppressed.
+# Meaning / 意义: Prevents early stopping when the residual packet still contains a clearly high-energy stimulus that deserves more processing.
+# Reference / 参考: Default 0.8. Tune with your typical SA energy scale.
+stimulus_early_stop_high_energy_unit_threshold: 0.8
 
 # structure_level_max_rounds / 结构级最大轮次
 # Purpose / 作用: Upper bound on structure-level retrieval/storage rounds per cycle.
@@ -81,7 +105,7 @@ stimulus_competition_curve_power: 1.2
 # Purpose / 作用: Stops further stimulus-level rounds when the remaining packet energy falls below this value.
 # Meaning / 意义: This is one of the main guards against overprocessing weak leftovers.
 # Reference / 参考: Default 0.05.
-stimulus_residual_min_energy: 0.05
+stimulus_residual_min_energy: 0.12
 
 # stimulus_attribute_energy_scale / 属性刺激参与缩放
 # Purpose / 作用: Scales how strongly attribute SA energy contributes in stimulus-level matching and cutting.
@@ -129,7 +153,7 @@ stimulus_anchor_punctuation_penalty: 0.35
 # Purpose / 作用: Ratio used when projecting remaining stimulus content back into runtime structures or packets.
 # Meaning / 意义: Higher values make residual projections stronger and more visible downstream.
 # Reference / 参考: Default 0.35.
-stimulus_residual_projection_ratio: 0.35
+stimulus_residual_projection_ratio: 0.16
 
 # stimulus_atomic_seed_confidence / 原子锚种子置信度
 # Purpose / 作用: Initial confidence assigned to atomic stimulus-derived seed structures.
@@ -259,6 +283,36 @@ structure_anchor_temp_fatigue_step: 0.55
 # Reference / 参考: Default 0.7.
 structure_anchor_temp_fatigue_base: 0.7
 
+# internal_storage_projection_enabled / 本轮新归一化残差是否立即投到内源
+# Purpose / 作用: When a round canonicalizes fresh runtime residual context into local storage, optionally project that context back into the current tick's endogenous stimulus.
+# Meaning / 意义: This keeps "当前激活图景 -> 内源刺激" alive even when no existing structure-group fully matches, preventing the internal channel from collapsing into only a few atomic tail residuals.
+# Reference / 参考: Default true. Turn off only for strict A/B comparisons.
+internal_storage_projection_enabled: true
+
+# internal_storage_projection_ratio / 新归一化残差投影能量比例
+# Purpose / 作用: Scales how much of the canonicalized runtime residual context is emitted as immediate endogenous stimulus in the current round.
+# Meaning / 意义: Higher values make freshly formed internal context more visible, but too high may over-amplify the same runtime material.
+# Reference / 参考: Default 0.32. Recommended 0.20-0.45.
+internal_storage_projection_ratio: 0.14
+
+# internal_storage_projection_max_fragments_per_round / 每轮最多投影多少条新残差片段
+# Purpose / 作用: Caps how many freshly canonicalized residual fragments can be projected in one structure-level round.
+# Meaning / 意义: This bounds immediate internal-context growth while still letting the richest residual context enter the loop.
+# Reference / 参考: Default 1.
+internal_storage_projection_max_fragments_per_round: 1
+
+# internal_attention_landscape_enabled / 是否把注意力激活图景直接投到内源
+# Purpose / 作用: Projects the current attention-modulated active landscape itself into endogenous stimulus, instead of relying only on structure-level residual fragments.
+# Meaning / 意义: This is the closer implementation of “当前激活状态图景经过注意力调制后转成内源刺激”, and helps the internal channel stay thick even when matched groups are scarce.
+# Reference / 参考: Default true.
+internal_attention_landscape_enabled: true
+
+# internal_attention_landscape_ratio / 注意力激活图景投影能量比例
+# Purpose / 作用: Scales the immediate endogenous projection strength of the current attention landscape.
+# Meaning / 意义: Larger values make the active landscape more behaviorally visible; too high may over-amplify what attention already selected.
+# Reference / 参考: Default 0.22. Recommended 0.12-0.35.
+internal_attention_landscape_ratio: 0.08
+
 # structure_anchor_temp_fatigue_rho_gain / 结构锚点临时疲劳 rho 增益
 # Purpose / 作用: Additional gain factor in the temporary fatigue curve for anchors.
 # Meaning / 意义: Higher values make repeated anchor reuse fade faster.
@@ -318,6 +372,155 @@ structure_common_group_confidence: 0.82
 # Meaning / 意义: Helps bound local memory metadata growth.
 # Reference / 参考: Default 128.
 structure_memory_table_soft_limit: 128
+
+# ---- Internal Residual Resolution / 内源残差分辨率（DARL + PARS）----
+#
+# Goal / 目标：
+# - 解决“少量超长结构”在结构级残差投射时导致的内源性刺激元爆炸（几千/上万 SA）。
+# - 维持闭环：内源性刺激仍进入刺激级查存与后续流程，只是以“有限分辨率”参与。
+# - 软限制：用预算（detail budget）而不是硬阈值；并引入“临时疲劳 + 逐步还原细节”机制。
+#
+# Note / 注意：
+# - 这里不做任何语义硬编码（不区分工具词/高频词/标点等），只使用运行时信号与结构长度成本。
+# - ADR（肾上腺素）由 Observatory 在运行时注入到 HDB config（_runtime_nt_snapshot），用于提升预算。
+
+# internal_resolution_enabled / 启用内源残差分辨率
+# Purpose / 作用: Enable DARL+PARS to compress structure-level residual fragments before turning them into internal SA.
+# Meaning / 意义: When enabled, internal residual SA count is budgeted per tick.
+# Reference / 参考: Default true.
+internal_resolution_enabled: true
+
+# internal_resolution_detail_budget_base / 基础 detail 预算
+# Purpose / 作用: Base budget (in "detail units" ~= internal SA count) for internal residual per tick.
+# Meaning / 意义: Larger values reveal more details but cost more.
+# Reference / 参考: Default 128.
+internal_resolution_detail_budget_base: 56
+
+# internal_resolution_detail_budget_adr_gain / ADR 提升预算增益
+# Purpose / 作用: ADR (0~1) temporarily raises the budget: budget = base + adr_gain * ADR.
+# Meaning / 意义: Models "alertness / throughput" increase under stress or urgency.
+# Reference / 参考: Default 128.
+internal_resolution_detail_budget_adr_gain: 56
+
+# internal_resolution_min_detail_per_structure / 每个结构最小保留细节
+# Purpose / 作用: Minimum number of units kept per residual structure (when possible).
+# Meaning / 意义: Prevents "energy disappears" and preserves loop continuity.
+# Reference / 参考: Default 4.
+internal_resolution_min_detail_per_structure: 4
+
+# internal_resolution_max_detail_per_structure / 每个结构最大保留细节
+# Purpose / 作用: Base maximum units allowed per structure (can be softly expanded by focus credit).
+# Meaning / 意义: Prevents a single structure from monopolizing the whole budget.
+# Reference / 参考: Default 64.
+internal_resolution_max_detail_per_structure: 40
+
+# internal_resolution_temperature / 分配温度（预留）
+# Purpose / 作用: Temperature for softer/more even allocation (reserved for future upgrade).
+# Meaning / 意义: Higher -> flatter allocation; lower -> more winner-take-more.
+# Reference / 参考: Default 1.0.
+internal_resolution_temperature: 1.0
+
+# internal_resolution_value_weight_total_energy / 价值权重：总能量
+internal_resolution_value_weight_total_energy: 1.0
+
+# internal_resolution_value_weight_cp_abs / 价值权重：|CP|
+internal_resolution_value_weight_cp_abs: 0.35
+
+# internal_resolution_value_weight_runtime_weight / 价值权重：运行权重
+internal_resolution_value_weight_runtime_weight: 0.15
+
+# internal_resolution_cost_cap / 成本上限（单位数软封顶）
+# Purpose / 作用: Soft cap on length cost in allocation math (avoid ultra-huge structures dominating).
+# Reference / 参考: Default 512.
+internal_resolution_cost_cap: 512
+
+# internal_resolution_flat_unit_cap_per_structure / 单结构“可处理原始单位数”硬上限
+# Purpose / 作用: Hard cap on how many units we will materialize/consider per structure per tick.
+# Meaning / 意义:
+# - This is a resource fuse: it does NOT disable internal fragments, and it still
+#   supports progressive revealing via cursor.
+# - Lower values reduce worst-case spikes of internal_resolution_raw_unit_count and CPU time.
+# Reference / 参考: Suggested 256~512.
+internal_resolution_flat_unit_cap_per_structure: 240
+
+# internal_resolution_max_structures_per_tick / 每 tick 进入分辨率分配的结构上限
+# Purpose / 作用: Limit how many residual structures participate in the allocator per tick.
+# Meaning / 意义:
+# - Prevents “many medium-sized fragments” from making raw_unit_count explode even when per-structure cap exists.
+# - Works together with flat_unit_cap_per_structure to bound worst-case work.
+# Reference / 参考: Suggested 4~8 (MVP often starts with 4).
+internal_resolution_max_structures_per_tick: 5
+
+# internal_resolution_rich_structure_ratio / 富内容结构保留比例
+# Purpose / 作用: When max_structures_per_tick truncates candidates, reserve part of
+# the slots for richer residual fragments instead of only keeping the cheapest ones.
+# Meaning / 意义:
+# - Helps avoid "all selected fragments are 1-unit atoms", which makes endogenous
+#   stimulus become too thin even when there are larger residual structures available.
+# - Keeps the selection non-semantic: it only looks at runtime value and unit count.
+# Reference / 参考: Suggested 0.25~0.5. Default 0.4.
+internal_resolution_rich_structure_ratio: 0.4
+
+# internal_resolution_rich_structure_min_units / 富内容结构最小单位数
+# Purpose / 作用: Only structures with at least this many units can enter the
+# "rich fragment" reserved slots.
+# Reference / 参考: Suggested 4~12. Default 6.
+internal_resolution_rich_structure_min_units: 6
+
+# internal_resolution_structure_richness_power / 富内容结构规模增益幂次
+# Purpose / 作用: Controls how strongly larger residual fragments are favored when
+# competing for the reserved rich slots.
+# Meaning / 意义:
+# - 0 means no size bonus.
+# - 0.5 means sqrt(unit_count), a mild bias.
+# - 1 means linear bias, usually too aggressive for the prototype.
+# Reference / 参考: Suggested 0.35~0.65. Default 0.5.
+internal_resolution_structure_richness_power: 0.5
+
+# internal_resolution_stable_anchor_count / 稳定锚点数量
+# Purpose / 作用: Minimum anchor units per structure to keep identity stable.
+# Reference / 参考: Default 1.
+internal_resolution_stable_anchor_count: 1
+
+# internal_resolution_anchor_ratio / 锚点比例
+# Purpose / 作用: Anchor ratio inside each structure's K units. (anchors = max(stable_count, round(K*ratio))).
+# Reference / 参考: Default 0.35.
+internal_resolution_anchor_ratio: 0.35
+
+# internal_resolution_detail_fatigue_window / 细节疲劳窗口
+# Purpose / 作用: Sliding window size for recently selected unit signatures (per structure).
+# Meaning / 意义: Enables temporary fatigue so repeated retrieval rotates details.
+# Reference / 参考: Default 64.
+internal_resolution_detail_fatigue_window: 64
+
+# internal_resolution_detail_fatigue_start / 疲劳开始阈值（次数）
+internal_resolution_detail_fatigue_start: 2.0
+
+# internal_resolution_detail_fatigue_full / 疲劳满阈值（次数）
+internal_resolution_detail_fatigue_full: 8.0
+
+# internal_resolution_detail_fatigue_min_scale / 疲劳最小缩放
+internal_resolution_detail_fatigue_min_scale: 0.0
+
+# internal_resolution_detail_fatigue_beta / 疲劳曲线幂次
+internal_resolution_detail_fatigue_beta: 1.0
+
+# internal_resolution_focus_credit_enabled / 启用持续聚焦加分（分辨率逐步恢复）
+internal_resolution_focus_credit_enabled: true
+
+# internal_resolution_focus_credit_gain / 每 tick 聚焦加分增量
+internal_resolution_focus_credit_gain: 0.35
+
+# internal_resolution_focus_credit_decay / 每 tick 聚焦加分保留系数
+internal_resolution_focus_credit_decay: 0.9
+
+# internal_resolution_focus_credit_cap / 聚焦加分上限
+internal_resolution_focus_credit_cap: 6.0
+
+# internal_resolution_focus_credit_gamma / 聚焦加分强度系数
+# Purpose / 作用: Translates focus credit into extra resolution multiplier.
+# Reference / 参考: Default 0.25.
+internal_resolution_focus_credit_gamma: 0.25
 
 # min_cut_common_length / 最小共同切割长度
 # Purpose / 作用: Minimum common-part length required before cut-based common structure creation is allowed.
@@ -386,6 +589,12 @@ memory_activation_prune_threshold_ev: 0.03
 # Meaning / 意义: Larger values preserve richer provenance, but increase snapshot size.
 # Reference / 参考: Default 24.
 memory_activation_event_history_limit: 24
+
+# runtime_memory_display_max_chars / Runtime EM display character limit
+# Purpose / ??: Limits EM display labels projected into StatePool/CAM/UI while preserving full episodic memory material in HDB.
+# Meaning / ??: Prevents very long tick memories from flooding attention displays; this is display/runtime hygiene, not memory deletion.
+# Reference / ??: Default 240.
+runtime_memory_display_max_chars: 240
 
 # ---- Weight, Recency, Fatigue / 权重、近因增益、疲劳 ----
 
@@ -505,6 +714,12 @@ energy_decay_half_life_ms_ev: 30000
 
 # ---- Pointer Fallback And Numeric Buckets / 指针回退与数值桶 ----
 
+# enable_goal_b_char_sa_string_mode / 使用字符串方案
+# Purpose / 作用: Switches HDB runtime matching/display helpers into the Goal B char-SA string mode.
+# Meaning / 含义: Strings are order-sensitive relations over character SA, not separate energy-bearing SA objects.
+# Reference / 参考: Default false in HDB; Observatory may override it for Goal B experiments.
+enable_goal_b_char_sa_string_mode: false
+
 # enable_pointer_fallback / 是否启用指针回退
 # Purpose / 作用: Enables bounded fallback lookup when the direct pointer path does not yield enough candidates.
 # Meaning / 意义: Keeps the main path local and O(1)-like when possible, while still allowing controlled recovery.
@@ -516,6 +731,12 @@ enable_pointer_fallback: true
 # Meaning / 意义: Prevents fallback from turning into uncontrolled broad search.
 # Reference / 参考: Default 32.
 fallback_lookup_max_candidates: 32
+
+# enable_cs_event_structures_in_stimulus_retrieval / 刺激级检索是否允许 CS 事件结构参与候选
+# Purpose / 作用: Whether to allow `sub_type=cognitive_stitching_event_structure` as candidates during
+# stimulus-level retrieval. Default is OFF to avoid polluting normal matching; CS events are primarily
+# persisted during idle consolidation for traceability and later opt-in experimentation.
+enable_cs_event_structures_in_stimulus_retrieval: false
 
 # fallback_scan_hard_limit / 回退扫描硬上限
 # Purpose / 作用: Hard cap on how many records fallback may scan when recovering candidates.

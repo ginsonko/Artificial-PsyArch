@@ -12,6 +12,7 @@
 # ======================================================================
 
 # enabled / 是否启用时间感受器
+
 enabled: true
 
 # ---- 时间基准（wallclock vs tick）----
@@ -23,7 +24,7 @@ enabled: true
 # 说明：
 # - tick_id 需形如 "cycle_0003"；如果解析失败则回退到 wallclock。
 # - tick 模式下建议使用 tick_buckets（单位：tick），而不是秒桶。
-time_basis: "wallclock"   # "wallclock" | "tick"
+time_basis: wallclock
 
 # tick_interval_sec / tick 的近似秒数（仅用于展示/兼容，不参与 tick 模式的计算）
 tick_interval_sec: 1.0
@@ -42,56 +43,56 @@ tick_interval_sec: 1.0
 # - min_sec/max_sec: 区间（用于说明与可视化；不直接参与计算）
 # - center_sec: 区间中心（用于双桶插值）
 buckets:
-  - id: "0_25s"
-    label_zh: "约 0.5 秒内"
-    min_sec: 0.0
-    max_sec: 0.5
-    center_sec: 0.25
-  - id: "1s"
-    label_zh: "约 1 秒"
-    min_sec: 0.5
-    max_sec: 1.5
-    center_sec: 1.0
-  - id: "3_25s"
-    label_zh: "约 3 秒"
-    min_sec: 1.5
-    max_sec: 5.0
-    center_sec: 3.25
-  - id: "10s"
-    label_zh: "约 10 秒"
-    min_sec: 5.0
-    max_sec: 15.0
-    center_sec: 10.0
-  - id: "37_5s"
-    label_zh: "约 30~60 秒"
-    min_sec: 15.0
-    max_sec: 60.0
-    center_sec: 37.5
-  - id: "180s"
-    label_zh: "约 3 分钟"
-    min_sec: 60.0
-    max_sec: 300.0
-    center_sec: 180.0
-  - id: "1050s"
-    label_zh: "约 15 分钟"
-    min_sec: 300.0
-    max_sec: 1800.0
-    center_sec: 1050.0
-  - id: "3600s"
-    label_zh: "约 1 小时"
-    min_sec: 1800.0
-    max_sec: 7200.0
-    center_sec: 3600.0
-  - id: "21600s"
-    label_zh: "约 6 小时"
-    min_sec: 7200.0
-    max_sec: 86400.0
-    center_sec: 21600.0
-  - id: "86400s"
-    label_zh: "约 1 天"
-    min_sec: 86400.0
-    max_sec: 172800.0
-    center_sec: 86400.0
+- id: 0_25s
+  label_zh: 约 0.5 秒内
+  min_sec: 0.0
+  max_sec: 0.5
+  center_sec: 0.25
+- id: 1s
+  label_zh: 约 1 秒
+  min_sec: 0.5
+  max_sec: 1.5
+  center_sec: 1.0
+- id: 3_25s
+  label_zh: 约 3 秒
+  min_sec: 1.5
+  max_sec: 5.0
+  center_sec: 3.25
+- id: 10s
+  label_zh: 约 10 秒
+  min_sec: 5.0
+  max_sec: 15.0
+  center_sec: 10.0
+- id: 37_5s
+  label_zh: 约 30~60 秒
+  min_sec: 15.0
+  max_sec: 60.0
+  center_sec: 37.5
+- id: 180s
+  label_zh: 约 3 分钟
+  min_sec: 60.0
+  max_sec: 300.0
+  center_sec: 180.0
+- id: 1050s
+  label_zh: 约 15 分钟
+  min_sec: 300.0
+  max_sec: 1800.0
+  center_sec: 1050.0
+- id: 3600s
+  label_zh: 约 1 小时
+  min_sec: 1800.0
+  max_sec: 7200.0
+  center_sec: 3600.0
+- id: 21600s
+  label_zh: 约 6 小时
+  min_sec: 7200.0
+  max_sec: 86400.0
+  center_sec: 21600.0
+- id: 86400s
+  label_zh: 约 1 天
+  min_sec: 86400.0
+  max_sec: 172800.0
+  center_sec: 86400.0
 
 # ---- Tick 时间桶（用于 time_basis=tick）----
 #
@@ -99,70 +100,70 @@ buckets:
 # - 这些桶的 center_sec/min_sec/max_sec 字段在 tick 模式下解释为 “tick 单位”，字段名保留是为了减少结构变更。
 # - label_zh 中明确使用 tick 以避免对外展示误解。
 tick_buckets:
-  - id: "0_5t"
-    label_zh: "约 1 tick 内"
-    min_sec: 0.0
-    max_sec: 1.0
-    center_sec: 0.5
-  - id: "1_5t"
-    label_zh: "约 2 tick"
-    min_sec: 1.0
-    max_sec: 2.0
-    center_sec: 1.5
-  - id: "3t"
-    label_zh: "约 3 tick"
-    min_sec: 2.0
-    max_sec: 4.0
-    center_sec: 3.0
-  - id: "6t"
-    label_zh: "约 6 tick"
-    min_sec: 4.0
-    max_sec: 8.0
-    center_sec: 6.0
-  - id: "12t"
-    label_zh: "约 12 tick"
-    min_sec: 8.0
-    max_sec: 16.0
-    center_sec: 12.0
-  - id: "24t"
-    label_zh: "约 24 tick"
-    min_sec: 16.0
-    max_sec: 32.0
-    center_sec: 24.0
-  - id: "48t"
-    label_zh: "约 48 tick"
-    min_sec: 32.0
-    max_sec: 64.0
-    center_sec: 48.0
-  - id: "96t"
-    label_zh: "约 96 tick"
-    min_sec: 64.0
-    max_sec: 128.0
-    center_sec: 96.0
+- id: 0_5t
+  label_zh: 约 1 tick 内
+  min_sec: 0.0
+  max_sec: 1.0
+  center_sec: 0.5
+- id: 1_5t
+  label_zh: 约 2 tick
+  min_sec: 1.0
+  max_sec: 2.0
+  center_sec: 1.5
+- id: 3t
+  label_zh: 约 3 tick
+  min_sec: 2.0
+  max_sec: 4.0
+  center_sec: 3.0
+- id: 6t
+  label_zh: 约 6 tick
+  min_sec: 4.0
+  max_sec: 8.0
+  center_sec: 6.0
+- id: 12t
+  label_zh: 约 12 tick
+  min_sec: 8.0
+  max_sec: 16.0
+  center_sec: 12.0
+- id: 24t
+  label_zh: 约 24 tick
+  min_sec: 16.0
+  max_sec: 32.0
+  center_sec: 24.0
+- id: 48t
+  label_zh: 约 48 tick
+  min_sec: 32.0
+  max_sec: 64.0
+  center_sec: 48.0
+- id: 96t
+  label_zh: 约 96 tick
+  min_sec: 64.0
+  max_sec: 128.0
+  center_sec: 96.0
 
 # ---- 输入来源与赋能策略（MVP）----
 #
 # source_mode:
 # - memory_activation_snapshot: 使用 HDB 的记忆赋能池（MAP）快照作为“被重新接触到的记忆”列表
 #   这是最贴合理论 4.2.6.3 的 MVP：记忆被赋能 -> 依据时间戳生成时间感受。
-source_mode: "memory_activation_snapshot"
+source_mode: memory_activation_snapshot
 
 # memory_top_k / 取 MAP 前 K 个候选计算时间感受（避免过重）
-memory_top_k: 16
+memory_top_k: 12
 
 # energy_gain_ratio / 时间感受赋能比例
 # 解释：每条记忆的 total_energy 会乘以该比例，作为“时间感受能量”基础。
 # 经验：0.10~0.35 之间较易在状态池中形成可观测但不过分压制的时间桶节点。
-energy_gain_ratio: 0.18
+energy_gain_ratio: 0.14
 
 # base_energy_source / 时间感受赋能的能量来源口径
 # - total_energy: 使用 MAP 条目的当前总能量（更“粘”，可能导致时间感受每 tick 都持续出现）
 # - last_delta_energy: 使用 MAP 条目的最近增量（更贴近“被重新接触/被赋能”的语义，且更不易形成回忆死循环）
-base_energy_source: "last_delta_energy"
+base_energy_source: last_delta_energy
 
 # energy_key / 把时间感受赋给状态池节点的能量通道
 # 建议：时间感受属于内源生成，优先使用 EV（虚能量）。
-energy_key: "ev"   # "ev" 或 "er"
+energy_key: ev
 
 # min_bucket_energy / 单次赋能小于该值则不写入（避免噪音）
 min_bucket_energy: 0.02
@@ -174,23 +175,35 @@ min_bucket_energy: 0.02
 # - 延迟赋能对象 = 时间感受绑定的锚点对象（target_item）。
 # - 任务表容量有限；同一锚点默认只保留 1 条任务；重复注册会累计权重并刷新 due。
 # - 执行后会进入短时疲劳窗口，避免立即重复触发。
-enable_delayed_tasks: false
+enable_delayed_tasks: true
+
 delayed_task_capacity: 48
+
 # 注册阈值：锚点“本 tick 获得能量”的近似值（用 time_sensor.attribute_bindings.target_delta_energy 估计）
-delayed_task_register_min_delta_energy: 0.20
+delayed_task_register_min_delta_energy: 0.3
+
 # 执行后疲劳窗口（tick / wallclock 都给一个，按 time_basis 选择）
-delayed_task_fatigue_ticks: 2
+delayed_task_fatigue_ticks: 4
+
 delayed_task_fatigue_ms: 800
+
 # 最小间隔（避免 0 或过小导致同 tick/紧邻 tick 重复触发）
 delayed_task_min_interval_sec: 0.5
-delayed_task_min_interval_ticks: 1
+
+delayed_task_min_interval_ticks: 2
+
 # 到期容忍（用于“接近目标间隔”）
 delayed_task_due_tolerance_sec: 0.15
+
 delayed_task_due_tolerance_ticks: 0
+
 # 到期时对锚点赋能映射（MVP：按任务权重映射到 delta_ev/delta_er）
-delayed_task_energy_key: "ev"   # "ev" | "er"
-delayed_task_energy_ratio: 0.80
+delayed_task_energy_key: ev
+
+delayed_task_energy_ratio: 0.65
+
 delayed_task_energy_min: 0.06
+
 delayed_task_energy_max: 0.85
 
 # ---- 输出开关（可同时启用）----
@@ -216,10 +229,10 @@ enable_bind_attribute: true
 # - both: 两者都启用
 # 说明：当 enable_bucket_nodes / enable_bind_attribute 任何一个被显式设置为 bool 时，
 #      output_mode 仅作为未设置那一项的回退来源。
-output_mode: "bind_attribute"
+output_mode: bind_attribute
 
 # attribute_name / 绑定到对象上的属性名（用于前端展示与规则 contains_text 匹配）
-attribute_name: "时间感受"
+attribute_name: 时间感受
 
 # max_bind_targets_per_memory / 每条记忆最多绑定到几个“能量波峰对象”
 max_bind_targets_per_memory: 2
@@ -231,12 +244,14 @@ peak_keep_ratio: 0.72
 max_total_bindings: 12
 
 # node_id_prefix / 状态池时间桶节点的 ref_object_id 前缀
-node_id_prefix: "sa_time_bucket_"
+node_id_prefix: sa_time_bucket_
 
 # node_display_prefix / 状态池时间桶节点的展示前缀（用于 contains_text 匹配）
-node_display_prefix: "时间感受"
+node_display_prefix: 时间感受
 
 # ---- 日志 ----
-log_dir: ""
+log_dir: ''
+
 log_max_file_bytes: 5242880
+
 stdout_fallback_when_log_fail: true

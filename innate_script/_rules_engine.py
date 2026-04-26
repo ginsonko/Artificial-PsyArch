@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 AP 先天规则引擎（先天编码脚本管理器 IESM 的规则引擎）
 ===================================================
@@ -81,7 +81,14 @@ DEFAULT_DOC: dict[str, Any] = {
             "focus_boost": 0.9,
             "deduplicate_by": "target_ref_object_id",
             "max_directives_per_rule": 8,
-        }
+        },
+        "habituation": {
+            "enabled": True,
+            "window_ticks": 10,
+            "start_total": 6.0,
+            "full_total": 18.0,
+            "min_scale": 0.0,
+        },
     },
     "rules": [],
 }
@@ -320,7 +327,9 @@ def _normalize_rule(raw_rule: dict[str, Any], *, rule_path: str) -> tuple[dict[s
 
     # "ui" is reserved for editor metadata (graph layout, etc.). It is ignored by the engine.
     # "ui" 字段用于前端编辑器元信息（例如图形布局），规则引擎会忽略它。
-    allowed = {"id", "title", "enabled", "phase", "priority", "cooldown_ticks", "when", "then", "note", "ui"}
+    # "habituation" is rule-local habituation/attenuation config (optional).
+    # "habituation" 是规则级“习惯化/疲劳衰减”配置（可选）。
+    allowed = {"id", "title", "enabled", "phase", "priority", "cooldown_ticks", "when", "then", "note", "ui", "habituation"}
     for key in raw_rule.keys():
         if key not in allowed:
             warnings.append(_warn(f"{rule_path}.{key}", f"unknown rule key: {key}", f"未知规则字段：{key}"))
@@ -375,6 +384,14 @@ def _normalize_rule(raw_rule: dict[str, Any], *, rule_path: str) -> tuple[dict[s
     errors.extend(a_errors)
     warnings.extend(a_warnings)
 
+    hab_raw = raw_rule.get("habituation")
+    hab: dict[str, Any] | None = None
+    if hab_raw is not None:
+        if isinstance(hab_raw, dict):
+            hab = copy.deepcopy(hab_raw) if hab_raw else None
+        else:
+            warnings.append(_warn(f"{rule_path}.habituation", "habituation should be a dict", "habituation 应为 dict"))
+
     normalized: dict[str, Any] = {
         "id": rid,
         "title": title,
@@ -388,6 +405,8 @@ def _normalize_rule(raw_rule: dict[str, Any], *, rule_path: str) -> tuple[dict[s
     }
     if ui is not None:
         normalized["ui"] = ui
+    if hab is not None:
+        normalized["habituation"] = hab
 
     return (normalized, errors, warnings)
 
@@ -1700,6 +1719,7 @@ def _execute_due_scheduled_actions(
     now_ms: int,
     context: dict[str, Any],
     focus_defaults: dict[str, Any],
+    habituation_defaults: dict[str, Any],
     allow_timer: bool,
     runtime_cfs_signals: list[dict[str, Any]],
     out_emitted_cfs_signals: list[dict[str, Any]],
@@ -1752,8 +1772,20 @@ def _execute_due_scheduled_actions(
             # 延时块没有新的 matches，仅携带当时捕获的 vars。
             matches = _empty_matches()
             matches["vars"] = dict(vars_ctx)
-            out_audit_notes.append(f"[IESM] execute scheduled actions: rule_id={rid} due_tick={entry.get('due_tick')}")
-            _execute_actions(
+            hab_cfg = _resolve_habituation_config(defaults=habituation_defaults, rule={})
+            hab_enabled = bool(hab_cfg.get("enabled", True))
+            hab_scale, hab_hist_sum = _habituation_scale(
+                runtime_state=runtime_state,
+                rule_id=rid,
+                tick_index=int(tick_index),
+                config=hab_cfg,
+                enabled=hab_enabled,
+            )
+
+            out_audit_notes.append(
+                f"[IESM] execute scheduled actions: rule_id={rid} due_tick={entry.get('due_tick')} hab_scale={round(float(hab_scale), 4)} hist_sum={round(float(hab_hist_sum), 4)}"
+            )
+            raw_energy = _execute_actions(
                 actions=actions,
                 rule_id=rid,
                 rule_title=str(entry.get("rule_title", "") or ""),
@@ -1779,7 +1811,9 @@ def _execute_due_scheduled_actions(
                 out_pool_effects=out_pool_effects,
                 out_audit_notes=out_audit_notes,
                 depth=0,
+                effect_scale=float(hab_scale),
             )
+            _habituation_record_energy(runtime_state=runtime_state, rule_id=rid, tick_index=int(tick_index), raw_energy=float(raw_energy or 0.0))
         except Exception as exc:
             out_audit_notes.append(f"[IESM] scheduled action execution error: {exc}")
 
@@ -1811,7 +1845,8 @@ def _execute_actions(
     out_pool_effects: list[dict[str, Any]],
     out_audit_notes: list[str],
     depth: int,
-) -> None:
+    effect_scale: float = 1.0,
+) -> float:
     """
     Execute normalized actions list.
     执行规范化后的动作列表。
@@ -1824,7 +1859,7 @@ def _execute_actions(
     """
     if depth > _MAX_ACTION_EXEC_DEPTH:
         out_audit_notes.append(f"[IESM] action depth overflow: rule_id={rule_id} depth={depth}")
-        return
+        return 0.0
 
     if not isinstance(vars_ctx, dict):
         vars_ctx = {}
@@ -1834,6 +1869,14 @@ def _execute_actions(
         runtime_cfs_signals = []
     if not isinstance(out_emitted_cfs_signals, list):
         out_emitted_cfs_signals = []
+
+    try:
+        scale = float(effect_scale)
+    except Exception:
+        scale = 1.0
+    # Soft clamp: allow 0~1 only.
+    scale = max(0.0, min(1.0, float(scale)))
+    raw_energy_total = 0.0
 
     for idx, action in enumerate(list(actions or [])):
         if not isinstance(action, dict) or not action:
@@ -1892,7 +1935,11 @@ def _execute_actions(
                     if dv is None:
                         out_audit_notes.append(f"[IESM] emotion_update invalid delta: ch={ch_name} value={delta_raw}")
                         continue
-                    out_emotion_updates[ch_name] = float(out_emotion_updates.get(ch_name, 0.0) or 0.0) + float(dv)
+                    raw_energy_total += abs(float(dv))
+                    dv2 = float(dv) * float(scale)
+                    if abs(dv2) < 1e-12:
+                        continue
+                    out_emotion_updates[ch_name] = float(out_emotion_updates.get(ch_name, 0.0) or 0.0) + float(dv2)
                 continue
 
             if key == "action_trigger":
@@ -1914,6 +1961,18 @@ def _execute_actions(
                     # 去掉控制字段，避免下游把它们当作行动参数。
                     for k in ["from", "match_policy", "max_triggers", "max", "policy"]:
                         payload2.pop(k, None)
+
+                    # Habituation: scale the action drive gain (soft attenuation).
+                    raw_gain = _coerce_float_maybe(payload2.get("gain"))
+                    if raw_gain is not None:
+                        raw_energy_total_local = abs(float(raw_gain))
+                        # update outer scope accumulator
+                        nonlocal raw_energy_total
+                        raw_energy_total += raw_energy_total_local
+                        scaled_gain = float(raw_gain) * float(scale)
+                        if abs(float(scaled_gain)) < 1e-12:
+                            return
+                        payload2["gain"] = round(float(scaled_gain), 8)
 
                     action_id = str(payload2.get("action_id", "") or payload2.get("id", "") or "").strip()
                     if not action_id:
@@ -2047,12 +2106,14 @@ def _execute_actions(
                 # - 必须从 raw_spec 读取 bind_attribute（而不是从已经渲染过模板的 payload 读取），
                 #   否则会把 {{{strength}}} 过早替换成空字符串，导致前端只能看到“违和感:”。
                 raw_payload = raw_spec if isinstance(raw_spec, dict) else {}
-                bind_attr_raw = raw_payload.get("bind_attribute", raw_payload.get("bind_attr", None))
-                bind_attr_spec: dict[str, Any] | None = None
-                if isinstance(bind_attr_raw, dict):
-                    bind_attr_spec = dict(bind_attr_raw)
+                bind_attr_raw = raw_payload.get("bind_attributes", raw_payload.get("bind_attribute", raw_payload.get("bind_attr", None)))
+                bind_attr_specs: list[dict[str, Any]] = []
+                if isinstance(bind_attr_raw, list):
+                    bind_attr_specs = [dict(x) for x in bind_attr_raw if isinstance(x, dict)]
+                elif isinstance(bind_attr_raw, dict):
+                    bind_attr_specs = [dict(bind_attr_raw)]
                 elif bool(bind_attr_raw) is True:
-                    bind_attr_spec = {}
+                    bind_attr_specs = [{}]
 
                 # Determine emission records / 选择输出记录集合
                 records: list[dict[str, Any]] = []
@@ -2087,102 +2148,125 @@ def _execute_actions(
                         local_vars["match_ref_object_type"] = str(target.get("target_ref_object_type", local_vars.get("match_ref_object_type", "")) or "")
                         local_vars["match_display"] = str(target.get("target_display", local_vars.get("match_display", "")) or "")
 
-                    strength = _resolve_cfs_strength(strength_spec, vars_ctx=local_vars)
-                    if strength < float(min_strength):
-                        continue
-
-                    target_obj: dict[str, Any] = {}
-                    if scope != "global":
-                        t = payload.get("target") if isinstance(payload.get("target"), dict) else {}
-                        t_from = str(t.get("from", "match") or "match").strip() or "match"
-                        if t_from in {"match", "metric_match", "cfs_match"}:
-                            target_obj = {
-                                "target_ref_object_id": str(local_vars.get("match_ref_object_id", "") or ""),
-                                "target_ref_object_type": str(local_vars.get("match_ref_object_type", "") or ""),
-                                "target_item_id": str(local_vars.get("match_item_id", "") or ""),
-                                "target_display": str(local_vars.get("match_display", "") or ""),
-                            }
-                        elif t_from == "specific_ref":
-                            target_obj = {
-                                "target_ref_object_id": str(t.get("ref_object_id", "") or ""),
-                                "target_ref_object_type": str(t.get("ref_object_type", "") or ""),
-                                "target_item_id": "",
-                                "target_display": str(t.get("display", "") or ""),
-                            }
-                        elif t_from == "specific_item":
-                            target_obj = {
-                                "target_ref_object_id": "",
-                                "target_ref_object_type": "",
-                                "target_item_id": str(t.get("item_id", "") or ""),
-                                "target_display": str(t.get("display", "") or ""),
-                            }
-
-                        # Best-effort: resolve a human-readable target_display from context.pool_items.
-                        # 尽力从上下文 pool_items 中补全可读的 target_display（避免前端只看到 st_000123 这种 ID）。
+                strength = _resolve_cfs_strength(strength_spec, vars_ctx=local_vars)
+                # Raw energy record first (pre-habituation).
+                if strength < float(min_strength):
+                    # Below min_strength: treat it as a "quiet" state.
+                    #
+                    # IMPORTANT:
+                    # Some rules set `emit_gate.bind_attribute_even_when_skipped=true` so that
+                    # runtime-bound attributes (CFS) can be refreshed/decayed even when we
+                    # do not emit an event (to avoid "peak only" observability).
+                    #
+                    # If we `continue` here, the gate's bind refresh never happens, which
+                    # breaks "dissonance drop -> correctness rise" and makes live_total
+                    # curves stick to stale values until half-life decay catches up.
+                    if bind_attr_specs and emit_gate and bool(emit_gate.get("bind_attribute_even_when_skipped", False)) and scope != "global":
                         try:
-                            td = str(target_obj.get("target_display", "") or "").strip()
-                            rid2 = str(target_obj.get("target_ref_object_id", "") or "").strip()
-                            rty2 = str(target_obj.get("target_ref_object_type", "") or "").strip()
-                            iid2 = str(target_obj.get("target_item_id", "") or "").strip()
-                            if not td and (rid2 or iid2):
-                                for it in list(context.get("pool_items", []) or []):
-                                    if not isinstance(it, dict):
-                                        continue
-                                    if rid2:
-                                        ref_id3 = str(it.get("ref_object_id", "") or "")
-                                        ref_ty3 = str(it.get("ref_object_type", "") or "")
-                                        aliases = [str(x) for x in (it.get("ref_alias_ids", []) or []) if str(x)]
-                                        # Match by primary ref_id or any alias ref_id.
-                                        # 同时支持主 ref_id 与别名 ref_id（语义合并后 SA/ST 可能互为别名）。
-                                        hit_primary = (ref_id3 == rid2)
-                                        hit_alias = (rid2 in aliases)
-                                        if hit_primary:
-                                            # If the target specifies a type, respect it for primary-id match.
-                                            # 若目标指定了 type，则主 id 命中时仍尊重 type（防止误配）。
-                                            if rty2 and ref_ty3 != rty2:
-                                                continue
-                                        elif not hit_alias:
-                                            pass
-                                        else:
-                                            # Alias hit: accept even if type differs (it is the same semantic object).
-                                            # 别名命中：即便 type 不同也接受（它们是同一语义对象）。
-                                            pass
+                            _emit_bind_attribute(strength_value=float(strength))
+                        except Exception:
+                            pass
+                    continue
+                raw_energy_total += float(strength)
+                strength = float(strength) * float(scale)
+                if abs(float(strength)) < 1e-12:
+                    # Fully suppressed by habituation: skip both emit + bind.
+                    if capture_as:
+                        vars_ctx[capture_as] = float(0.0)
+                    continue
+                target_obj: dict[str, Any] = {}
+                if scope != "global":
+                    t = payload.get("target") if isinstance(payload.get("target"), dict) else {}
+                    t_from = str(t.get("from", "match") or "match").strip() or "match"
+                    if t_from in {"match", "metric_match", "cfs_match"}:
+                        target_obj = {
+                            "target_ref_object_id": str(local_vars.get("match_ref_object_id", "") or ""),
+                            "target_ref_object_type": str(local_vars.get("match_ref_object_type", "") or ""),
+                            "target_item_id": str(local_vars.get("match_item_id", "") or ""),
+                            "target_display": str(local_vars.get("match_display", "") or ""),
+                        }
+                    elif t_from == "specific_ref":
+                        target_obj = {
+                            "target_ref_object_id": str(t.get("ref_object_id", "") or ""),
+                            "target_ref_object_type": str(t.get("ref_object_type", "") or ""),
+                            "target_item_id": "",
+                            "target_display": str(t.get("display", "") or ""),
+                        }
+                    elif t_from == "specific_item":
+                        target_obj = {
+                            "target_ref_object_id": "",
+                            "target_ref_object_type": "",
+                            "target_item_id": str(t.get("item_id", "") or ""),
+                            "target_display": str(t.get("display", "") or ""),
+                        }
 
-                                        if hit_primary or hit_alias:
-                                            # Prefer real object content display, not debug detail.
-                                            # 优先展示对象内容（display），不要优先用 display_detail（往往是 runtime_attrs 摘要）。
-                                            td2 = str(it.get("display", "") or it.get("display_detail", "") or "").strip()
-                                            if td2:
-                                                target_obj["target_display"] = td2
-                                                break
-                                    if iid2 and str(it.get("item_id", "") or "") == iid2:
+                    # Best-effort: resolve a human-readable target_display from context.pool_items.
+                    # 尽力从上下文 pool_items 中补全可读的 target_display（避免前端只看到 st_000123 这种 ID）。
+                    try:
+                        td = str(target_obj.get("target_display", "") or "").strip()
+                        rid2 = str(target_obj.get("target_ref_object_id", "") or "").strip()
+                        rty2 = str(target_obj.get("target_ref_object_type", "") or "").strip()
+                        iid2 = str(target_obj.get("target_item_id", "") or "").strip()
+                        if not td and (rid2 or iid2):
+                            for it in list(context.get("pool_items", []) or []):
+                                if not isinstance(it, dict):
+                                    continue
+                                if rid2:
+                                    ref_id3 = str(it.get("ref_object_id", "") or "")
+                                    ref_ty3 = str(it.get("ref_object_type", "") or "")
+                                    aliases = [str(x) for x in (it.get("ref_alias_ids", []) or []) if str(x)]
+                                    # Match by primary ref_id or any alias ref_id.
+                                    # 同时支持主 ref_id 与别名 ref_id（语义合并后 SA/ST 可能互为别名）。
+                                    hit_primary = (ref_id3 == rid2)
+                                    hit_alias = (rid2 in aliases)
+                                    if hit_primary:
+                                        # If the target specifies a type, respect it for primary-id match.
+                                        # 若目标指定了 type，则主 id 命中时仍尊重 type（防止误配）。
+                                        if rty2 and ref_ty3 != rty2:
+                                            continue
+                                    elif not hit_alias:
+                                        pass
+                                    else:
+                                        # Alias hit: accept even if type differs (it is the same semantic object).
+                                        # 别名命中：即便 type 不同也接受（它们是同一语义对象）。
+                                        pass
+
+                                    if hit_primary or hit_alias:
                                         # Prefer real object content display, not debug detail.
                                         # 优先展示对象内容（display），不要优先用 display_detail（往往是 runtime_attrs 摘要）。
                                         td2 = str(it.get("display", "") or it.get("display_detail", "") or "").strip()
                                         if td2:
                                             target_obj["target_display"] = td2
                                             break
-                                # Final fallback: use id as display (still better than empty string).
-                                if not str(target_obj.get("target_display", "") or "").strip():
-                                    target_obj["target_display"] = rid2 or iid2
-                        except Exception:
-                            pass
+                                if iid2 and str(it.get("item_id", "") or "") == iid2:
+                                    # Prefer real object content display, not debug detail.
+                                    # 优先展示对象内容（display），不要优先用 display_detail（往往是 runtime_attrs 摘要）。
+                                    td2 = str(it.get("display", "") or it.get("display_detail", "") or "").strip()
+                                    if td2:
+                                        target_obj["target_display"] = td2
+                                        break
+                            # Final fallback: use id as display (still better than empty string).
+                            if not str(target_obj.get("target_display", "") or "").strip():
+                                target_obj["target_display"] = rid2 or iid2
+                    except Exception:
+                        pass
 
-                        if not str(target_obj.get("target_ref_object_id", "") or "") and not str(target_obj.get("target_item_id", "") or ""):
-                            # Object-scoped signals need a target; skip if missing.
-                            # 对象型信号必须有目标，否则跳过。
-                            continue
+                    if not str(target_obj.get("target_ref_object_id", "") or "") and not str(target_obj.get("target_item_id", "") or ""):
+                        # Object-scoped signals need a target; skip if missing.
+                        # 对象型信号必须有目标，否则跳过。
+                        continue
 
-                    # Helper: bind as attribute SA (optional).
-                    # 帮助函数：把该认知感受以“属性刺激元（attribute SA）”绑定到目标对象上（可选）。
-                    def _emit_bind_attribute(*, strength_value: float) -> None:
-                        if not bind_attr_spec or scope == "global":
-                            return
-                        # Render templates inside bind_attr_spec using local_vars.
-                        # 在 bind_attribute 配置中支持模板（例如 {{{match_display}}} / {{{strength}}}）。
-                        lv = dict(local_vars)
-                        lv["strength"] = float(strength_value)
-                        lv["cfs_kind"] = str(kind)
+                # Helper: bind as attribute SA (optional).
+                # 帮助函数：把该认知感受以“属性刺激元（attribute SA）”绑定到目标对象上（可选）。
+                def _emit_bind_attribute(*, strength_value: float) -> None:
+                    if not bind_attr_specs or scope == "global":
+                        return
+                    # Render templates inside bind_attr_spec using local_vars.
+                    # ? bind_attribute ?????????? {{{match_display}}} / {{{strength}}}??
+                    lv = dict(local_vars)
+                    lv["strength"] = float(strength_value)
+                    lv["cfs_kind"] = str(kind)
+                    for bind_index, bind_attr_spec in enumerate(bind_attr_specs):
                         rendered = _render_templates_in_data(bind_attr_spec, vars_ctx=lv)
                         rendered = rendered if isinstance(rendered, dict) else {}
 
@@ -2194,7 +2278,7 @@ def _execute_actions(
                             attr_value = float(strength_value)
 
                         raw_text = str(rendered.get("raw", "") or f"{attr_name}:{round(attr_value, 6)}")
-                        display_text = str(rendered.get("display", "") or f"认知感受（CFS）:{kind}:{round(attr_value, 3)}")
+                        display_text = str(rendered.get("display", "") or f"绑定CFS属性:{kind}:{round(attr_value, 3)}")
                         value_type = str(rendered.get("value_type", "") or "numerical")
                         modality = str(rendered.get("modality", "") or "internal")
                         er = _coerce_float_maybe(rendered.get("er", 0.0))
@@ -2204,7 +2288,7 @@ def _execute_actions(
                         out_pool_effects.append(
                             {
                                 "effect_type": "pool_bind_attribute",
-                                "effect_id": f"pba_cfs_{rule_id}_{now_ms}_{idx}_{emitted}",
+                                "effect_id": f"pba_cfs_{rule_id}_{now_ms}_{idx}_{emitted}_{bind_index}",
                                 "created_at": int(now_ms),
                                 "trace_id": str(trace_id or ""),
                                 "tick_id": str(tick_id or ""),
@@ -2231,104 +2315,120 @@ def _execute_actions(
                             }
                         )
 
-                    # Emit gating / 输出门控（避免每 tick 重复刷屏）
-                    # ------------------------------------------------
-                    # 设计目标（对齐理论与可用性需求）：我们可以“每 tick 都计算”，但不必“每 tick 都输出一条 CFS 事件”。
-                    # - 对人类验收：减少前端刷屏，突出真正变化
-                    # - 对系统：仍保持持续检测（强度变化会推动输出；绑定属性可持续刷新）
-                    raw_payload = raw_spec if isinstance(raw_spec, dict) else {}
-                    emit_gate_raw = raw_payload.get("emit_gate", raw_payload.get("gate"))
-                    emit_gate = dict(emit_gate_raw) if isinstance(emit_gate_raw, dict) else None
-                    skip_emit = False
-                    if emit_gate:
-                        mode2 = str(emit_gate.get("mode", "strength_delta") or "strength_delta").strip() or "strength_delta"
-                        min_delta2 = _coerce_float_maybe(emit_gate.get("min_delta", emit_gate.get("epsilon", 0.0)))
-                        min_delta2_f = float(min_delta2 or 0.0)
-                        min_interval2 = _coerce_int_maybe(emit_gate.get("min_interval_ticks", emit_gate.get("min_interval", 0)))
-                        min_interval2_i = max(0, int(min_interval2 or 0))
-                        key_by2 = str(emit_gate.get("key_by", "rule_kind_target") or "rule_kind_target").strip() or "rule_kind_target"
-                        also_bind = bool(emit_gate.get("bind_attribute_even_when_skipped", emit_gate.get("also_bind_attribute", True)))
-
-                        # Build a stable gate key.
-                        # 构造稳定 gate key：默认按 rule+kind+target 去重。
-                        tkey = "global"
-                        if scope != "global":
-                            tkey = str(target_obj.get("target_ref_object_id", "") or target_obj.get("target_item_id", "") or "")
-                        if key_by2 in {"rule_kind", "rule+kind"}:
-                            gate_key = f"{rule_id}::{kind}"
-                        elif key_by2 in {"kind_target", "kind+target"}:
-                            gate_key = f"{kind}::{tkey}"
-                        elif key_by2 in {"kind"}:
-                            gate_key = f"{kind}"
-                        else:
-                            gate_key = f"{rule_id}::{kind}::{tkey}"
-
-                        gate_store = runtime_state.setdefault("cfs_emit_gate", {})
-                        if not isinstance(gate_store, dict):
-                            gate_store = {}
-                            runtime_state["cfs_emit_gate"] = gate_store
-
-                        last = gate_store.get(gate_key) if isinstance(gate_store.get(gate_key), dict) else None
-                        if last:
-                            last_tick = int(last.get("tick_index", -999999) or -999999)
-                            last_strength = float(_coerce_float_maybe(last.get("strength", 0.0)) or 0.0)
-                            if min_interval2_i > 0 and (int(tick_index) - last_tick) < min_interval2_i:
-                                skip_emit = True
-                            elif mode2 in {"strength_delta", "delta", "strength_change", "changed"}:
-                                if abs(float(strength) - float(last_strength)) < float(min_delta2_f):
-                                    skip_emit = True
-
-                        if skip_emit:
-                            # Even when gated, we can still refresh the bound attribute to keep the state "alive".
-                            # 即便门控跳过事件输出，也可以继续刷新绑定属性，保持“感受存在”的运行态语义。
-                            if also_bind:
-                                _emit_bind_attribute(strength_value=float(strength))
-                            # Optional: still expose computed strength as a variable.
-                            if capture_as:
-                                vars_ctx[capture_as] = float(strength)
-                            continue
-
-                    sig = {
-                        "kind": kind,
-                        "scope": "global" if scope == "global" else "object",
-                        "strength": round(float(strength), 8),
-                        "target": target_obj,
-                        "created_at": int(now_ms),
-                        "trace_id": str(trace_id or ""),
-                        "tick_id": str(tick_id or ""),
-                        "rule_id": str(rule_id or ""),
-                        "rule_title": str(rule_title or ""),
-                        "rule_phase": str(rule_phase or ""),
-                        "rule_priority": int(rule_priority),
-                        "reasons": reasons,
-                        "evidence": dict(evidence) if isinstance(evidence, dict) else {},
-                    }
-
-                    runtime_cfs_signals.append(sig)
-                    out_emitted_cfs_signals.append(sig)
-                    emitted += 1
-
-                    # Bind as attribute SA (optional).
-                    # 绑定为属性刺激元（可选）。
-                    _emit_bind_attribute(strength_value=float(strength))
-
-                    # Update gate store only when actually emitted.
-                    # 仅在真正输出事件时更新 gate store（否则无法累积变化触发下一次输出）。
-                    if emit_gate:
-                        try:
-                            gate_store[gate_key] = {"tick_index": int(tick_index), "strength": float(strength)}
-                        except Exception:
-                            pass
-
-                    # Optional: expose computed strength as a variable for subsequent actions.
-                    # 可选：把计算后的强度注册为变量，供同一条规则后续动作使用。
+                if strength < float(min_strength):
+                    # Softly suppressed: keep the bound attribute (if any) refreshed, but skip event emission.
+                    if bind_attr_specs and scope != "global":
+                        _emit_bind_attribute(strength_value=float(strength))
                     if capture_as:
                         vars_ctx[capture_as] = float(strength)
+                    continue
+
+                # Emit gating / 输出门控（避免每 tick 重复刷屏）
+                # ------------------------------------------------
+                # 设计目标（对齐理论与可用性需求）：我们可以“每 tick 都计算”，但不必“每 tick 都输出一条 CFS 事件”。
+                # - 对人类验收：减少前端刷屏，突出真正变化
+                # - 对系统：仍保持持续检测（强度变化会推动输出；绑定属性可持续刷新）
+                raw_payload = raw_spec if isinstance(raw_spec, dict) else {}
+                emit_gate_raw = raw_payload.get("emit_gate", raw_payload.get("gate"))
+                emit_gate = dict(emit_gate_raw) if isinstance(emit_gate_raw, dict) else None
+                skip_emit = False
+                if emit_gate:
+                    mode2 = str(emit_gate.get("mode", "strength_delta") or "strength_delta").strip() or "strength_delta"
+                    min_delta2 = _coerce_float_maybe(emit_gate.get("min_delta", emit_gate.get("epsilon", 0.0)))
+                    min_delta2_f = float(min_delta2 or 0.0)
+                    min_interval2 = _coerce_int_maybe(emit_gate.get("min_interval_ticks", emit_gate.get("min_interval", 0)))
+                    min_interval2_i = max(0, int(min_interval2 or 0))
+                    key_by2 = str(emit_gate.get("key_by", "rule_kind_target") or "rule_kind_target").strip() or "rule_kind_target"
+                    also_bind = bool(emit_gate.get("bind_attribute_even_when_skipped", emit_gate.get("also_bind_attribute", True)))
+
+                    # Build a stable gate key.
+                    # 构造稳定 gate key：默认按 rule+kind+target 去重。
+                    tkey = "global"
+                    if scope != "global":
+                        tkey = str(target_obj.get("target_ref_object_id", "") or target_obj.get("target_item_id", "") or "")
+                    if key_by2 in {"rule_kind", "rule+kind"}:
+                        gate_key = f"{rule_id}::{kind}"
+                    elif key_by2 in {"kind_target", "kind+target"}:
+                        gate_key = f"{kind}::{tkey}"
+                    elif key_by2 in {"kind"}:
+                        gate_key = f"{kind}"
+                    else:
+                        gate_key = f"{rule_id}::{kind}::{tkey}"
+
+                    gate_store = runtime_state.setdefault("cfs_emit_gate", {})
+                    if not isinstance(gate_store, dict):
+                        gate_store = {}
+                        runtime_state["cfs_emit_gate"] = gate_store
+
+                    last = gate_store.get(gate_key) if isinstance(gate_store.get(gate_key), dict) else None
+                    if last:
+                        last_tick = int(last.get("tick_index", -999999) or -999999)
+                        last_strength = float(_coerce_float_maybe(last.get("strength", 0.0)) or 0.0)
+                        if min_interval2_i > 0 and (int(tick_index) - last_tick) < min_interval2_i:
+                            skip_emit = True
+                        elif mode2 in {"strength_delta", "delta", "strength_change", "changed"}:
+                            if abs(float(strength) - float(last_strength)) < float(min_delta2_f):
+                                skip_emit = True
+
+                    if skip_emit:
+                        # Even when gated, we can still refresh the bound attribute to keep the state "alive".
+                        # 即便门控跳过事件输出，也可以继续刷新绑定属性，保持“感受存在”的运行态语义。
+                        if also_bind:
+                            _emit_bind_attribute(strength_value=float(strength))
+                        # Optional: still expose computed strength as a variable.
+                        if capture_as:
+                            vars_ctx[capture_as] = float(strength)
+                        continue
+
+                sig = {
+                    "kind": kind,
+                    "scope": "global" if scope == "global" else "object",
+                    "strength": round(float(strength), 8),
+                    "target": target_obj,
+                    "created_at": int(now_ms),
+                    "trace_id": str(trace_id or ""),
+                    "tick_id": str(tick_id or ""),
+                    "rule_id": str(rule_id or ""),
+                    "rule_title": str(rule_title or ""),
+                    "rule_phase": str(rule_phase or ""),
+                    "rule_priority": int(rule_priority),
+                    "reasons": reasons,
+                    "evidence": dict(evidence) if isinstance(evidence, dict) else {},
+                }
+
+                runtime_cfs_signals.append(sig)
+                out_emitted_cfs_signals.append(sig)
+                emitted += 1
+
+                # Bind as attribute SA (optional).
+                # 绑定为属性刺激元（可选）。
+                _emit_bind_attribute(strength_value=float(strength))
+
+                # Update gate store only when actually emitted.
+                # 仅在真正输出事件时更新 gate store（否则无法累积变化触发下一次输出）。
+                if emit_gate:
+                    try:
+                        gate_store[gate_key] = {"tick_index": int(tick_index), "strength": float(strength)}
+                    except Exception:
+                        pass
+
+                # Optional: expose computed strength as a variable for subsequent actions.
+                # 可选：把计算后的强度注册为变量，供同一条规则后续动作使用。
+                if capture_as:
+                    vars_ctx[capture_as] = float(strength)
 
                 continue
 
             if key == "pool_energy":
                 payload = spec if isinstance(spec, dict) else {}
+                # Try to scale common numeric delta fields only (do not touch selectors/text).
+                for k in ["delta_er", "delta_ev", "delta_energy", "delta_cp", "delta_cp_abs"]:
+                    if k in payload:
+                        v0 = _coerce_float_maybe(payload.get(k))
+                        if v0 is None:
+                            continue
+                        raw_energy_total += abs(float(v0))
+                        payload[k] = round(float(v0) * float(scale), 8)
                 out_pool_effects.append(
                     {
                         "effect_type": "pool_energy",
@@ -2347,6 +2447,27 @@ def _execute_actions(
 
             if key == "pool_bind_attribute":
                 payload = spec if isinstance(spec, dict) else {}
+                # Scale attribute_value if present (soft attenuation).
+                try:
+                    attr = payload.get("attribute") if isinstance(payload.get("attribute"), dict) else None
+                    if attr is not None:
+                        attr2 = dict(attr)
+                        if "attribute_value" in attr2:
+                            v0 = _coerce_float_maybe(attr2.get("attribute_value"))
+                            if v0 is not None:
+                                raw_energy_total += abs(float(v0))
+                                attr2["attribute_value"] = round(float(v0) * float(scale), 8)
+                        if "er" in attr2:
+                            v0 = _coerce_float_maybe(attr2.get("er"))
+                            if v0 is not None:
+                                attr2["er"] = round(float(v0) * float(scale), 8)
+                        if "ev" in attr2:
+                            v0 = _coerce_float_maybe(attr2.get("ev"))
+                            if v0 is not None:
+                                attr2["ev"] = round(float(v0) * float(scale), 8)
+                        payload["attribute"] = attr2
+                except Exception:
+                    pass
                 out_pool_effects.append(
                     {
                         "effect_type": "pool_bind_attribute",
@@ -2438,7 +2559,7 @@ def _execute_actions(
                     )
                 except Exception as exc:
                     out_audit_notes.append(f"[IESM] branch when error: {exc}")
-                    _execute_actions(
+                    raw_energy_total += _execute_actions(
                         actions=on_error_actions,
                         rule_id=rule_id,
                         rule_title=rule_title,
@@ -2464,6 +2585,7 @@ def _execute_actions(
                         out_pool_effects=out_pool_effects,
                         out_audit_notes=out_audit_notes,
                         depth=depth + 1,
+                        effect_scale=float(scale),
                     )
                     continue
 
@@ -2472,7 +2594,7 @@ def _execute_actions(
                     _merge_matches(merged, matches)
                     _merge_matches(merged, m2)
                     merged_vars = merged.get("vars", {}) if isinstance(merged.get("vars"), dict) else dict(vars_ctx)
-                    _execute_actions(
+                    raw_energy_total += _execute_actions(
                         actions=then_actions,
                         rule_id=rule_id,
                         rule_title=rule_title,
@@ -2498,9 +2620,10 @@ def _execute_actions(
                         out_pool_effects=out_pool_effects,
                         out_audit_notes=out_audit_notes,
                         depth=depth + 1,
+                        effect_scale=float(scale),
                     )
                 else:
-                    _execute_actions(
+                    raw_energy_total += _execute_actions(
                         actions=else_actions,
                         rule_id=rule_id,
                         rule_title=rule_title,
@@ -2526,6 +2649,7 @@ def _execute_actions(
                         out_pool_effects=out_pool_effects,
                         out_audit_notes=out_audit_notes,
                         depth=depth + 1,
+                        effect_scale=float(scale),
                     )
                 continue
 
@@ -2540,6 +2664,8 @@ def _execute_actions(
             out_audit_notes.append(f"[IESM] unknown action type ignored: {key} (rule_id={rule_id})")
         except Exception as exc:
             out_audit_notes.append(f"[IESM] action error: key={key} rule_id={rule_id} err={exc}")
+
+    return float(raw_energy_total)
 
 
 def _coerce_float_maybe(value: Any) -> float | None:
@@ -2655,8 +2781,14 @@ def _select_pool_items(*, context: dict[str, Any], selector: dict[str, Any] | No
     """
     items = list(context.get("pool_items", []) or [])
     items = [it for it in items if isinstance(it, dict)]
+
+    # Context-only pseudo types should be opt-in; otherwise they can accidentally match
+    # unrelated selector.contains_text rules.
+    # 上下文伪类型默认不参与 selector 匹配，必须显式 ref_object_types 才允许。
+    context_only_types = {"input"}
+
     if not selector or not isinstance(selector, dict):
-        return items
+        return [it for it in items if str(it.get("ref_object_type", "")) not in context_only_types]
 
     mode = str(selector.get("mode", "all") or "all").strip()
 
@@ -2666,6 +2798,12 @@ def _select_pool_items(*, context: dict[str, Any], selector: dict[str, Any] | No
         allow_types = {str(x) for x in ref_types if str(x)}
         if allow_types:
             items = [it for it in items if str(it.get("ref_object_type", "")) in allow_types]
+        else:
+            # Explicitly provided an empty list: keep default behavior (exclude context-only).
+            items = [it for it in items if str(it.get("ref_object_type", "")) not in context_only_types]
+    else:
+        # No type filter: exclude context-only types by default.
+        items = [it for it in items if str(it.get("ref_object_type", "")) not in context_only_types]
 
     # Optional numeric filters / 可选数值过滤（selector.where）
     # ---------------------------------------------------------
@@ -3477,6 +3615,48 @@ def _eval_metric_when(
         if not items:
             return False, {}, [{"zh": "item 指标：选择器无对象", "en": "item metric: empty selector"}]
 
+        if tail in {"exists", "presence", "present"}:
+            matched_records = []
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                item_id = str(it.get("item_id", "") or "")
+                if not item_id:
+                    continue
+                matched_records.append(
+                    {
+                        "metric": metric,
+                        "mode": mode,
+                        "value": 1.0,
+                        "item_id": item_id,
+                        "ref_object_id": str(it.get("ref_object_id", "") or ""),
+                        "ref_object_type": str(it.get("ref_object_type", "") or ""),
+                        "display": str(it.get("display", "") or ""),
+                        "time_bucket_ref_object_id": str(it.get("time_bucket_ref_object_id", "") or ""),
+                        "time_bucket_center_sec": it.get("time_bucket_center_sec", None),
+                        "time_basis": str(it.get("time_basis", "") or ""),
+                        "time_bucket_unit": str(it.get("time_bucket_unit", "") or ""),
+                    }
+                )
+            ok = _numeric_compare(value=float(len(matched_records)), op=op, threshold=threshold, vmin=vmin, vmax=vmax, epsilon=epsilon)
+            if not ok:
+                return False, {}, [{"zh": f"item presence ???: {metric}", "en": f"item presence not matched: {metric}"}]
+            primary = matched_records[0]
+            m = _empty_matches()
+            m["metric"] = matched_records[:24]
+            m["vars"]["match_metric"] = metric
+            m["vars"]["match_value"] = float(len(matched_records))
+            m["vars"]["match_item_id"] = str(primary.get("item_id", "") or "")
+            m["vars"]["match_ref_object_id"] = str(primary.get("ref_object_id", "") or "")
+            m["vars"]["match_ref_object_type"] = str(primary.get("ref_object_type", "") or "")
+            m["vars"]["match_display"] = str(primary.get("display", "") or "")
+            if capture_as:
+                m["vars"][capture_as] = m["vars"]["match_value"]
+                m["vars"][f"{capture_as}_item_id"] = m["vars"]["match_item_id"]
+                m["vars"][f"{capture_as}_ref_object_id"] = m["vars"]["match_ref_object_id"]
+                m["vars"][f"{capture_as}_ref_object_type"] = m["vars"]["match_ref_object_type"]
+            return True, m, [{"zh": f"item presence ??: {metric} x{len(matched_records)}", "en": f"item presence matched: {metric} x{len(matched_records)}"}]
+
         matched_records: list[dict[str, Any]] = []
         for it in items:
             if not isinstance(it, dict):
@@ -3686,6 +3866,172 @@ def parse_tick_index(tick_id: str) -> int | None:
         return None
 
 
+def _resolve_habituation_config(*, defaults: dict[str, Any], rule: dict[str, Any]) -> dict[str, Any]:
+    """
+    Resolve habituation config for a rule.
+
+    Design intent:
+    - No hard-coded word/punctuation hacks.
+    - A generic, learnable "resource attenuation" mechanism: repeated strong outputs
+      from the same innate rule will gradually weaken (habit), then recover when
+      the rule stops firing.
+
+    Supported shape:
+      - defaults["habituation"]: global defaults for all rules
+      - rule["habituation"]: optional per-rule override
+    """
+    base = defaults.get("habituation", {}) if isinstance(defaults.get("habituation", {}), dict) else {}
+    override = rule.get("habituation", {}) if isinstance(rule.get("habituation", {}), dict) else {}
+    merged = dict(base)
+    merged.update(override)
+
+    # Normalize minimal fields (keep extra keys for forward-compatibility).
+    enabled = bool(merged.get("enabled", True))
+    try:
+        window_ticks = int(merged.get("window_ticks", 10) or 10)
+    except Exception:
+        window_ticks = 10
+    window_ticks = max(1, min(10_000, window_ticks))
+    try:
+        start_total = float(merged.get("start_total", 6.0))
+    except Exception:
+        start_total = 6.0
+    try:
+        full_total = float(merged.get("full_total", 18.0))
+    except Exception:
+        full_total = 18.0
+    try:
+        min_scale = float(merged.get("min_scale", 0.0))
+    except Exception:
+        min_scale = 0.0
+    min_scale = max(0.0, min(1.0, min_scale))
+    if full_total <= start_total + 1e-9:
+        full_total = start_total + 1.0
+
+    merged["enabled"] = enabled
+    merged["window_ticks"] = window_ticks
+    merged["start_total"] = float(start_total)
+    merged["full_total"] = float(full_total)
+    merged["min_scale"] = float(min_scale)
+    return merged
+
+
+def _habituation_get_rule_store(runtime_state: dict[str, Any]) -> dict[str, Any]:
+    st = runtime_state.setdefault("habituation", {})
+    if not isinstance(st, dict):
+        st = {}
+        runtime_state["habituation"] = st
+    rules = st.setdefault("rules", {})
+    if not isinstance(rules, dict):
+        rules = {}
+        st["rules"] = rules
+    return rules
+
+
+def _habituation_window_sum(
+    *,
+    runtime_state: dict[str, Any],
+    rule_id: str,
+    tick_index: int,
+    window_ticks: int,
+) -> float:
+    rules = _habituation_get_rule_store(runtime_state)
+    entry = rules.get(rule_id) if isinstance(rules.get(rule_id), dict) else {}
+    events = entry.get("events") if isinstance(entry.get("events"), list) else []
+
+    s = 0.0
+    kept: list[dict[str, Any]] = []
+    # Keep a little more than the active window to avoid unbounded growth.
+    prune_before = int(tick_index) - max(int(window_ticks) * 6, 64)
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        try:
+            t = int(ev.get("tick_index", -999999) or -999999)
+        except Exception:
+            t = -999999
+        if t < prune_before:
+            continue
+        kept.append(ev)
+        if (int(tick_index) - t) < int(window_ticks):
+            try:
+                s += max(0.0, float(ev.get("energy", 0.0) or 0.0))
+            except Exception:
+                pass
+
+    # Persist pruned list back (best-effort).
+    try:
+        entry = dict(entry) if isinstance(entry, dict) else {}
+        entry["events"] = kept[-2000:]
+        rules[rule_id] = entry
+    except Exception:
+        pass
+    return float(s)
+
+
+def _habituation_scale(
+    *,
+    runtime_state: dict[str, Any],
+    rule_id: str,
+    tick_index: int,
+    config: dict[str, Any],
+    enabled: bool,
+) -> tuple[float, float]:
+    if not enabled:
+        return 1.0, 0.0
+    window_ticks = int(config.get("window_ticks", 10) or 10)
+    start_total = float(config.get("start_total", 6.0) or 6.0)
+    full_total = float(config.get("full_total", 18.0) or 18.0)
+    min_scale = float(config.get("min_scale", 0.0) or 0.0)
+
+    hist_sum = _habituation_window_sum(runtime_state=runtime_state, rule_id=rule_id, tick_index=tick_index, window_ticks=window_ticks)
+
+    if hist_sum <= start_total:
+        return 1.0, float(hist_sum)
+    if hist_sum >= full_total:
+        return float(min_scale), float(hist_sum)
+
+    # Linear attenuation between thresholds (soft limit).
+    ratio = (hist_sum - start_total) / max(1e-9, (full_total - start_total))
+    scale = 1.0 - max(0.0, min(1.0, ratio))
+    scale = max(float(min_scale), min(1.0, float(scale)))
+    return float(scale), float(hist_sum)
+
+
+def _habituation_record_energy(
+    *,
+    runtime_state: dict[str, Any],
+    rule_id: str,
+    tick_index: int,
+    raw_energy: float,
+) -> None:
+    rules = _habituation_get_rule_store(runtime_state)
+    entry = rules.get(rule_id) if isinstance(rules.get(rule_id), dict) else {}
+    events = entry.get("events") if isinstance(entry.get("events"), list) else []
+    try:
+        events.append({"tick_index": int(tick_index), "energy": float(max(0.0, raw_energy))})
+    except Exception:
+        return
+    # prune (same policy as window_sum)
+    prune_before = int(tick_index) - 512
+    kept: list[dict[str, Any]] = []
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        try:
+            t = int(ev.get("tick_index", -999999) or -999999)
+        except Exception:
+            t = -999999
+        if t < prune_before:
+            continue
+        kept.append(ev)
+    entry2 = dict(entry) if isinstance(entry, dict) else {}
+    entry2["events"] = kept[-2000:]
+    entry2["last_tick_index"] = int(tick_index)
+    entry2["last_raw_energy"] = float(max(0.0, raw_energy))
+    rules[rule_id] = entry2
+
+
 def evaluate_rules(
     *,
     doc: dict[str, Any],
@@ -3714,6 +4060,7 @@ def evaluate_rules(
     enabled = bool(doc.get("enabled", True))
     defaults = doc.get("defaults", {}) if isinstance(doc.get("defaults", {}), dict) else {}
     focus_defaults = defaults.get("focus_directive", {}) if isinstance(defaults.get("focus_directive", {}), dict) else {}
+    habituation_defaults = defaults
 
     # Runtime CFS list / 运行态 CFS 列表：规则可通过 cfs_emit 扩展它，供同 tick 后续规则消费。
     cfs_signals = list(cfs_signals or [])
@@ -3763,6 +4110,7 @@ def evaluate_rules(
             now_ms=now_ms,
             context=context,
             focus_defaults=focus_defaults,
+            habituation_defaults=habituation_defaults,
             allow_timer=bool(allow_timer),
             runtime_cfs_signals=cfs_signals,
             out_emitted_cfs_signals=emitted_cfs_signals,
@@ -3793,6 +4141,16 @@ def evaluate_rules(
             continue
         rule_phase = str(rule.get("phase", "directives") or "directives").strip() or "directives"
 
+        hab_cfg = _resolve_habituation_config(defaults=habituation_defaults, rule=rule)
+        hab_enabled = bool(hab_cfg.get("enabled", True)) and bool(provided_tick_index)
+        hab_scale, hab_hist_sum = _habituation_scale(
+            runtime_state=runtime_state,
+            rule_id=rid,
+            tick_index=tick_index,
+            config=hab_cfg,
+            enabled=hab_enabled,
+        )
+
         cooldown_ticks = int(rule.get("cooldown_ticks", 0) or 0)
         if cooldown_ticks > 0:
             prev = last_fired.get(rid)
@@ -3821,6 +4179,8 @@ def evaluate_rules(
                 "priority": int(rule.get("priority", 0) or 0),
                 "note": str(rule.get("note", "") or ""),
                 "matched_at": now_ms,
+                "habituation_scale": round(float(hab_scale), 6),
+                "habituation_hist_sum": round(float(hab_hist_sum), 6),
                 "reasons": reasons,
                 "match_summary": _summarize_matches(matches),
             }
@@ -3829,7 +4189,7 @@ def evaluate_rules(
         # Execute actions with template variables.
         # 执行动作（支持模板变量 {{{var}}}）。
         vars_ctx = matches.get("vars", {}) if isinstance(matches.get("vars"), dict) else {}
-        _execute_actions(
+        raw_energy = _execute_actions(
             actions=list(rule.get("then") or []),
             rule_id=rid,
             rule_title=str(rule.get("title", "") or ""),
@@ -3855,7 +4215,10 @@ def evaluate_rules(
             out_pool_effects=pool_effects,
             out_audit_notes=audit_notes,
             depth=0,
+            effect_scale=float(hab_scale),
         )
+        if hab_enabled:
+            _habituation_record_energy(runtime_state=runtime_state, rule_id=rid, tick_index=tick_index, raw_energy=float(raw_energy or 0.0))
 
     merged_by_id: dict[str, dict[str, Any]] = {}
     for d in focus_directives:

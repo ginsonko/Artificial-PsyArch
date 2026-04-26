@@ -52,6 +52,7 @@ def format_help() -> str:
             "  repair <target>        执行局部修复",
             "  repair_all             启动后台全局修复",
             "  stop_repair <job_id>   停止后台修复任务",
+            "  idle_consolidate [n]   执行闲时巩固/压缩（可选：仅巩固最近 n 个事件）",
             "  open_report [latest|trace_id] 打开 HTML 观测报告",
             "  clear_hdb              清空 HDB",
             "  clear_all              清空 文本感受器残响（echo）+ 状态池 + HDB（全息深度数据库）",
@@ -81,6 +82,7 @@ def render_cycle_report(report: dict) -> str:
     lines = ["", LINE, f"Cycle / 轮次: {report.get('trace_id', '')}", LINE]
     lines.extend(_render_sensor(report.get("sensor", {})))
     lines.extend(_render_maintenance(report.get("maintenance", {})))
+    lines.extend(_render_cognitive_stitching(report.get("cognitive_stitching", {})))
     lines.extend(_render_attention(report.get("attention", {})))
     lines.extend(_render_structure(report.get("structure_level", {})))
     lines.extend(_render_cache(report.get("cache_neutralization", {})))
@@ -249,6 +251,49 @@ def _render_attention(attention: dict) -> list[str]:
     return lines
 
 
+def _render_cognitive_stitching(cognitive_stitching: dict) -> list[str]:
+    lines = ["[CS] 认知拼接 / Cognitive Stitching", THIN]
+    enabled = bool(cognitive_stitching.get("enabled", False))
+    lines.append(
+        f"enabled={_b(enabled)} | stage={cognitive_stitching.get('stage', '')} | "
+        f"seed={cognitive_stitching.get('seed_structure_count', 0)} | "
+        f"candidate={cognitive_stitching.get('candidate_count', 0)} | "
+        f"action={cognitive_stitching.get('action_count', 0)}"
+    )
+    lines.append(
+        f"plain/event seed={cognitive_stitching.get('seed_plain_structure_count', 0)}/{cognitive_stitching.get('seed_event_count', 0)} | "
+        f"create/extend/merge={cognitive_stitching.get('created_count', 0)}/{cognitive_stitching.get('extended_count', 0)}/{cognitive_stitching.get('merged_count', 0)} | "
+        f"reinforced={cognitive_stitching.get('reinforced_count', 0)}"
+    )
+    lines.append(
+        f"esdb events={cognitive_stitching.get('esdb_event_count', 0)} | "
+        f"mat={cognitive_stitching.get('esdb_materialized_event_count', 0)} | "
+        f"delta={cognitive_stitching.get('esdb_delta_entry_total', 0)}"
+    )
+    if not enabled:
+        lines.append(f"reason={cognitive_stitching.get('reason', 'disabled')}")
+        return lines
+    for item in cognitive_stitching.get("actions", [])[:12]:
+        lines.append(
+            f"- {item.get('action', '')} | {item.get('event_display', '')} | "
+            f"score={_n(item.get('score', 0.0))} | absorb={_n(item.get('absorbed_total', 0.0))} | "
+            f"match={item.get('match_mode', '')} | context_k={item.get('context_k', 0)} | "
+            f"matched_span={item.get('matched_span', 0)} | family={item.get('action_family', '')}"
+        )
+    top_items = cognitive_stitching.get("narrative_top_items", [])[:8]
+    if top_items:
+        lines.append("narrative top:")
+    for item in top_items:
+        lines.append(
+            f"- {item.get('display', '')} | ER={_n(item.get('er', 0.0))} | "
+            f"EV={_n(item.get('ev', 0.0))} | CP={_n(item.get('cp_abs', 0.0))} | "
+            f"grasp={_n(item.get('event_grasp', 0.0))} | components={item.get('component_count', 0)} | "
+            f"es_depth={item.get('esdb_parent_depth', 0)} | delta={item.get('esdb_delta_entry_count', 0)} | "
+            f"mat={1 if item.get('esdb_materialized', False) else 0} | upd={item.get('esdb_update_count', 0)}"
+        )
+    return lines
+
+
 def _render_structure(structure_level: dict) -> list[str]:
     data = structure_level.get("result", {})
     debug = data.get("debug", {})
@@ -286,6 +331,8 @@ def _render_structure(structure_level: dict) -> list[str]:
 
 def _render_cache(cache: dict) -> list[str]:
     summary = cache.get("priority_summary", {})
+    component_count = int(summary.get("event_component_neutralization_count", 0) or 0)
+    component_cp_drop = float(summary.get("event_component_cp_drop_sum", 0.0) or 0.0)
     lines = ["[5/9] 缓存中和 / Cache Neutralization", THIN]
     lines.append(
         f"中和对象={summary.get('priority_neutralized_item_count', 0)} | 事件={summary.get('priority_event_count', 0)} | "
@@ -293,6 +340,8 @@ def _render_cache(cache: dict) -> list[str]:
     )
     lines.append(f"输入包={cache.get('input_packet', {}).get('display_text', '') or '空'}")
     lines.append(f"剩余包={cache.get('residual_packet', {}).get('display_text', '') or '空'}")
+    if component_count or component_cp_drop:
+        lines.append(f"event_components={component_count} | cp_drop={_n(component_cp_drop)}")
     for event in cache.get("priority_events", [])[:16]:
         extra = event.get("extra_context", {}) or {}
         et = _term_event_type_label(str(event.get("event_type", "") or "priority_stimulus_neutralization"))

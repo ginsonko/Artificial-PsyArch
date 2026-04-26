@@ -1,4 +1,4 @@
-# ======================================================================
+﻿# ======================================================================
 # AP Observatory runtime configuration
 # AP 研究观测台运行配置
 #
@@ -30,6 +30,24 @@ attention_stub_consume_energy: true
 # Meaning / 意义: Higher values make attention-memory traces more visible, but they also disturb the current state more strongly.
 # Reference / 参考: Default 0.5. Typical test range is 0.2-0.8.
 attention_memory_energy_ratio: 0.5
+
+# enable_cognitive_stitching / 是否启用认知拼接模块
+# Purpose / 作用: Controls whether the observatory runs Cognitive Stitching (CS) after state-pool maintenance and before attention.
+# Meaning / 含义: Enable when you want the main loop to form narrative event candidates (runtime-only) before attention.
+# Reference / 参考: Default true (CS-first local rollout). Turn off when doing legacy comparisons.
+enable_cognitive_stitching: true
+
+# enable_structure_level_retrieval_storage / 是否启用原结构级查存一体
+# Purpose / 作用: Controls whether the legacy structure-level retrieval-storage stage runs after attention.
+# Meaning / 含义: Turn on only when you intentionally want the legacy structure-level stage in the loop.
+# Reference / 参考: Default false (CS-first local rollout).
+enable_structure_level_retrieval_storage: false
+
+# enable_goal_b_char_sa_string_mode / 使用字符串方案
+# Purpose / 作用: Switches the runtime into the Goal B controlled experiment path.
+# Meaning / 含义: Text input uses character SA as the real energy-bearing base and disables jieba tokenization; string/token structure is treated as order-sensitive pruning metadata instead of a separate minimal energy unit.
+# Reference / 参考: Default true for the current Goal B rollout; turn off only for legacy comparison experiments.
+enable_goal_b_char_sa_string_mode: true
 
 # snapshot_top_k / 默认快照展示数量
 # Purpose / 作用: Controls how many state-pool items are shown in default snapshot views.

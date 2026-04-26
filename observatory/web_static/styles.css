@@ -72,7 +72,13 @@ body {
   line-height: 1.35;
 }
 .toolbar, .actions, .inspector-controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
-.meta, .feedback { color: var(--muted); font-size: 13px; }
+.meta, .feedback {
+  color: var(--muted);
+  font-size: 13px;
+  /* Long run_id / model names should wrap instead of overflowing containers. */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 .inline-feedback {
   margin: 12px 0 16px;
   padding: 12px 14px;
@@ -108,6 +114,27 @@ body {
 .details-panel > summary {
   list-style: none;
   cursor: pointer;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.details-panel > summary > * {
+  min-width: 0;
+}
+.details-panel > summary::after {
+  content: "点击展开";
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(21,55,45,0.12);
+  background: rgba(255,255,255,0.84);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.details-panel[open] > summary::after {
+  content: "点击收起";
 }
 .details-panel > summary::-webkit-details-marker {
   display: none;
@@ -124,8 +151,22 @@ body {
   margin-top: 12px;
 }
 .card .label { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
-.card .value { margin-top: 10px; font-size: 22px; font-weight: 700; line-height: 1.35; }
-.card .note { margin-top: 8px; color: var(--muted); font-size: 13px; line-height: 1.55; }
+.card .value {
+  margin-top: 10px;
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.card .note {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 textarea, input, select {
   width: 100%; border: 1px solid var(--line); border-radius: 14px; background: rgba(255,255,255,0.92);
   padding: 12px 14px; font: inherit; color: var(--text);
@@ -145,8 +186,19 @@ button.danger { background: rgba(140,59,46,0.12); color: var(--danger); }
 button.full { width: 100%; }
 .timeline, .stack, .mini-table, .settings-tabs { display: grid; gap: 10px; }
 .mini-row { padding: 12px 14px; border-radius: 14px; background: rgba(255,255,255,0.86); border: 1px solid var(--line); }
-.mini-row .title { font-weight: 700; }
-.mini-row .desc { margin-top: 6px; color: var(--muted); font-size: 13px; line-height: 1.55; }
+.mini-row .title {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.mini-row .desc {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 .mini-row + .mini-row { margin-top: 10px; }
 .rule-row { cursor: pointer; transition: transform .16s ease, background .16s ease; }
 .rule-row:hover { transform: translateY(-1px); background: rgba(255,255,255,0.92); }
@@ -557,11 +609,12 @@ pre.code {
 /* ====================================================================
    Modal (Graph editor) / 弹窗（图形编辑器）
    ==================================================================== */
-.modal {
+.modal,
+.modal-shell {
   position: fixed;
   inset: 0;
   z-index: 80;
-  display: grid;
+  display: none;
   /* Do NOT vertically center large modals. When the viewport is short
      (split-screen / small window), centering can push the top toolbar out of view.
      不要把大弹窗垂直居中：当窗口高度较小时（分屏/小窗），居中会把顶部工具栏挤出可视区。 */
@@ -574,14 +627,21 @@ pre.code {
   overflow: hidden;
   overscroll-behavior: contain;
 }
-.modal.hidden { display: none; }
+.modal:not([hidden]),
+.modal-shell:not([hidden]) { display: grid; }
+.modal.hidden,
+.modal-shell.hidden,
+.modal[hidden],
+.modal-shell[hidden] { display: none !important; }
 .modal-scrim {
   position: absolute;
   inset: 0;
   background: rgba(21, 34, 29, 0.68);
   backdrop-filter: blur(6px);
 }
-.modal.fullscreen {
+.modal.fullscreen,
+.modal-shell.modal-fullscreen,
+.modal-shell.fullscreen {
   /* Fullscreen mode: maximize editing space for small windows/split-screen.
      全屏模式：小窗口/分屏时尽量把编辑器铺满，避免“工具栏被挤没/节点看不到”。 */
   padding: 0;
@@ -610,7 +670,9 @@ pre.code {
   box-shadow: 0 26px 88px rgba(21, 55, 45, 0.32);
   padding: 18px 18px 16px;
 }
-.modal.fullscreen .modal-card {
+.modal.fullscreen .modal-card,
+.modal-shell.modal-fullscreen .modal-card,
+.modal-shell.fullscreen .modal-card {
   width: calc(var(--app-vw, 100vw));
   height: calc(var(--app-vh, 100vh));
   max-height: none;
@@ -914,25 +976,139 @@ pre.code {
   padding-right: 8px;
 }
 
+.exp-large-textarea {
+  min-height: 360px;
+}
+
+.exp-spaced-top {
+  margin-top: 18px;
+}
+
+.exp-chart-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  align-items: start;
+}
+
+#expChartDeck {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 18px;
+  align-items: start;
+}
+
+.exp-chart-grid-diagnostic {
+  grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+}
+
+.exp-chart-section {
+  display: grid;
+  gap: 12px;
+}
+
+.exp-chart-group-card {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid rgba(21,55,45,0.10);
+  background: linear-gradient(180deg, rgba(253,250,244,0.96), rgba(247,242,234,0.92));
+  box-shadow: 0 14px 34px rgba(21,55,45,0.06);
+}
+
+.exp-chart-group-card > .section-head {
+  margin-bottom: 0;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(21,55,45,0.08);
+}
+
+.exp-chart-group-card > .section-head h3,
+.exp-chart-group-card > summary h3 {
+  font-size: 20px;
+}
+
+.exp-chart-group-card > summary {
+  padding: 0;
+}
+
+.exp-chart-group-card:has(#chart_hdb_growth) .exp-chart-grid {
+  grid-template-columns: minmax(420px, 760px);
+  justify-content: start;
+}
+
+.exp-chart-stats-scroll {
+  max-height: 160px;
+  overflow: auto;
+  padding-right: 6px;
+}
+
+.exp-chart-factors {
+  margin-top: 12px;
+}
+
+.exp-chart-card {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+
+.exp-chart-card {
+  border: 1px solid rgba(21,55,45,0.08);
+  background: linear-gradient(180deg, rgba(255,255,255,0.96), rgba(251,248,242,0.9));
+  padding: 14px;
+}
+
+.exp-chart-description {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.exp-chart-stats {
+  display: grid;
+  gap: 10px;
+}
+
 .chart-wrap {
   position: relative;
   border-radius: 16px;
   border: 1px solid rgba(21,55,45,0.12);
   background: rgba(255, 255, 255, 0.78);
-  padding: 12px;
+  padding: 10px 10px 8px;
+  min-height: 0;
 }
 
 .chart-svg {
   width: 100%;
-  height: auto;
+  height: 250px;
   display: block;
 }
 
+.chart-hover-tip {
+  position: absolute;
+  right: 10px;
+  top: 10px;
+  z-index: 2;
+  max-width: 260px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(21,55,45,0.92);
+  color: #fffaf4;
+  font-size: 12px;
+  line-height: 1.5;
+  box-shadow: 0 10px 24px rgba(21,55,45,0.18);
+  pointer-events: none;
+}
+
+.chart-wrap.chart-area-mode {
+  background: linear-gradient(180deg, rgba(241,248,245,0.95), rgba(255,255,255,0.82));
+}
+
 .chart-legend {
-  margin-top: 10px;
+  margin-top: 8px;
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 8px;
   color: var(--muted);
   font-size: 12px;
 }
@@ -977,4 +1153,255 @@ pre.code {
 .chart-tooltip.show {
   opacity: 1;
   transform: translateY(0);
+}
+
+.scroll-shell {
+  max-height: 420px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.scroll-shell-tall {
+  max-height: 760px;
+}
+
+#expDatasetPreview {
+  max-height: 520px;
+}
+
+#expProtocolYamlExample,
+#expProtocolJsonlExample {
+  min-height: 220px;
+  max-height: 420px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+#expProtocolYamlFields,
+#expProtocolJsonlFields,
+#expDatasetOverviewCards,
+#expRunOverviewCards,
+#expJobOverviewCards,
+#expMetricsOverviewCards {
+  align-items: start;
+}
+
+#expDatasetOverviewCards .metric-card,
+#expRunOverviewCards .metric-card,
+#expJobOverviewCards .metric-card,
+#expMetricsOverviewCards .metric-card {
+  min-width: 0;
+}
+
+#expDatasetOverviewCards .metric-card .value,
+#expRunOverviewCards .metric-card .value,
+#expJobOverviewCards .metric-card .value,
+#expMetricsOverviewCards .metric-card .value,
+#expDatasetOverviewCards .metric-card .note,
+#expRunOverviewCards .metric-card .note,
+#expJobOverviewCards .metric-card .note,
+#expMetricsOverviewCards .metric-card .note {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
+  line-height: 1.55;
+}
+
+#expRunsList .list-row-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+#expRunsList {
+  max-height: 780px;
+}
+
+#expJobSummary,
+#expRunSummary,
+#expMetricsNarrative,
+#expAtStateSummary,
+#expAtRollbackList,
+#expAtLlmJobs,
+#expAtLlmSuggestionList {
+  max-height: 360px;
+}
+
+#expAtMetricTargets,
+#expAtParamCatalog,
+#expAtRuleCatalog,
+#expAtAuditLog {
+  max-height: 760px;
+}
+
+#expAtLlmReport,
+#expLlmReport {
+  max-height: 520px;
+  overflow: auto;
+}
+
+.exp-chart-card {
+  position: relative;
+}
+
+.exp-chart-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.exp-chart-head .meta {
+  line-height: 1.45;
+}
+
+.exp-chart-head h4 {
+  letter-spacing: 0.01em;
+}
+
+.exp-chart-head .section-head {
+  margin-bottom: 0;
+  flex: 1;
+}
+
+.exp-chart-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.exp-chart-open-btn {
+  white-space: nowrap;
+}
+
+.chart-wrap.clickable {
+  cursor: zoom-in;
+}
+
+.chart-wrap-modal {
+  min-height: 0;
+  padding: 16px;
+}
+
+.chart-wrap-modal .chart-svg {
+  height: 420px;
+}
+
+.exp-chart-impact-strip {
+  margin: 10px 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.exp-chart-impact-strip .chart-chip {
+  background: rgba(245, 236, 224, 0.92);
+}
+
+.exp-chart-factor-list {
+  display: grid;
+  gap: 10px;
+}
+
+.exp-chart-factor-card {
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(21,55,45,0.12);
+  background: rgba(255,255,255,0.92);
+}
+
+.exp-chart-factor-card .title {
+  font-weight: 700;
+}
+
+.exp-chart-factor-card .desc {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.exp-chart-factor-card .chips {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.exp-chart-factors .details-body {
+  max-height: 280px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+@media (max-width: 1100px) {
+  .exp-chart-grid,
+  .exp-chart-grid-diagnostic {
+    grid-template-columns: 1fr;
+  }
+
+  .chart-svg {
+    height: 230px;
+  }
+}
+
+.chart-strip-summary {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chart-modal-note {
+  display: grid;
+  gap: 8px;
+}
+
+#expChartModal.fullscreen .chart-wrap-modal {
+  min-height: 70vh;
+}
+
+.exp-auto-rule-list,
+.exp-auto-audit-list {
+  max-height: 860px;
+  overflow: auto;
+}
+
+.exp-auto-rule-actions {
+  margin-top: 10px;
+}
+
+#exp_auto_tuner .details-panel > summary h4 {
+  display: inline;
+  font-size: 15px;
+}
+
+#exp_auto_tuner textarea.config-textarea {
+  min-height: 240px;
+}
+
+#exp_auto_tuner .mini-row .desc {
+  white-space: pre-wrap;
+}
+
+#exp_auto_tuner .details-body .mini-row {
+  margin-top: 0;
+}
+
+#exp_auto_tuner .subpanel .settings-grid {
+  align-items: start;
+}
+
+#exp_auto_tuner .dual-grid {
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .exp-chart-grid {
+    grid-template-columns: 1fr;
+  }
 }

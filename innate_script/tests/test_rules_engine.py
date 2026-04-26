@@ -103,6 +103,48 @@ def test_cfs_focus_directive_happy_path() -> None:
     assert d0.get("ttl_ticks") == 2
 
 
+def test_cfs_emit_appends_signal() -> None:
+    doc = _normalize(
+        {
+            "rules_schema_version": "1.0",
+            "rules_version": "t",
+            "enabled": True,
+            "defaults": {},
+            "rules": [
+                {
+                    "id": "emit_one",
+                    "title": "emit one",
+                    "enabled": True,
+                    "phase": "cfs",
+                    "priority": 10,
+                    "cooldown_ticks": 0,
+                    "when": {"timer": {"at_tick": 1}},
+                    "then": [{"cfs_emit": {"kind": "dissonance", "from": "single", "scope": "global", "strength": 1.0}}],
+                    "note": "",
+                }
+            ],
+        }
+    )
+
+    engine = evaluate_rules(
+        doc=doc,
+        trace_id="t",
+        tick_id="cycle_0001",
+        tick_index=1,
+        cfs_signals=[],
+        state_windows=[],
+        context={},
+        now_ms=123,
+        runtime_state={},
+        allow_timer=True,
+    )
+    cfs_out = (engine.get("directives") or {}).get("cfs_signals") or []
+    assert len(cfs_out) == 1
+    assert cfs_out[0].get("kind") == "dissonance"
+    assert cfs_out[0].get("scope") == "global"
+    assert float(cfs_out[0].get("strength") or 0.0) == 1.0
+
+
 def test_allow_timer_flag_disables_timer_predicates() -> None:
     doc = _normalize(
         {
@@ -276,3 +318,81 @@ def test_focus_from_state_window_candidates() -> None:
     assert len(directives) == 1
     assert directives[0].get("target_item_id") == "spi_0001"
 
+
+def test_correct_event_binds_positive_correctness_attribute() -> None:
+    doc = _normalize(
+        {
+            "rules_schema_version": "1.0",
+            "rules_version": "t",
+            "enabled": True,
+            "defaults": {},
+            "rules": [
+                {
+                    "id": "correctness_bind",
+                    "title": "correct event -> correctness",
+                    "enabled": True,
+                    "phase": "cfs",
+                    "priority": 10,
+                    "cooldown_ticks": 0,
+                    "when": {"timer": {"at_tick": 1}},
+                    "then": [
+                        {
+                            "cfs_emit": {
+                                "kind": "correct_event",
+                                "from": "single",
+                                "scope": "object",
+                                "strength": 0.7,
+                                "target": {
+                                    "from": "specific_item",
+                                    "item_id": "spi_correct",
+                                    "display": "correct target",
+                                },
+                                "bind_attributes": [
+                                    {
+                                        "attribute_name": "cfs_correct_event",
+                                        "display": "????:{{{strength}}}",
+                                        "value_from": "strength",
+                                        "value_type": "numerical",
+                                        "modality": "internal",
+                                        "er": "{{{strength}}}",
+                                        "ev": 0.0,
+                                    },
+                                    {
+                                        "attribute_name": "cfs_correctness",
+                                        "display": "???:{{{strength}}}",
+                                        "value_from": "strength",
+                                        "value_type": "numerical",
+                                        "modality": "internal",
+                                        "er": "{{{strength}}}",
+                                        "ev": 0.0,
+                                    },
+                                ],
+
+                            }
+                        }
+                    ],
+                    "note": "",
+                }
+            ],
+        }
+    )
+
+    engine = evaluate_rules(
+        doc=doc,
+        trace_id="t",
+        tick_id="cycle_0001",
+        tick_index=1,
+        cfs_signals=[],
+        state_windows=[],
+        now_ms=100,
+        runtime_state={},
+        allow_timer=True,
+    )
+    effects = (engine.get("directives") or {}).get("pool_effects") or []
+    by_name = {((e.get("spec") or {}).get("attribute") or {}).get("attribute_name"): e for e in effects}
+    assert "cfs_correct_event" in by_name
+    assert "cfs_correctness" in by_name
+    attr = by_name["cfs_correctness"]["spec"]["attribute"]
+    assert attr["attribute_value"] == 0.7
+    assert attr["er"] == 0.7
+    assert attr["ev"] == 0.0

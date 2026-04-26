@@ -60,7 +60,7 @@ def _load_yaml_config(path: str) -> dict[str, Any]:
 
 
 _DEFAULT_CONFIG: dict[str, Any] = {
-    "enabled": False,
+    "enabled": True,
     "target_ratio": 1.0,
     "eps": 1e-6,
     "window_ticks": 6,
@@ -102,34 +102,63 @@ class EnergyBalanceController:
         """Placeholder for symmetry with other modules. / 占位：与其他模块保持接口一致。"""
         return
 
-    def reload_config(self, *, trace_id: str) -> dict[str, Any]:
+    def reload_config(
+        self,
+        *,
+        trace_id: str,
+        config_path: str | None = None,
+        apply_partial: bool = True,
+    ) -> dict[str, Any]:
         """Hot reload config file (best-effort). / 热加载配置（尽力而为）。"""
         start = time.time()
-        raw = _load_yaml_config(self._config_path)
+        path = str(config_path or self._config_path)
+        raw = _load_yaml_config(path)
         if not raw:
             return {
                 "success": False,
                 "code": "CONFIG_EMPTY",
-                "message": f"配置加载失败或为空: {self._config_path}",
+                "message": f"配置加载失败或为空: {path}",
                 "trace_id": trace_id,
                 "elapsed_ms": int((time.time() - start) * 1000),
             }
         # Only accept known keys (keep config stable).
-        applied = []
-        rejected = []
+        applied: list[str] = []
+        rejected: list[dict[str, Any]] = []
         for k, v in raw.items():
-            if k in _DEFAULT_CONFIG:
+            if k not in _DEFAULT_CONFIG:
+                rejected.append({"key": k, "reason": "unknown_key"})
+                continue
+            expected_type = type(_DEFAULT_CONFIG[k])
+            if isinstance(v, expected_type) or (expected_type is float and isinstance(v, (int, float))):
                 self._config[k] = v
                 applied.append(k)
             else:
-                rejected.append(k)
+                rejected.append(
+                    {
+                        "key": k,
+                        "reason": "type_mismatch",
+                        "expected": expected_type.__name__,
+                        "got": type(v).__name__,
+                    }
+                )
+
+        if rejected and not apply_partial:
+            return {
+                "success": False,
+                "code": "CONFIG_ERROR",
+                "message": f"Some config items rejected: {len(rejected)}",
+                "trace_id": trace_id,
+                "elapsed_ms": int((time.time() - start) * 1000),
+                "data": {"path": path, "applied": applied, "rejected": rejected},
+            }
+
         return {
             "success": True,
             "code": "OK",
             "message": "配置热加载完成 / Config reloaded",
             "trace_id": trace_id,
             "elapsed_ms": int((time.time() - start) * 1000),
-            "data": {"applied": applied, "rejected": rejected},
+            "data": {"path": path, "applied": applied, "rejected": rejected},
         }
 
     def reset_state(self) -> None:
@@ -270,4 +299,3 @@ class EnergyBalanceController:
                 "built_at_ms": int(now_ms),
             },
         }
-

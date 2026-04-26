@@ -1,0 +1,160 @@
+﻿# Cognitive Stitching (CS) runtime config
+# Conservative local rollout:
+# - pair create
+# - event extend
+# - event-to-event bridge merge
+
+enabled: true
+
+# Snapshot / seed selection
+snapshot_top_k: 24
+
+max_seed_items: 8
+
+max_outgoing_edges_per_seed: 8
+
+max_events_per_tick: 2
+
+# Conservative contextual stitching
+max_context_k: 2
+
+max_event_head_match_components: 3
+
+max_event_component_count: 8
+
+enable_event_extend: true
+
+enable_event_merge: true
+
+# Event degeneration
+# When enabled, weak components may leave an event and the remaining stable part
+# is re-bound as a new event candidate instead of keeping a falsely rigid event shell.
+enable_event_degeneration: true
+
+# Max number of event degeneration actions handled per tick.
+event_degeneration_max_events_per_tick: 2
+
+# Minimum remaining component count after degeneration.
+event_degeneration_min_components: 2
+
+# Components below this share threshold become degeneration candidates.
+event_degeneration_share_threshold: 0.06
+
+# Components below this absolute event-energy threshold become degeneration candidates.
+event_degeneration_min_component_energy: 0.04
+
+# Event grasp (bound to ES objects in CAM)
+enable_event_grasp: true
+
+event_grasp_min_total_energy: 0.25
+
+event_grasp_max_events_per_tick: 6
+
+event_grasp_energy_weight: 1.2
+
+event_grasp_balance_weight: 1.3
+
+event_grasp_margin_weight: 0.8
+
+event_grasp_bias: -0.3
+
+event_grasp_sigmoid_temperature: 1.0
+
+event_grasp_attribute_name: event_grasp
+
+# ESDB overlay (parents+delta) and idle consolidation (runtime-only)
+enable_esdb_overlay: true
+
+event_context_open_mode: hybrid
+
+esdb_overlay_parent_beta: 0.35
+
+esdb_overlay_top_k: 16
+
+esdb_overlay_cache_ttl_ms: 2500
+
+esdb_materialize_top_n: 96
+
+# ESDB delta: runtime-only outgoing edge cache for ES (kept small & conservative)
+enable_esdb_delta: true
+
+esdb_delta_import_top_k_per_tail: 6
+
+esdb_delta_max_entries: 96
+
+esdb_delta_distance_decay: 0.75
+
+esdb_delta_merge_beta: 0.25
+
+esdb_delta_min_weight: 0.0001
+
+# Persist ES into HDB during idle consolidation.
+# Event structures are treated as healthy long-term structures, so persistence is on by default.
+enable_persist_events_to_hdb: true
+
+persist_events_max_diff_entries: 96
+
+# Idle consolidation budgets / guards
+idle_consolidate_max_events: 256
+
+idle_consolidate_clear_all_caches: true
+
+idle_consolidate_cache_est_bytes_per_row: 220
+
+# Entry thresholds
+min_seed_total_energy: 0.45
+
+min_candidate_score: 0.22
+
+min_event_total_energy: 0.1
+
+# Energy draw / absorption
+base_absorb_ratio: 0.12
+
+pair_absorb_ratio_cap: 0.22
+
+extend_absorb_scale: 0.92
+
+merge_absorb_scale: 0.84
+
+# Same-path fatigue
+same_pair_fatigue_decay: 0.72
+
+same_pair_fatigue_step: 0.35
+
+same_pair_fatigue_cap: 1.6
+
+same_pair_fatigue_floor_scale: 0.25
+
+# Candidate scoring
+edge_ratio_weight: 0.42
+
+energy_balance_weight: 0.23
+
+match_strength_weight: 0.2
+
+runtime_weight_weight: 0.15
+
+context_support_weight: 0.18
+
+bridge_span_weight: 0.08
+
+anchor_distance_penalty: 0.18
+
+# Weak match scaling
+containment_match_scale: 0.78
+
+weak_overlap_match_scale: 0.42
+
+weak_overlap_min_ratio: 0.5
+
+event_prefix_match_scale: 1.0
+
+event_prefix_weak_scale: 0.36
+
+# Runtime event node identity / display
+event_id_prefix: cs_event
+
+display_joiner: ' -> '
+
+narrative_top_k: 6

@@ -5,6 +5,7 @@ Main entry for HDB.
 
 from __future__ import annotations
 
+import math
 import os
 import time
 import traceback
@@ -21,6 +22,7 @@ from ._logger import ModuleLogger
 from ._maintenance import MaintenanceEngine
 from ._memory_activation_store import MemoryActivationStore
 from ._pointer_index import PointerIndex
+from ._profile_restore import restore_group_profile
 from ._repair_engine import RepairEngine
 from ._self_check import SelfCheckEngine
 from ._snapshot_engine import SnapshotEngine
@@ -87,7 +89,11 @@ def _load_yaml_config(path: str) -> dict:
 
 _DEFAULT_CONFIG = {
     "data_dir": "",
-    "stimulus_level_max_rounds": 6,
+    "stimulus_level_max_rounds": 8,
+    "stimulus_early_stop_enabled": True,
+    "stimulus_early_stop_patience_rounds": 2,
+    "stimulus_early_stop_min_progress_ratio": 0.10,
+    "stimulus_early_stop_high_energy_unit_threshold": 0.25,
     "structure_level_max_rounds": 4,
     "top_n_attention_stub_default": 16,
     "stimulus_match_transfer_ratio": 1.0,
@@ -95,7 +101,7 @@ _DEFAULT_CONFIG = {
     "stimulus_competition_noise_scale": 0.004,
     "stimulus_competition_half_ratio": 0.1,
     "stimulus_competition_curve_power": 1.2,
-    "stimulus_residual_min_energy": 0.05,
+    "stimulus_residual_min_energy": 0.12,
     "stimulus_attribute_energy_scale": 0.22,
     "stimulus_placeholder_energy_scale": 1.0,
     "stimulus_anchor_er_weight": 1.25,
@@ -103,7 +109,7 @@ _DEFAULT_CONFIG = {
     "stimulus_anchor_external_bonus": 0.08,
     "stimulus_anchor_non_punctuation_bonus": 0.05,
     "stimulus_anchor_punctuation_penalty": 0.35,
-    "stimulus_residual_projection_ratio": 0.35,
+    "stimulus_residual_projection_ratio": 0.16,
     "stimulus_atomic_seed_confidence": 0.95,
     "stimulus_anchor_seed_confidence": 0.9,
     "stimulus_focus_seed_confidence": 0.9,
@@ -135,7 +141,74 @@ _DEFAULT_CONFIG = {
     "structure_group_entry_recent_gain_boost": 0.04,
     "structure_common_group_confidence": 0.82,
     "structure_memory_table_soft_limit": 128,
+    # ================================================================
+    # Internal Residual Resolution (DARL + PARS)
+    # ================================================================
+    # Goal:
+    # - prevent "few huge structures" from exploding internal residual stimulus size
+    # - keep endogenous stimulus in the loop, but with dynamic, resource-aware resolution
+    #
+    # Notes:
+    # - Values are intentionally conservative for prototype safety.
+    # - These knobs do NOT hardcode any token/word meaning. They only regulate
+    #   how much structure detail is emitted per tick for stimulus-level processing.
+    "internal_resolution_enabled": True,
+    # Global budget unit: "detail units" ~= number of internal SA units emitted.
+    # (CutEngine converts internal fragments -> SA/CSA; each selected unit becomes one SA.)
+    "internal_resolution_detail_budget_base": 56,
+    # ADR (alertness) can temporarily raise the budget (more "mental throughput").
+    "internal_resolution_detail_budget_adr_gain": 56,
+    # Always guarantee at least this many detail units per CAM structure (prevents energy from disappearing).
+    "internal_resolution_min_detail_per_structure": 4,
+    "internal_resolution_max_detail_per_structure": 40,
+    # Soft allocation curve temperature (higher -> flatter, more even distribution).
+    "internal_resolution_temperature": 1.0,
+    # Value weights (no semantics, purely runtime signals).
+    "internal_resolution_value_weight_total_energy": 1.0,
+    "internal_resolution_value_weight_cp_abs": 0.35,
+    "internal_resolution_value_weight_runtime_weight": 0.15,
+    # Cost soft cap (avoid ultra-huge structures dominating the allocation math).
+    "internal_resolution_cost_cap": 512,
+    # Hard caps used by auto-tuner/runtime hot reload as well.
+    "internal_resolution_flat_unit_cap_per_structure": 240,
+    "internal_resolution_max_structures_per_tick": 5,
+    # Entrance selection is hybrid: keep density-efficient fragments, but reserve
+    # some room for "richer" residual structures so endogenous content does not
+    # collapse into many one-unit fragments.
+    "internal_resolution_rich_structure_ratio": 0.4,
+    "internal_resolution_rich_structure_min_units": 6,
+    "internal_resolution_structure_richness_power": 0.5,
+    # Detail sampling policy
+    "internal_resolution_stable_anchor_count": 1,
+    "internal_resolution_anchor_ratio": 0.35,
+    # Detail fatigue (within-structure rotation) to gradually cover long structures across ticks.
+    "internal_resolution_detail_fatigue_window": 64,
+    "internal_resolution_detail_fatigue_start": 2.0,
+    "internal_resolution_detail_fatigue_full": 8.0,
+    "internal_resolution_detail_fatigue_min_scale": 0.0,
+    "internal_resolution_detail_fatigue_beta": 1.0,
+    # Focus credit: sustained attention gradually increases detail resolution over long reasoning.
+    "internal_resolution_focus_credit_enabled": True,
+    "internal_resolution_focus_credit_gain": 0.35,
+    "internal_resolution_focus_credit_decay": 0.90,
+    "internal_resolution_focus_credit_cap": 6.0,
+    "internal_resolution_focus_credit_gamma": 0.25,
+    # When structure-level fails to hit an existing group, we still want the
+    # freshly canonicalized residual runtime context to become endogenous
+    # stimulus. This keeps "active landscape -> internal stimulus" alive even
+    # during low-match phases, without replacing the tail residual path.
+    "internal_storage_projection_enabled": True,
+    "internal_storage_projection_ratio": 0.14,
+    "internal_storage_projection_max_fragments_per_round": 1,
+    "internal_attention_landscape_enabled": True,
+    "internal_attention_landscape_ratio": 0.08,
     "min_cut_common_length": 2,
+    "enable_goal_b_char_sa_string_mode": False,
+    "goal_b_string_seed_soft_max_units": 32,
+    "goal_b_string_seed_min_avg_unit_energy_for_long": 0.18,
+    "goal_b_string_seed_require_single_source_for_long": True,
+    "stimulus_residual_common_soft_max_units": 28,
+    "stimulus_residual_common_min_avg_unit_energy_for_long": 0.18,
     "diff_table_soft_limit": 128,
     "group_table_soft_limit": 128,
     "ev_propagation_threshold": 0.12,
@@ -143,9 +216,10 @@ _DEFAULT_CONFIG = {
     "ev_propagation_ratio": 0.28,
     "er_induction_ratio": 0.22,
     "induction_target_top_k": 8,
-    "memory_activation_decay_round_ratio_ev": 0.93,
-    "memory_activation_prune_threshold_ev": 0.03,
+    "memory_activation_decay_round_ratio_ev": 0.88,
+    "memory_activation_prune_threshold_ev": 0.05,
     "memory_activation_event_history_limit": 24,
+    "runtime_memory_display_max_chars": 240,
     "base_weight_er_gain": 0.08,
     "base_weight_ev_wear": 0.03,
     "weight_floor": 0.05,
@@ -167,6 +241,7 @@ _DEFAULT_CONFIG = {
     "energy_decay_half_life_ms_ev": 30000,
     "enable_pointer_fallback": True,
     "fallback_lookup_max_candidates": 32,
+    "enable_cs_event_structures_in_stimulus_retrieval": False,
     "fallback_scan_hard_limit": 200,
     "allow_global_scan_on_runtime_path": False,
     "lru_db_cache_size": 64,
@@ -203,7 +278,7 @@ class HDB:
         )
         self._audit = AuditLogger(self._logger)
         self._weight = WeightEngine(self._config)
-        self._cut = CutEngine()
+        self._cut = CutEngine(self._config)
         self._maintenance = MaintenanceEngine(self._config)
         self._structure_store = StructureStore(self._paths["structures"], self._paths["indexes"], self._config)
         self._group_store = GroupStore(self._paths["groups"], self._config)
@@ -224,6 +299,9 @@ class HDB:
         self._repair.set_issue_callback(self._register_issue)
         self._load_repair_jobs()
         self._total_calls = 0
+        # Idle consolidation last result snapshot (for observability/UI); safe to keep in memory.
+        self._idle_consolidation_count_total = 0
+        self._last_idle_consolidation: dict | None = None
 
     def _build_config(self, config_override: dict | None) -> dict:
         config = dict(_DEFAULT_CONFIG)
@@ -269,6 +347,13 @@ class HDB:
         if err:
             return self._make_error_response("run_structure_level_retrieval_storage", err["code"], err["zh"], err["en"], trace_id, tick_id, start_time)
         try:
+            # Important:
+            # - `max_rounds` may be explicitly set to 0 by the caller (for "CAM-only internal stimulus"
+            #   without any group matching rounds). We must NOT treat 0 as falsy and overwrite it by
+            #   the config default.
+            effective_max_rounds = (
+                int(max_rounds) if max_rounds is not None else int(self._config.get("structure_level_max_rounds", 4))
+            )
             result = self._structure_retrieval.run(
                 state_snapshot=state_snapshot,
                 trace_id=trace_id,
@@ -282,7 +367,7 @@ class HDB:
                 top_n=top_n,
                 enable_storage=enable_storage,
                 enable_new_group_creation=enable_new_group_creation,
-                max_rounds=max_rounds or int(self._config.get("structure_level_max_rounds", 4)),
+                max_rounds=effective_max_rounds,
             )
             if result.get("fallback_used"):
                 self._register_issue({"issue_type": "pointer_fallback_runtime", "target_id": "", "repair_suggestion": ["rebuild_pointer"]})
@@ -334,6 +419,10 @@ class HDB:
         if err:
             return self._make_error_response("run_stimulus_level_retrieval_storage", err["code"], err["zh"], err["en"], trace_id, tick_id, start_time)
         try:
+            # Same note as structure-level: allow explicit 0.
+            effective_max_rounds = (
+                int(max_rounds) if max_rounds is not None else int(self._config.get("stimulus_level_max_rounds", 6))
+            )
             result = self._stimulus.run(
                 stimulus_packet=stimulus_packet,
                 trace_id=trace_id,
@@ -344,7 +433,7 @@ class HDB:
                 episodic_store=self._episodic_store,
                 enable_storage=enable_storage,
                 enable_new_structure_creation=enable_new_structure_creation,
-                max_rounds=max_rounds or int(self._config.get("stimulus_level_max_rounds", 6)),
+                max_rounds=effective_max_rounds,
             )
             if result.get("fallback_used"):
                 self._register_issue({"issue_type": "pointer_fallback_runtime", "target_id": "", "repair_suggestion": ["rebuild_pointer"]})
@@ -560,9 +649,821 @@ class HDB:
             repair_jobs=self._repair.jobs,
             repair_dir=self._paths["repair"],
         )
+        result["runtime_reset"] = self._reset_runtime_state()
         self._save_issue_queue()
         self._audit.record(trace_id=trace_id, interface="clear_hdb", action="clear_hdb", reason=reason, operator=operator or "unknown", detail={"clear_mode": clear_mode, **result})
         return self._make_response(True, "OK", "HDB 清空完成 / HDB cleared successfully", data=result, trace_id=trace_id, elapsed_ms=self._elapsed_ms(start_time), interface="clear_hdb")
+
+    def clear_runtime_state(self, *, trace_id: str, reason: str = "runtime_reset") -> dict:
+        start_time = time.time()
+        result = self._reset_runtime_state()
+        self._audit.record(
+            trace_id=trace_id,
+            interface="clear_runtime_state",
+            action="clear_runtime_state",
+            reason=reason,
+            detail=result,
+        )
+        return self._make_response(
+            True,
+            "OK",
+            "HDB 运行态已清空 / HDB runtime state cleared",
+            data=result,
+            trace_id=trace_id,
+            elapsed_ms=self._elapsed_ms(start_time),
+            interface="clear_runtime_state",
+        )
+
+    def idle_consolidate_hdb(
+        self,
+        *,
+        trace_id: str,
+        reason: str = "idle_consolidation",
+        rebuild_pointer_index: bool = True,
+        apply_soft_limits: bool = True,
+    ) -> dict:
+        """
+        Idle-time consolidation / compaction for HDB.
+
+        Scope (intentionally conservative):
+        - apply diff_table/group_table soft limits across all structure DBs
+        - rebuild pointer index (in-memory) to eliminate drift after many writes/deletes
+
+        This is designed to be safe to run:
+        - at experiment completion
+        - via manual UI trigger
+        """
+        start_time = time.time()
+        now_ms = int(time.time() * 1000)
+
+        scanned_db_count = 0
+        updated_db_count = 0
+        trimmed_diff_total = 0
+        trimmed_group_total = 0
+        pointer_before: dict[str, Any] = {}
+        pointer_after: dict[str, Any] = {}
+
+        try:
+            if hasattr(self, "_pointer_index") and hasattr(self._pointer_index, "export_snapshot"):
+                pointer_before = dict(self._pointer_index.export_snapshot() or {})
+        except Exception:
+            pointer_before = {}
+
+        if apply_soft_limits:
+            for structure_db in list(self._structure_store.iter_structure_dbs()):
+                if not isinstance(structure_db, dict):
+                    continue
+                scanned_db_count += 1
+                before_diff = len(structure_db.get("diff_table", []) or [])
+                before_group = len(structure_db.get("group_table", []) or [])
+
+                try:
+                    self._maintenance.apply_structure_db_soft_limits(structure_db)
+                except Exception:
+                    continue
+
+                after_diff = len(structure_db.get("diff_table", []) or [])
+                after_group = len(structure_db.get("group_table", []) or [])
+
+                if after_diff != before_diff or after_group != before_group:
+                    updated_db_count += 1
+                    trimmed_diff_total += max(0, int(before_diff) - int(after_diff))
+                    trimmed_group_total += max(0, int(before_group) - int(after_group))
+                    self._structure_store.update_db(structure_db)
+
+        if rebuild_pointer_index:
+            try:
+                self._pointer_index.rebuild_from_store(self._structure_store)
+            except Exception:
+                # Pointer rebuild is best-effort; do not fail the consolidation call.
+                pass
+
+        try:
+            if hasattr(self, "_pointer_index") and hasattr(self._pointer_index, "export_snapshot"):
+                pointer_after = dict(self._pointer_index.export_snapshot() or {})
+        except Exception:
+            pointer_after = {}
+
+        result = {
+            "reason": str(reason or ""),
+            "timestamp_ms": now_ms,
+            "rebuild_pointer_index": bool(rebuild_pointer_index),
+            "apply_soft_limits": bool(apply_soft_limits),
+            "pointer_index_before": pointer_before,
+            "pointer_index_after": pointer_after,
+            "scanned_structure_db_count": int(scanned_db_count),
+            "updated_structure_db_count": int(updated_db_count),
+            "trimmed_diff_entry_total": int(trimmed_diff_total),
+            "trimmed_group_entry_total": int(trimmed_group_total),
+        }
+        self._audit.record(
+            trace_id=trace_id,
+            interface="idle_consolidate_hdb",
+            action="idle_consolidate_hdb",
+            reason=reason,
+            detail=result,
+        )
+        resp = self._make_response(
+            True,
+            "OK",
+            "HDB 闲时巩固完成 / HDB idle consolidation completed",
+            data=result,
+            trace_id=trace_id,
+            elapsed_ms=self._elapsed_ms(start_time),
+            interface="idle_consolidate_hdb",
+        )
+        try:
+            self._idle_consolidation_count_total = int(getattr(self, "_idle_consolidation_count_total", 0) or 0) + 1
+            self._last_idle_consolidation = dict(resp)
+        except Exception:
+            pass
+        return resp
+
+    def _reset_runtime_state(self) -> dict:
+        structure_runtime = {}
+        if hasattr(self._structure_retrieval, "clear_runtime_state"):
+            structure_runtime = dict(self._structure_retrieval.clear_runtime_state() or {})
+
+        stimulus_runtime = {}
+        if hasattr(self._stimulus, "clear_runtime_state"):
+            stimulus_runtime = dict(self._stimulus.clear_runtime_state() or {})
+
+        self._idle_consolidation_count_total = 0
+        self._last_idle_consolidation = None
+        self._total_calls = 0
+        return {
+            "structure_retrieval": structure_runtime,
+            "stimulus_retrieval": stimulus_runtime,
+            "idle_consolidation_cleared": True,
+            "total_calls_reset": True,
+        }
+
+    def upsert_cognitive_stitching_event_structure(
+        self,
+        *,
+        event_ref_id: str,
+        member_refs: list[str],
+        display_text: str,
+        diff_rows: list[dict] | None,
+        trace_id: str,
+        tick_id: str,
+        reason: str = "cognitive_stitching_idle_consolidate",
+        max_diff_entries: int | None = None,
+        sequence_groups: list[dict] | None = None,
+        flat_tokens: list[str] | None = None,
+        cs_ext: dict | None = None,
+        link_members_to_event: bool = True,
+        ensure_component_chain_index: bool = True,
+    ) -> dict:
+        """
+        Persist (or update) a Cognitive Stitching event as a HDB structure.
+
+        Design goals:
+        - safe to call during idle-time consolidation OR conservative hot-path upsert
+        - file-safe structure_id is generated by HDB (event_ref_id itself may contain ':' etc)
+        - stable lookup via pointer signature index: structure.structure.content_signature == event_ref_id
+        - stored structure MUST be "健全的长期结构": has its own DB pointer, can be O(1) resolved/opened,
+          and can participate in stimulus-level retrieval (when enabled by config).
+        """
+        start_time = time.time()
+        tick_id = tick_id or trace_id
+
+        signature = str(event_ref_id or "").strip()
+        if not signature:
+            return self._make_error_response(
+                "upsert_cognitive_stitching_event_structure",
+                "INPUT_VALIDATION_ERROR",
+                "event_ref_id 不能为空",
+                "event_ref_id must not be empty",
+                trace_id,
+                tick_id,
+                start_time,
+            )
+
+        cleaned_members = [str(x) for x in (member_refs or []) if str(x)]
+        cleaned_members = list(dict.fromkeys(cleaned_members))
+        if len(cleaned_members) < 2:
+            return self._make_error_response(
+                "upsert_cognitive_stitching_event_structure",
+                "INPUT_VALIDATION_ERROR",
+                "member_refs 至少需要 2 个结构引用",
+                "member_refs must contain at least 2 structure refs",
+                trace_id,
+                tick_id,
+                start_time,
+            )
+
+        display_text = str(display_text or "").strip() or signature
+        now_ms = int(time.time() * 1000)
+
+        structure_store = self._structure_store
+        pointer_index = self._pointer_index
+
+        def _build_event_groups_from_members() -> tuple[list[dict], list[str]]:
+            """
+            Build a compact event structure content from member ST structures (best-effort).
+
+            Important:
+            - CS event structures MUST stay matchable by stimulus-level retrieval (existing_length <= incoming_length),
+              therefore we do NOT expand the full member token stream into the event structure.
+            - We instead sample a bounded number of representative tokens from each member ST and emit them as
+              ordered one-token sequence groups. This keeps the event "健全" and retrievable without blowing up
+              pointer-index buckets or creating ultra-long structures that can never be fully included by an input packet.
+            """
+            groups_out: list[dict] = []
+            flat_tokens_out: list[str] = []
+            next_group_index = 0
+
+            def _is_punctuation_token(token: str) -> bool:
+                text = str(token or "").strip()
+                if not text:
+                    return True
+                punct = set(
+                    [
+                        ",",
+                        ".",
+                        "!",
+                        "?",
+                        ";",
+                        ":",
+                        "，",
+                        "。",
+                        "！",
+                        "？",
+                        "；",
+                        "：",
+                        "、",
+                        "…",
+                        "(",
+                        ")",
+                        "（",
+                        "）",
+                        "[",
+                        "]",
+                        "【",
+                        "】",
+                        "{",
+                        "}",
+                        "《",
+                        "》",
+                        "<",
+                        ">",
+                        "\"",
+                        "'",
+                        "`",
+                        "~",
+                        "|",
+                        "\\",
+                        "/",
+                        "-",
+                        "_",
+                        "+",
+                        "=",
+                    ]
+                )
+                return all(ch in punct for ch in text)
+
+            def _dedupe_keep_order(tokens: list[str]) -> list[str]:
+                out: list[str] = []
+                seen: set[str] = set()
+                for tok in tokens:
+                    t = str(tok or "").strip()
+                    if not t or t in seen:
+                        continue
+                    seen.add(t)
+                    out.append(t)
+                return out
+
+            # Conservative token budgets: keep events short, but not too short.
+            # - For 2 components: 24 tokens max (12 each)
+            # - For 8 components: 96 tokens max (12 each)
+            max_units_total = max(8, min(96, int(len(cleaned_members)) * 12))
+            max_units_per_component = max(2, min(24, int(math.ceil(float(max_units_total) / max(1, len(cleaned_members))))))
+
+            for comp_index, member_id in enumerate(cleaned_members):
+                if len(flat_tokens_out) >= max_units_total:
+                    break
+
+                try:
+                    st_obj = structure_store.get(member_id)
+                except Exception:
+                    st_obj = None
+
+                st_block = st_obj.get("structure", {}) if isinstance(st_obj, dict) and isinstance(st_obj.get("structure", {}), dict) else {}
+                member_tokens: list[str] = []
+
+                # Prefer canonical tokens from sequence_groups.
+                # Goal B safety: never propagate presentation-wrapped display tokens such as "{??}" into
+                # cognitive stitching event structures. Use string_token_text for char_sequence groups, and only
+                # fall back to raw unit tokens when they are not display wrappers.
+                for g in list(st_block.get("sequence_groups", []) or []):
+                    if not isinstance(g, dict):
+                        continue
+                    if bool(g.get("order_sensitive", False)) and str(g.get("string_unit_kind", "") or "") == "char_sequence":
+                        canonical_text = str(g.get("string_token_text", "") or "").strip()
+                        if canonical_text:
+                            member_tokens.append(canonical_text)
+                            continue
+                    for u in list(g.get("units", []) or []):
+                        if not isinstance(u, dict):
+                            continue
+                        tok = str(u.get("token", "") or "").strip()
+                        if tok.startswith("{") and tok.endswith("}"):
+                            continue
+                        if tok:
+                            member_tokens.append(tok)
+                    for tok in list(g.get("tokens", []) or []):
+                        text = str(tok or "").strip()
+                        if text.startswith("{") and text.endswith("}"):
+                            continue
+                        if text:
+                            member_tokens.append(text)
+
+                if not member_tokens:
+                    member_tokens = [str(t) for t in (st_block.get("flat_tokens", []) or []) if str(t)]
+
+                member_tokens = _dedupe_keep_order(member_tokens)
+                member_tokens = [t for t in member_tokens if t and not _is_punctuation_token(t)]
+                member_tokens = member_tokens[:max_units_per_component]
+
+                if not member_tokens:
+                    fallback_text = ""
+                    for g in list(st_block.get("sequence_groups", []) or []):
+                        if not isinstance(g, dict):
+                            continue
+                        if bool(g.get("order_sensitive", False)) and str(g.get("string_unit_kind", "") or "") == "char_sequence":
+                            fallback_text = str(g.get("string_token_text", "") or "").strip()
+                            if fallback_text:
+                                break
+                    if not fallback_text:
+                        flat_fallback = [str(t) for t in (st_block.get("flat_tokens", []) or []) if str(t)]
+                        fallback_text = "".join(flat_fallback).strip() if flat_fallback else ""
+                    if not fallback_text:
+                        fallback_text = str(member_id).strip()
+                    if fallback_text:
+                        member_tokens = [fallback_text]
+
+                for tok_index, tok in enumerate(member_tokens):
+                    if len(flat_tokens_out) >= max_units_total:
+                        break
+                    token_text = str(tok or "").strip()
+                    if not token_text:
+                        continue
+                    group = {
+                        "group_index": int(next_group_index),
+                        "source_type": "cognitive_stitching_event",
+                        "origin_frame_id": signature,
+                        "tokens": [token_text],
+                        "units": [
+                            {
+                                "token": token_text,
+                                "unit_role": "feature",
+                                "display_visible": True,
+                                "cs_origin_structure_id": member_id,
+                                "cs_component_index": int(comp_index),
+                                "cs_component_token_index": int(tok_index),
+                            }
+                        ],
+                        "ext": {
+                            "cs_event_ref_id": signature,
+                            "cs_origin_structure_id": member_id,
+                            "cs_component_index": int(comp_index),
+                            "cs_component_token_index": int(tok_index),
+                        },
+                    }
+                    groups_out.append(group)
+                    flat_tokens_out.append(token_text)
+                    next_group_index += 1
+
+            return groups_out, flat_tokens_out
+
+        # Build event content (sequence_groups/flat_tokens).
+        # 说明：事件结构必须是“健全的长期结构”，不能只存空壳，否则无法被刺激级查存一体命中。
+        event_sequence_groups: list[dict] = []
+        event_flat_tokens: list[str] = []
+        if isinstance(sequence_groups, list) and sequence_groups:
+            # Caller-provided override (already normalized upstream).
+            for idx, g in enumerate(sequence_groups):
+                if not isinstance(g, dict):
+                    continue
+                gg = dict(g)
+                gg["group_index"] = int(idx)
+                if isinstance(gg.get("units", []), list) and gg.get("units"):
+                    units_out: list[dict] = []
+                    for u in list(gg.get("units", []) or []):
+                        if not isinstance(u, dict):
+                            continue
+                        uu = dict(u)
+                        uu["group_index"] = int(idx)
+                        units_out.append(uu)
+                    gg["units"] = units_out
+                ext = gg.get("ext", {}) if isinstance(gg.get("ext", {}), dict) else {}
+                ext = dict(ext)
+                ext.setdefault("cs_event_ref_id", signature)
+                gg["ext"] = ext
+                event_sequence_groups.append(gg)
+                event_flat_tokens.extend([str(t) for t in (gg.get("tokens", []) or []) if str(t)])
+        else:
+            event_sequence_groups, event_flat_tokens = _build_event_groups_from_members()
+
+        if isinstance(flat_tokens, list) and flat_tokens:
+            event_flat_tokens = [str(t) for t in flat_tokens if str(t)]
+        else:
+            event_flat_tokens = [str(t) for t in event_flat_tokens if str(t)]
+
+        if not event_sequence_groups:
+            # Ultra-fallback: keep the structure usable for indexing/inspection.
+            # 极端兜底：至少保证结构可索引、可打开、可展示。
+            fallback_tokens: list[str] = []
+            for member_id in cleaned_members:
+                try:
+                    st_obj = structure_store.get(member_id)
+                    st_block = (st_obj or {}).get("structure", {}) if isinstance(st_obj, dict) else {}
+                    token = str(st_block.get("display_text", "") or member_id)
+                except Exception:
+                    token = str(member_id)
+                if token:
+                    fallback_tokens.append(token)
+            fallback_tokens = fallback_tokens or list(cleaned_members)
+            event_flat_tokens = list(event_flat_tokens) or list(fallback_tokens)
+            event_sequence_groups = [
+                {
+                    "group_index": index,
+                    "source_type": "cognitive_stitching_event_fallback",
+                    "origin_frame_id": signature,
+                    "tokens": [token],
+                    "units": [{"token": token, "unit_role": "feature", "display_visible": True}],
+                    "ext": {"cs_event_ref_id": signature, "cs_component_index": index},
+                }
+                for index, token in enumerate(fallback_tokens)
+                if str(token)
+            ]
+
+        existing_id = ""
+        try:
+            for candidate_id in pointer_index.query_candidates_by_signature(signature):
+                candidate = structure_store.get(candidate_id)
+                if not isinstance(candidate, dict):
+                    continue
+                if str(candidate.get("sub_type", "") or "") != "cognitive_stitching_event_structure":
+                    continue
+                cand_sig = str((candidate.get("structure", {}) or {}).get("content_signature", "") or "")
+                if cand_sig != signature:
+                    continue
+                existing_id = str(candidate_id)
+                break
+        except Exception:
+            existing_id = ""
+
+        created = False
+        updated_structure_fields = False
+        upserted_diff_count = 0
+        removed_diff_count = 0
+        structure_id = ""
+        component_chain_prefix_upserted_count = 0
+        component_chain_edge_upserted_count = 0
+
+        if existing_id:
+            structure_id = existing_id
+            structure_obj = structure_store.get(structure_id) or {}
+            structure_block = structure_obj.get("structure", {}) if isinstance(structure_obj.get("structure", {}), dict) else {}
+            ext = structure_block.get("ext", {}) if isinstance(structure_block.get("ext", {}), dict) else {}
+            existing_cs_meta = ext.get("cognitive_stitching", {}) if isinstance(ext.get("cognitive_stitching", {}), dict) else {}
+
+            next_member_refs = cleaned_members
+            next_display_text = display_text
+            if str(structure_block.get("display_text", "") or "") != next_display_text:
+                structure_block["display_text"] = next_display_text
+                updated_structure_fields = True
+            if list(structure_block.get("member_refs", []) or []) != next_member_refs:
+                structure_block["member_refs"] = list(next_member_refs)
+                updated_structure_fields = True
+            if list(structure_block.get("sequence_groups", []) or []) != list(event_sequence_groups):
+                structure_block["sequence_groups"] = list(event_sequence_groups)
+                updated_structure_fields = True
+            if list(structure_block.get("flat_tokens", []) or []) != list(event_flat_tokens):
+                structure_block["flat_tokens"] = list(event_flat_tokens)
+                structure_block["token_count"] = int(len(event_flat_tokens))
+                updated_structure_fields = True
+
+            next_cs_meta = dict(existing_cs_meta)
+            if isinstance(cs_ext, dict):
+                next_cs_meta.update(dict(cs_ext))
+            next_cs_meta.update(
+                {
+                    "event_ref_id": signature,
+                    "member_refs": list(next_member_refs),
+                    "persisted_at_ms": now_ms,
+                    "persist_reason": str(reason or ""),
+                }
+            )
+            ext["cognitive_stitching"] = next_cs_meta
+            structure_block["ext"] = ext
+            structure_obj["structure"] = structure_block
+            structure_store.update_structure(structure_obj)
+            try:
+                pointer_index.register_structure(structure_obj)
+            except Exception:
+                pass
+        else:
+            created = True
+            cs_meta = dict(cs_ext) if isinstance(cs_ext, dict) else {}
+            cs_meta.update(
+                {
+                    "event_ref_id": signature,
+                    "member_refs": list(cleaned_members),
+                    "persisted_at_ms": now_ms,
+                    "persist_reason": str(reason or ""),
+                }
+            )
+            payload = {
+                "sub_type": "cognitive_stitching_event_structure",
+                "unit_type": "cognitive_stitching_event",
+                "display_text": display_text,
+                "member_refs": list(cleaned_members),
+                "sequence_groups": list(event_sequence_groups),
+                "flat_tokens": list(event_flat_tokens),
+                "content_signature": signature,
+                "semantic_signature": signature,
+                "ext": {"cognitive_stitching": cs_meta},
+                "meta": {"confidence": 0.75, "field_registry_version": __schema_version__, "debug": {}, "ext": {}},
+            }
+            structure_obj, _structure_db = structure_store.create_structure(
+                structure_payload=payload,
+                trace_id=trace_id,
+                tick_id=tick_id,
+                source_interface="upsert_cognitive_stitching_event_structure",
+                origin="cognitive_stitching_event_persist",
+                origin_id=signature,
+                parent_ids=list(cleaned_members),
+            )
+            structure_id = str(structure_obj.get("id", "") or "")
+            try:
+                pointer_index.register_structure(structure_obj)
+            except Exception:
+                pass
+
+        # Link: member ST -> event ST (makes the event discoverable in stimulus-level chain traversal).
+        # 说明：刺激级查存一体当前主要通过 diff_table 链式扩展来找到长结构；
+        # 若不建立这类“成员 -> 事件”的结构边，则事件结构很难被检索命中。
+        member_link_upserted_count = 0
+        # NOTE:
+        # - These links are part of the "健全长期结构" requirement: the CS event must be discoverable
+        #   through stimulus-level chain traversal (diff_table) even after hot-path updates.
+        # - We therefore upsert links on both create and update. StructureStore.add_diff_entry() is
+        #   already idempotent (same target/residual/relation_type will be reinforced instead of duplicated).
+        if bool(link_members_to_event) and structure_id:
+            try:
+                link_w = max(0.05, min(1.2, 0.85 / max(1.0, math.sqrt(float(len(cleaned_members))))))
+            except Exception:
+                link_w = 0.2
+            for comp_index, member_id in enumerate(cleaned_members):
+                if not member_id or member_id == structure_id:
+                    continue
+                try:
+                    stored = structure_store.add_diff_entry(
+                        member_id,
+                        target_id=structure_id,
+                        content_signature=structure_id,
+                        base_weight=float(link_w),
+                        entry_type="structure_ref",
+                        ext={
+                            "relation_type": "cs_event_member",
+                            "cs_event_ref_id": signature,
+                            "cs_event_structure_id": structure_id,
+                            "cs_component_index": int(comp_index),
+                            "persisted_at_ms": now_ms,
+                            "persist_reason": str(reason or ""),
+                        },
+                    )
+                    if stored is not None:
+                        member_link_upserted_count += 1
+                except Exception:
+                    pass
+
+        # ================================================================
+        # Component Chain Index (local DB chain, O(local) existence check)
+        # ================================================================
+        #
+        # Goal:
+        # - event structures should be "健全": discoverable via local DB chain traversal,
+        #   not only via global signature lookup.
+        # - Align with the design doc: open A DB, find residual B -> get A+B pointer,
+        #   open A+B DB, find residual D -> get A+B+D pointer, ...
+        #
+        # Implementation:
+        # - Ensure prefix event structures exist for [c1,c2], [c1,c2,c3], ... (bounded by max_event_component_count).
+        # - Upsert one-step diff edges:
+        #   owner=c1 -> target=prefix2 (next_component=c2)
+        #   owner=prefix2 -> target=prefix3 (next_component=c3)
+        #   ...
+        #
+        # Notes:
+        # - We keep member->event links (cs_event_member) as an additional bridge, but the chain edges
+        #   are the primary "existence check" path for CS events.
+        if structure_id and bool(ensure_component_chain_index):
+            try:
+                parts = str(signature).split("::")
+                prefix_base = str(parts[0] or "").strip() if len(parts) >= 2 else ""
+                if prefix_base and len(cleaned_members) >= 2:
+                    # Resolve component display tokens once (for prefix display text).
+                    comp_display: dict[str, str] = {}
+                    for mid in cleaned_members:
+                        try:
+                            st_obj = structure_store.get(mid)
+                            st_block = st_obj.get("structure", {}) if isinstance(st_obj, dict) else {}
+                            disp = str((st_block or {}).get("display_text", "") or "").strip()
+                            comp_display[mid] = disp or str(mid)
+                        except Exception:
+                            comp_display[mid] = str(mid)
+
+                    def _sig_for_prefix(members: list[str]) -> str:
+                        return f"{prefix_base}::" + "::".join(str(x) for x in members if str(x))
+
+                    def _display_for_prefix(members: list[str]) -> str:
+                        # Keep a stable, readable joiner; exact joiner is not semantically critical.
+                        return " -> ".join(comp_display.get(mid, mid) for mid in members)
+
+                    prefix_structure_id_by_len: dict[int, str] = {len(cleaned_members): str(structure_id)}
+                    prefix_sig_by_len: dict[int, str] = {len(cleaned_members): str(signature)}
+
+                    # Ensure prefix structures exist for len=2..n-1 (n is the full event length).
+                    for k in range(2, len(cleaned_members)):
+                        prefix_members = cleaned_members[:k]
+                        prefix_sig = _sig_for_prefix(prefix_members)
+                        prefix_sig_by_len[k] = prefix_sig
+                        prefix_display = _display_for_prefix(prefix_members) or prefix_sig
+                        res = self.upsert_cognitive_stitching_event_structure(
+                            event_ref_id=prefix_sig,
+                            member_refs=list(prefix_members),
+                            display_text=prefix_display,
+                            diff_rows=None,
+                            trace_id=f"{trace_id}_cs_prefix_{k}",
+                            tick_id=tick_id,
+                            reason=f"{reason}:component_chain_prefix",
+                            max_diff_entries=max_diff_entries,
+                            sequence_groups=None,
+                            flat_tokens=None,
+                            cs_ext={
+                                "stage": "cs_event_component_chain_prefix",
+                                "full_event_ref_id": signature,
+                                "prefix_len": int(k),
+                            },
+                            link_members_to_event=False,
+                            ensure_component_chain_index=False,
+                        )
+                        if bool(res.get("success", False)):
+                            pid = str((res.get("data", {}) or {}).get("structure_id", "") or "")
+                            if pid:
+                                prefix_structure_id_by_len[k] = pid
+                                component_chain_prefix_upserted_count += 1
+
+                    # For n==2, the only prefix structure is the full event itself.
+                    if len(cleaned_members) == 2:
+                        prefix_structure_id_by_len[2] = str(structure_id)
+                        prefix_sig_by_len[2] = str(signature)
+                    else:
+                        prefix_sig_by_len[2] = _sig_for_prefix(cleaned_members[:2])
+
+                    # Chain edges: c1 -> prefix2, prefix2 -> prefix3, ...
+                    chain_w = 0.85
+                    # Step 1: owner is the first component structure.
+                    owner0 = cleaned_members[0]
+                    target2 = prefix_structure_id_by_len.get(2, "")
+                    if owner0 and target2:
+                        target2_sig = prefix_sig_by_len.get(2, "")
+                        stored = structure_store.add_diff_entry(
+                            owner0,
+                            target_id=target2,
+                            content_signature=cleaned_members[1],
+                            base_weight=float(chain_w),
+                            entry_type="structure_ref",
+                            ext={
+                                "relation_type": "cs_event_component_step",
+                                # Stable key: the edge represents the existence of the *target prefix*.
+                                # Do NOT store the full-event ref id here, otherwise repeated upserts for
+                                # longer events could overwrite ext fields in-place.
+                                "cs_event_ref_id": target2_sig,
+                                "cs_next_component_id": cleaned_members[1],
+                                "cs_target_prefix_len": 2,
+                                "cs_target_prefix_ref_id": target2_sig,
+                                "persisted_at_ms": now_ms,
+                                "persist_reason": str(reason or ""),
+                            },
+                        )
+                        if stored is not None:
+                            component_chain_edge_upserted_count += 1
+
+                    # Steps 2..n-1
+                    for k in range(2, len(cleaned_members)):
+                        owner_id = prefix_structure_id_by_len.get(k, "")
+                        target_id = prefix_structure_id_by_len.get(k + 1, "")
+                        next_component_id = cleaned_members[k]  # 0-based
+                        if not owner_id or not target_id or not next_component_id:
+                            continue
+                        target_sig = prefix_sig_by_len.get(k + 1, signature)
+                        stored = structure_store.add_diff_entry(
+                            owner_id,
+                            target_id=target_id,
+                            content_signature=next_component_id,
+                            base_weight=float(chain_w),
+                            entry_type="structure_ref",
+                            ext={
+                                "relation_type": "cs_event_component_step",
+                                "cs_event_ref_id": target_sig,
+                                "cs_next_component_id": next_component_id,
+                                "cs_target_prefix_len": int(k + 1),
+                                "cs_target_prefix_ref_id": target_sig,
+                                "persisted_at_ms": now_ms,
+                                "persist_reason": str(reason or ""),
+                            },
+                        )
+                        if stored is not None:
+                            component_chain_edge_upserted_count += 1
+            except Exception:
+                # Best-effort only: if chain indexing fails, the event structure itself is still persisted.
+                pass
+
+        if structure_id and diff_rows:
+            max_n = int(max_diff_entries) if max_diff_entries is not None else 96
+            max_n = max(0, min(512, max_n))
+            # Remove previously consolidated edges for this event (keep other relation types).
+            try:
+                removed_diff_count = int(
+                    structure_store.remove_diff_entries(
+                        structure_id,
+                        predicate=lambda e: isinstance(e, dict)
+                        and str((e.get("ext", {}) or {}).get("relation_type", "") or "") == "cs_event_outgoing"
+                        and str((e.get("ext", {}) or {}).get("cs_event_ref_id", "") or "") == signature,
+                    )
+                    or 0
+                )
+            except Exception:
+                removed_diff_count = 0
+
+            for row in list(diff_rows[:max_n]):
+                if not isinstance(row, dict):
+                    continue
+                target_id = str(row.get("target_id", "") or "")
+                if not target_id:
+                    continue
+                try:
+                    w = max(0.0, float(row.get("base_weight", 0.0) or 0.0))
+                except Exception:
+                    w = 0.0
+                if w <= 0.0:
+                    continue
+                entry_type = str(row.get("entry_type", "structure_ref") or "structure_ref")
+                ext = dict(row.get("ext", {}) or {})
+                ext.update(
+                    {
+                        "relation_type": "cs_event_outgoing",
+                        "cs_event_ref_id": signature,
+                        "persist_reason": str(reason or ""),
+                        "persisted_at_ms": now_ms,
+                    }
+                )
+                stored = structure_store.add_diff_entry(
+                    structure_id,
+                    target_id=target_id,
+                    content_signature=target_id,
+                    base_weight=float(w),
+                    entry_type=entry_type,
+                    ext=ext,
+                )
+                if stored is not None:
+                    upserted_diff_count += 1
+
+        result = {
+            "event_ref_id": signature,
+            "structure_id": structure_id,
+            "created": bool(created),
+            "updated_structure_fields": bool(updated_structure_fields),
+            "member_ref_count": int(len(cleaned_members)),
+            "member_link_upserted_count": int(member_link_upserted_count),
+            "component_chain_prefix_upserted_count": int(component_chain_prefix_upserted_count),
+            "component_chain_edge_upserted_count": int(component_chain_edge_upserted_count),
+            "diff_row_input_count": int(len(diff_rows or [])),
+            "diff_removed_count": int(removed_diff_count),
+            "diff_upserted_count": int(upserted_diff_count),
+        }
+        self._audit.record(
+            trace_id=trace_id,
+            interface="upsert_cognitive_stitching_event_structure",
+            action="upsert_cognitive_stitching_event_structure",
+            reason=str(reason or ""),
+            detail=result,
+        )
+        return self._make_response(
+            True,
+            "OK",
+            "CS 事件结构已持久化 / CS event persisted",
+            data=result,
+            trace_id=trace_id,
+            tick_id=tick_id,
+            elapsed_ms=self._elapsed_ms(start_time),
+            interface="upsert_cognitive_stitching_event_structure",
+        )
 
     def self_check_hdb(
         self,
@@ -691,6 +1592,24 @@ class HDB:
             tick_id=tick_id,
         )
         for item in result.get("items", []):
+            memory_id = str(item.get("memory_id", ""))
+            if memory_id:
+                episodic_obj = self._episodic_store.get(memory_id)
+                memory_material = (
+                    dict((episodic_obj or {}).get("meta", {}).get("ext", {}).get("memory_material", {}) or {})
+                    if isinstance(episodic_obj, dict)
+                    else {}
+                )
+                seq_groups = memory_material.get("sequence_groups", [])
+                grouped_display_text = str(memory_material.get("grouped_display_text", "") or "")
+                if grouped_display_text:
+                    item["display_text"] = grouped_display_text
+                elif isinstance(seq_groups, list) and seq_groups:
+                    refreshed = self._cut.build_sequence_profile_from_groups(
+                        [dict(group) for group in seq_groups if isinstance(group, dict)]
+                    ).get("display_text", "")
+                    if refreshed:
+                        item["display_text"] = refreshed
             item["structure_ref_items"] = self._resolve_structure_refs(item.get("structure_refs", []))
             item["group_ref_items"] = self._resolve_group_refs(item.get("group_refs", []))
         self._logger.brief(
@@ -748,6 +1667,24 @@ class HDB:
             sort_by=sort_by,
         )
         for item in result.get("items", []):
+            memory_id = str(item.get("memory_id", ""))
+            if memory_id:
+                episodic_obj = self._episodic_store.get(memory_id)
+                memory_material = (
+                    dict((episodic_obj or {}).get("meta", {}).get("ext", {}).get("memory_material", {}) or {})
+                    if isinstance(episodic_obj, dict)
+                    else {}
+                )
+                seq_groups = memory_material.get("sequence_groups", [])
+                grouped_display_text = str(memory_material.get("grouped_display_text", "") or "")
+                if grouped_display_text:
+                    item["display_text"] = grouped_display_text
+                elif isinstance(seq_groups, list) and seq_groups:
+                    refreshed = self._cut.build_sequence_profile_from_groups(
+                        [dict(group) for group in seq_groups if isinstance(group, dict)]
+                    ).get("display_text", "")
+                    if refreshed:
+                        item["display_text"] = refreshed
             item["structure_ref_items"] = self._resolve_structure_refs(item.get("structure_refs", []))
             item["group_ref_items"] = self._resolve_group_refs(item.get("group_refs", []))
         return self._make_response(
@@ -833,6 +1770,45 @@ class HDB:
     def make_runtime_structure_object(self, structure_id: str, er: float, ev: float, reason: str = "hdb_projection") -> dict | None:
         return self._structure_store.make_runtime_object(structure_id, er=er, ev=ev, reason=reason)
 
+    def make_runtime_group_object(self, group_id: str, er: float, ev: float, reason: str = "hdb_group_projection") -> dict | None:
+        group_obj = self._group_store.get(group_id)
+        if group_obj is None:
+            return None
+        profile = restore_group_profile(
+            group_obj,
+            cut_engine=self._cut,
+            structure_store=self._structure_store,
+            group_store=self._group_store,
+        )
+        display_text = str(profile.get("display_text", "") or group_id)
+        now_ms = int(time.time() * 1000)
+        return {
+            "id": group_id,
+            "object_type": "sg",
+            "sub_type": group_obj.get("sub_type", "event_template_group"),
+            "content": {
+                "raw": display_text,
+                "display": display_text,
+                "normalized": display_text,
+            },
+            "energy": {
+                "er": round(float(er), 6),
+                "ev": round(float(ev), 6),
+            },
+            # Keep the stored group object, but attach a restored view for runtime visibility.
+            "group": dict(group_obj),
+            "group_structure": dict(profile),
+            "source": {
+                "module": __module_name__,
+                "interface": "make_runtime_group_object",
+                "origin": reason or "hdb_group_projection",
+                "origin_id": group_id,
+                "parent_ids": list(group_obj.get("required_structure_ids", [])),
+            },
+            "created_at": group_obj.get("created_at", now_ms),
+            "updated_at": now_ms,
+        }
+
     def make_runtime_memory_object(
         self,
         memory_id: str,
@@ -845,12 +1821,16 @@ class HDB:
         episodic_obj = self._episodic_store.get(memory_id)
         if episodic_obj is None:
             return None
-        runtime_display = (
+        full_runtime_display = (
             str(display_text or "")
             or str(episodic_obj.get("meta", {}).get("ext", {}).get("display_text", ""))
             or str(episodic_obj.get("event_summary", ""))
             or str(memory_id)
         )
+        max_display_chars = max(80, int(self._config.get("runtime_memory_display_max_chars", 240)))
+        runtime_display = full_runtime_display
+        if len(runtime_display) > max_display_chars:
+            runtime_display = f"{runtime_display[:max_display_chars]}...(len={len(full_runtime_display)})"
         return {
             "id": memory_id,
             "object_type": "em",
@@ -871,6 +1851,7 @@ class HDB:
                 "group_refs": list(episodic_obj.get("group_refs", [])),
                 "backing_structure_id": str(backing_structure_id or ""),
                 "display_text": runtime_display,
+                "full_display_text": full_runtime_display,
             },
             "source": {
                 "module": __module_name__,
@@ -898,6 +1879,7 @@ class HDB:
             else:
                 rejected.append(key)
         self._weight.update_config(self._config)
+        self._cut.update_config(self._config)
         self._pointer_index.update_config(self._config)
         self._maintenance.update_config(self._config)
         self._snapshot.update_config(self._config)

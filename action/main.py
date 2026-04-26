@@ -1,29 +1,25 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
-AP 行动管理模块（Action/Drive）— 主模块
-=====================================
+AP 原型行动模块（Action / Drive）
+=================================
 
-对齐理论核心（3.12 Step 9 / 4.2.*）的原型落地目标：
-  - 维护行动节点（Action Node, 行动意图）
-  - 每 tick 更新 Drive（驱动力）并衰减
-  - 当 Drive 超过阈值时，按阈值“消耗”并尝试触发行动
+职责：
+  - 维护 Action Node / Drive 运行态；
+  - 接收来自先天脚本、CFS、记忆激活等来源的触发；
+  - 在每个 tick 内完成驱动衰减、触发增益、竞争裁决与执行；
+  - 输出新的注意力指令、调制信号与回忆请求。
 
-当前 MVP 范围（可运行优先）：
-  - 仅实现“内在行动器”：
-    1) 注意力聚焦（带参 focus_directives）
-    2) 注意力发散/聚焦模式（通过 modulation.top_n 影响下一 tick）
-    3) 回忆行动（从记忆赋能池 MAP 选一个候选，生成聚焦指令）
-  - 不调用外部工具，不调用外部大模型，不生成真实语言输出
+当前定位：
+  - 属于 MVP / 原型阶段实现；
+  - 强调“可观察、可审计、可调参”，不追求复杂行动规划。
 
-术语与缩写 / Glossary
---------------------
-  - 行动节点（Action Node, AN）
-  - 驱动力（Drive）
-  - 状态池（StatePool, SP）
-  - 认知感受信号（CFS, Cognitive Feeling Signals）
-  - 情绪递质管理器（EMgr/NT）
-  - 先天编码脚本管理器（IESM）
-  - 记忆赋能池（MAP, Memory Activation Pool）
+术语：
+  - Action Node：行动节点
+  - Drive：行动驱动力
+  - StatePool：状态池
+  - CFS：Cognitive Feeling Signals，认知感受信号
+  - EMgr / NT：情绪管理器 / 神经递质调制
+  - MAP：Memory Activation Pool，记忆激活池
 """
 
 from __future__ import annotations
@@ -53,80 +49,61 @@ def _load_yaml_config(path: str) -> dict:
 
 _DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": True,
-    # ---- Drive (驱动力) ----
+    # ---- Drive / 驱动力 ----
     "drive_decay_ratio": 0.85,
     "drive_max": 3.0,
     "node_idle_prune_ticks": 18,
     "max_action_nodes": 64,
-    # ---- Execution limits / 执行配额（对齐理论 4.2.1.3 行动预算）----
-    # 理论口径：每个行动器（Action Executor）有独立行动预算，
-    # 在同一个 tick 内不应无限执行同类行动，否则会造成“无穷聚焦/无穷回忆”的失控。
+    # ---- Execution limits / 执行预算 ----
+    # 理论口径：每个行动器（可粗略映射为 action_kind）都应有每 tick 的执行预算。
+    # 同一 tick 内不能无上限执行同类行动，否则容易出现无穷聚焦、无穷回忆等失控现象。
     #
-    # 工程落地口径（当前原型）：
-    # - 以 action_kind 作为“行动器”的粗粒度标识（例如 attention_focus / recall）。
-    # - 默认每个 action_kind 每 tick 允许执行多个行动（安全上限），
-    #   但“是否冲突”主要由 mutex_key/mutex_keys（互斥资源 key）决定：
-    #     - 冲突：同一 mutex_key 同 tick 只能 1 个胜出
-    #     - 不冲突：不同 mutex_key 可并行执行
-    #
-    # 为什么不把每 kind 默认限制为 1？
-    # - 你在验收口径中明确提出：同一行动器内“不冲突的行动可以同时执行”；冲突的行动不能同时执行。
-    # - 因此默认应允许并行（由互斥域裁决），再用全局 cap 防止爆炸。
-    # - 仍保留一个全局上限，避免未来加入更多 action_kind 后出现意外爆发。
-    # 每个 action_kind 每 tick 最大可执行数（默认）。
-    # 说明：对齐你最新验收口径：默认应尽量“像人”而不是“一次执行很多”。
-    # - 冲突仲裁主要靠 mutex_key/mutex_keys（互斥资源 key）
-    # - 这里的数量上限主要用于“安全刹车”，避免未来把一个 action_kind 细分成多个不冲突域后单 tick 过载
+    # 当前工程口径：
+    # - 用 action_kind 表示行动器的粗粒度类别，例如 attention_focus / recall；
+    # - 同类行动是否互斥，主要由 mutex_key / mutex_keys 决定；
+    # - 数量上限主要作为安全刹车，而不是硬编码行为逻辑。
     "max_actions_per_kind_per_tick_default": 1,
     "max_actions_per_kind_per_tick": {},
     "max_total_actions_per_tick": 8,
-    # ---- Conflict / 冲突仲裁（对齐你提出的“同一行动器：冲突不能同时执行”）----
-    # 说明（工程口径）：
-    # - “是否冲突”由行动器注册表给出默认口径（default_mutex_keys_by_action_kind）。
-    # - 同时允许规则/触发源在 params 中显式指定 mutex_key/mutex_keys 来细分冲突域：
-    #     例如：attention_focus 的 mutex_key=focus:text 与 focus:vision 可视为不冲突并行。
-    # - 冲突仲裁发生在同一 tick 的执行阶段：同一个 mutex_key 只允许 1 个行动胜出。
+    # ---- Conflict / 冲突仲裁 ----
+    # ---- Conflict / Conflict mutex keys ----
+    # Default conflict domains by action_kind.
     "default_mutex_keys_by_action_kind": {
-        # 注意力聚焦：默认互斥（同 tick 只能一个“聚焦类行动”胜出）
         "attention_focus": ["attention_focus"],
-        # 注意力模式：聚焦/发散属于同一资源（attention_mode），因此互斥
+        # 注意力模式：聚焦 / 发散属于同一资源 attention_mode，因此互斥。
         "attention_focus_mode": ["attention_mode"],
         "attention_diverge_mode": ["attention_mode"],
-        # 回忆：默认互斥（同 tick 只能一个回忆行动）
+        # 回忆：默认互斥，同一 tick 只允许一个 recall 动作胜出。
         "recall": ["recall"],
-        # 停止/取消：默认互斥（防止 stop_action 自己被刷屏）
+        # 停止 / 取消：默认互斥，避免 stop_action 自己被重复刷屏。
         "stop_action": ["stop_action"],
     },
-    # ---- Threshold modulation / 行动阈值调制（对齐理论 4.2.1.4）----
-    # 说明：
-    # - base_threshold：规则/触发源给出的“先天基准阈值”
-    # - effective_threshold：本 tick 实际用于判定 drive>=threshold 的阈值
-    # - effective_threshold = base_threshold * threshold_scale
+    # ---- Threshold modulation / 阈值调制（对齐理论 4.2.1.4）----
+    # 璇存槑锛?    # - base_threshold锛氳鍒?瑙﹀彂婧愮粰鍑虹殑鈥滃厛澶╁熀鍑嗛槇鍊尖€?    # - effective_threshold锛氭湰 tick 瀹為檯鐢ㄤ簬鍒ゅ畾 drive>=threshold 鐨勯槇鍊?    # - effective_threshold = base_threshold * threshold_scale
     #
-    # threshold_scale 的来源（原型实现）：
-    # 1) 情绪递质 NT（例如 DA 降低阈值、COR 提高阈值）
-    # 2) 行动疲劳（重复执行会提高阈值，防止死循环）
+    # threshold_scale 鐨勬潵婧愶紙鍘熷瀷瀹炵幇锛夛細
+    # 1) 鎯呯华閫掕川 NT锛堜緥濡?DA 闄嶄綆闃堝€笺€丆OR 鎻愰珮闃堝€硷級
+    # 2) 琛屽姩鐤插姵锛堥噸澶嶆墽琛屼細鎻愰珮闃堝€硷紝闃叉姝诲惊鐜級
     "threshold_scale_by_nt": {
         # key: NT channel code; value: linear coefficient.
-        # 线性系数：scale = 1 + Σ(nt[ch] * coef)
-        "DA": -0.25,   # 多巴胺（奖励驱动）偏冲动：阈值降低
-        "ADR": -0.06,  # 肾上腺素（警觉唤醒）轻微降低阈值（更容易启动行动）
-        "OXY": -0.05,  # 催产素（亲和连接）轻微降低阈值（更愿意互动/回应）
-        "SER": +0.06,  # 血清素（稳定满足）轻微提高阈值（更稳重）
-        "END": -0.03,  # 内啡肽（舒缓镇痛）轻微降低阈值（更容易采取缓解行动）
-        "COR": +0.30,  # 皮质醇（长期警戒）提高阈值（更保守）
+        # 绾挎€х郴鏁帮細scale = 1 + 危(nt[ch] * coef)
+        "DA": -0.25,
+        "ADR": -0.06,
+        "OXY": -0.05,
+        "SER": +0.06,
+        "END": -0.03,
+        "COR": +0.30,
     },
     "threshold_scale_min": 0.55,
     "threshold_scale_max": 1.75,
-    # ---- Action fatigue (local) / 行动疲劳（模块内局部实现）----
     "action_fatigue_enabled": True,
     "action_fatigue_decay_ratio": 0.92,
     "action_fatigue_increase_on_execute": 0.35,
     "action_fatigue_threshold_gain": 0.55,  # effective_threshold *= (1 + fatigue*gain)
-    # ---- Attention focus directives (注意力聚焦，带参) ----
+    # ---- Attention focus directives / 注意力聚焦（带参数）----
     "focus_threshold": 0.30,
     "focus_gain_base": 1.00,
-    # ---- Attention focus/diverge mode (注意力聚焦/发散模式) ----
+    # ---- Attention focus/diverge mode / 注意力聚焦-发散模式 ----
     "mode_threshold": 0.55,
     "mode_drive_gain": 0.60,
     "focus_mode_complexity_threshold": 0.65,
@@ -134,44 +111,31 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "mode_focus_top_n_scale": 0.70,
     "mode_diverge_top_n_scale": 1.30,
     "mode_cooldown_ticks": 2,
-    # ---- Recall (回忆行动) ----
+    # ---- Recall / 回忆行动 ----
     "recall_threshold": 0.40,
     "recall_gain_base": 0.90,
     "recall_trigger_kinds": ["expectation", "pressure"],
     "recall_min_strength": 0.45,
     "recall_focus_boost": 0.65,
     "recall_ttl_ticks": 2,
-    # Recall candidate competition (parameterized recall) / 回忆候选竞争（带参回忆，偏理论口径）
-    # - 疲劳：短期内被选中过的记忆会被惩罚，促进多次回忆命中更多不同记忆
-    "recall_memory_fatigue_window_ticks": 4,
+    # Recall candidate competition (parameterized recall) / 鍥炲繂鍊欓€夌珵浜夛紙甯﹀弬鍥炲繂锛屽亸鐞嗚鍙ｅ緞锛?    # - 鐤插姵锛氱煭鏈熷唴琚€変腑杩囩殑璁板繂浼氳鎯╃綒锛屼績杩涘娆″洖蹇嗗懡涓洿澶氫笉鍚岃蹇?    "recall_memory_fatigue_window_ticks": 4,
     "recall_memory_fatigue_penalty": 0.60,
-    # - 时间/新鲜度影响：更接近目标时间、且记忆本身更“新”的候选更占优
+    # - 鏃堕棿/鏂伴矞搴﹀奖鍝嶏細鏇存帴杩戠洰鏍囨椂闂淬€佷笖璁板繂鏈韩鏇粹€滄柊鈥濈殑鍊欓€夋洿鍗犱紭
     "recall_recency_scale_sec": 30.0,
-    # recall -> MAP（记忆赋能池）的赋能量（MVP 映射）
-    #
-    # 说明（重要）：
-    # - Drive（驱动力）不是 ER/EV（双能量），二者单位不同。
-    # - 但为了让“回忆行动”能在原型阶段形成闭环（对齐理论 4.2.7.2：回忆->记忆进入 MAP->记忆反哺回到状态池），
-    #   我们需要一个“Drive 消耗 -> MAP 能量赋能”的映射。
-    # - 这里用一个可配置的线性映射：delta_ev ≈ effective_threshold * per_threshold * strength
-    #   并设置 min/max，避免回忆一触发就把 MAP/状态池灌爆。
-    "recall_map_delta_ev_per_threshold": 0.90,
+    # recall -> MAP锛堣蹇嗚祴鑳芥睜锛夌殑璧嬭兘閲忥紙MVP 鏄犲皠锛?    #
+    # 璇存槑锛堥噸瑕侊級锛?    # - Drive锛堥┍鍔ㄥ姏锛変笉鏄?ER/EV锛堝弻鑳介噺锛夛紝浜岃€呭崟浣嶄笉鍚屻€?    # - 浣嗕负浜嗚鈥滃洖蹇嗚鍔ㄢ€濊兘鍦ㄥ師鍨嬮樁娈靛舰鎴愰棴鐜紙瀵归綈鐞嗚 4.2.7.2锛氬洖蹇?>璁板繂杩涘叆 MAP->璁板繂鍙嶅摵鍥炲埌鐘舵€佹睜锛夛紝
+    #   鎴戜滑闇€瑕佷竴涓€淒rive 娑堣€?-> MAP 鑳介噺璧嬭兘鈥濈殑鏄犲皠銆?    # - 杩欓噷鐢ㄤ竴涓彲閰嶇疆鐨勭嚎鎬ф槧灏勶細delta_ev 鈮?effective_threshold * per_threshold * strength
+    #   骞惰缃?min/max锛岄伩鍏嶅洖蹇嗕竴瑙﹀彂灏辨妸 MAP/鐘舵€佹睜鐏岀垎銆?    "recall_map_delta_ev_per_threshold": 0.90,
     "recall_map_delta_ev_min": 0.08,
     "recall_map_delta_ev_max": 0.85,
     "recall_map_mode_tag": "recall_action",
-    # ---- Built-in triggers (legacy fallback) / 内置触发源（旧逻辑回退）----
-    # 说明：
-    # - 为了满足验收口径：“先天行动触发规则应可在 IESM 先天规则里观察与编辑”，
-    #   复杂度/回忆这类触发源建议由 IESM 通过 action_trigger 输出，而不是行动模块内部硬编码。
-    # - 因此默认关闭内置触发；如需快速验证或回退，可手动打开。
-    "enable_builtin_triggers_complexity": False,
+    # ---- Built-in triggers (legacy fallback) / 鍐呯疆瑙﹀彂婧愶紙鏃ч€昏緫鍥為€€锛?---
+    # 璇存槑锛?    # - 涓轰簡婊¤冻楠屾敹鍙ｅ緞锛氣€滃厛澶╄鍔ㄨЕ鍙戣鍒欏簲鍙湪 IESM 鍏堝ぉ瑙勫垯閲岃瀵熶笌缂栬緫鈥濓紝
+    #   澶嶆潅搴?鍥炲繂杩欑被瑙﹀彂婧愬缓璁敱 IESM 閫氳繃 action_trigger 杈撳嚭锛岃€屼笉鏄鍔ㄦā鍧楀唴閮ㄧ‖缂栫爜銆?    # - 鍥犳榛樿鍏抽棴鍐呯疆瑙﹀彂锛涘闇€蹇€熼獙璇佹垨鍥為€€锛屽彲鎵嬪姩鎵撳紑銆?    "enable_builtin_triggers_complexity": False,
     "enable_builtin_triggers_recall": False,
     # ---- Observability / 可观测性 ----
-    # executed_history_keep / 最近执行历史保留条数
-    # 作用：前端“行动监控”页需要看到最近执行过哪些行动、来源是先天触发还是内驱触发。
-    # 说明：仅用于观测与调试；不会影响行动逻辑。
-    "executed_history_keep": 200,
-    # ---- 日志 ----
+    # executed_history_keep / 鏈€杩戞墽琛屽巻鍙蹭繚鐣欐潯鏁?    # 浣滅敤锛氬墠绔€滆鍔ㄧ洃鎺р€濋〉闇€瑕佺湅鍒版渶杩戞墽琛岃繃鍝簺琛屽姩銆佹潵婧愭槸鍏堝ぉ瑙﹀彂杩樻槸鍐呴┍瑙﹀彂銆?    # 璇存槑锛氫粎鐢ㄤ簬瑙傛祴涓庤皟璇曪紱涓嶄細褰卞搷琛屽姩閫昏緫銆?    "executed_history_keep": 200,
+    # ---- 鏃ュ織 ----
     "log_dir": "",
     "log_max_file_bytes": 5 * 1024 * 1024,
     "stdout_fallback_when_log_fail": True,
@@ -179,13 +143,7 @@ _DEFAULT_CONFIG: dict[str, Any] = {
 
 
 class ActionManager:
-    """
-    行动管理器（Action Manager）。
-
-    说明：
-      - 本模块维护的 drive 是“行动触发资源”，不是 ER/EV（双能量）。
-      - 但 drive 与 ER/EV 的关系可以由未来脚本化公式对齐（例如 drive_gain 受 NT/CFS 调制）。
-    """
+    """Action manager for Drive-based action execution in the current prototype."""
 
     def __init__(self, config_path: str = "", config_override: dict | None = None):
         self._config_path = config_path or os.path.join(os.path.dirname(__file__), "config", "action_config.yaml")
@@ -199,28 +157,34 @@ class ActionManager:
         self._tick_counter = 0
         # action_id -> node dict
         self._nodes: dict[str, dict[str, Any]] = {}
-        # Built-in executor registry (for observability) / 内置行动器注册表（用于观测与审计）
+        # Built-in executor registry for observability and audit.
         self._executor_registry: list[dict[str, Any]] = self._build_executor_registry()
-        # Recent executed actions ring buffer / 最近执行行动环形缓冲（用于前端观测）
+        # Recent executed actions ring buffer for observatory display.
         self._executed_history: list[dict[str, Any]] = []
-        # Recall memory fatigue (short-term) / 回忆记忆疲劳（短期）
+        # Pending async completions used to simulate delayed action results.
+        # This is important for expectation-contract experiments where an
+        # action may be triggered now but only complete in a later tick.
+        # Each entry has the form:
+        #     {
+        #       "action_id": "...",
+        #       "action_kind": "...",
+        #       "due_tick_number": 123,
+        #       "completion_record": { ... executed_actions row ... },
+        #     }
+        # This queue is runtime-only and is not persisted.
+        self._pending_async_completions: list[dict[str, Any]] = []
+        # Recall memory fatigue (short-term).
         # - key: memory_id
         # - value: last picked tick_index (from run_action_cycle input), used for diversification
         self._recall_memory_last_picked_tick: dict[str, int] = {}
 
     def _build_executor_registry(self) -> list[dict[str, Any]]:
-        """
-        行动器注册表（内置）。
-
-        目的：
-          - 让前端观测台能“看到系统到底注册了哪些行动接口”
-          - 便于把 IESM（先天规则）的 action_trigger 与行动器能力对齐
-        """
+        """Build the built-in executor registry used by the observatory and IESM."""
         return [
             {
                 "action_kind": "attention_focus",
                 "title_zh": "注意力聚焦（内在行动器，带参）",
-                "desc_zh": "输出 focus_directive，下一 tick 会影响注意力筛选排序。该行动不会直接修改状态池能量。",
+                "desc_zh": "输出 focus_directive，并在下一 tick 影响注意力筛选顺序；该行动不会直接修改状态池能量。",
                 "params_schema": {
                     "focus_directive": {
                         "directive_type": "attention_focus",
@@ -250,13 +214,27 @@ class ActionManager:
             {
                 "action_kind": "recall",
                 "title_zh": "回忆行动（内在行动器）",
-                "desc_zh": "从记忆赋能池（MAP）选一个候选，生成聚焦指令，引导下一 tick 的注意力回到相关记忆结构。",
+                "desc_zh": "从记忆赋能池（MAP）选择一个候选，生成聚焦指令，引导下一 tick 的注意力回到相关记忆结构。",
                 "params_schema": {
                     "trigger_kind": "expectation/pressure 等",
                     "trigger_strength": "0~1",
                     "trigger_target": "可选：目标对象信息",
                 },
                 "sources_zh": ["认知感受 CFS: expectation/pressure", "先天规则 IESM action_trigger(kind=recall)"],
+            },
+            {
+                "action_kind": "weather_stub",
+                "title_zh": "工具行动：天气查询（Stub 占位实现）",
+                "desc_zh": (
+                    "用于数据集与元学习实验的占位行动器：不真的查询天气，只模拟“被先天规则触发 -> 消耗 drive -> 下一 tick 完成并产出可审计执行记录”。"
+                    "该行动器的目标是验证 if 条件训练样本（成功 / 失败）与教师奖励闭环，而不是提供真实工具能力。"
+                ),
+                "params_schema": {
+                    "disable_threshold_modulation": "true/false（是否禁用阈值调制，便于实验稳定复现）",
+                    "async_delay_ticks": ">=1（异步完成延迟的 tick 数，默认 1）",
+                    "feedback_text": "可选：完成时的系统反馈文本（仅用于审计展示）",
+                },
+                "sources_zh": ["先天规则 IESM action_trigger(kind=weather_stub)"],
             },
         ]
 
@@ -265,6 +243,30 @@ class ActionManager:
             self._logger.close()
         except Exception:
             pass
+
+    def clear_runtime_state(self, *, trace_id: str = "", reason: str = "runtime_reset") -> dict[str, Any]:
+        start_time = time.time()
+        result = {
+            "cleared_node_count": len(self._nodes),
+            "cleared_executed_history_count": len(self._executed_history),
+            "cleared_pending_async_count": len(self._pending_async_completions),
+            "cleared_recall_memory_fatigue_count": len(self._recall_memory_last_picked_tick),
+            "tick_counter_before": int(self._tick_counter),
+        }
+        self._tick_counter = 0
+        self._nodes.clear()
+        self._executed_history.clear()
+        self._pending_async_completions.clear()
+        self._recall_memory_last_picked_tick.clear()
+        return self._make_response(
+            True,
+            "OK",
+            f"行动模块运行态已清空 / Action runtime cleared ({reason})",
+            data=result,
+            trace_id=trace_id,
+            tick_id="",
+            elapsed_ms=self._elapsed_ms(start_time),
+        )
 
     # ================================================================== #
     # Main interface                                                      #
@@ -282,18 +284,7 @@ class ActionManager:
         innate_action_triggers: list[dict] | None = None,
         memory_activation_snapshot: dict | None = None,
     ) -> dict:
-        """
-        主入口：更新驱动力、竞争并尝试触发行动。
-
-        输入说明（原型口径）：
-          - cfs_signals：来自 CFS 的结构化信号列表（含强度、目标）
-          - emotion_state：来自 EMgr 的输出（含 modulation/nt_state）
-          - innate_focus_directives：IESM 生成的 focus_directives（当前实现把它视为行动触发源）
-          - memory_activation_snapshot：HDB 记忆赋能池快照（用于回忆行动选目标）
-        """
         start_time = time.time()
-        self._tick_counter += 1
-        tick_number = self._tick_counter
 
         cfs_signals = list(cfs_signals or [])
         emotion_state = emotion_state or {}
@@ -301,11 +292,14 @@ class ActionManager:
         innate_action_triggers = list(innate_action_triggers or [])
         memory_activation_snapshot = memory_activation_snapshot or {}
 
+        tick_number = int(tick_index)
+        current_tick_number = tick_number
+
         if not self._config.get("enabled", True):
             return self._make_response(
                 True,
                 "OK_DISABLED",
-                "行动模块已禁用 / Action module disabled",
+                "琛屽姩妯″潡宸茬鐢?/ Action module disabled",
                 data={
                     "executed_actions": [],
                     "focus_directives_out": [],
@@ -318,53 +312,75 @@ class ActionManager:
                 elapsed_ms=self._elapsed_ms(start_time),
             )
 
-        # ---- Step 1: build triggers / 构造触发源 ----
+        # ---- Step 1: build triggers / 鏋勯€犺Е鍙戞簮 ----
         triggers: list[dict[str, Any]] = []
         triggers.extend(self._triggers_from_focus_directives(innate_focus_directives))
         triggers.extend(self._triggers_from_action_triggers(innate_action_triggers))
         # NOTE:
-        # - 复杂度/回忆等触发源推荐由 IESM 规则通过 action_trigger 输出（便于观察与编辑）。
-        # - 此处保留内置触发作为“旧逻辑回退”，默认关闭。
+        # Built-in complexity/recall triggers are legacy fallback paths. Prefer IESM action_trigger outputs when available.
         if bool(self._config.get("enable_builtin_triggers_complexity", False)):
             triggers.extend(self._triggers_from_complexity(cfs_signals))
         if bool(self._config.get("enable_builtin_triggers_recall", False)):
             triggers.extend(self._triggers_from_recall(cfs_signals, memory_activation_snapshot))
 
-        # ---- Step 2: decay drives / 驱动力衰减 ----
+        # ---- Step 2: decay drives / 椹卞姩鍔涜“鍑?----
         decay = float(self._config.get("drive_decay_ratio", 0.85))
         drive_max = float(self._config.get("drive_max", 3.0))
         for node in self._nodes.values():
             node["drive"] = max(0.0, min(drive_max, float(node.get("drive", 0.0)) * decay))
-            node["last_update_tick"] = tick_number
+            node["last_update_tick"] = current_tick_number
             # Reset per-tick trigger summary.
             node["tick_gain_total"] = 0.0
             node["tick_gain_by_source_kind"] = {}
             node["tick_sources"] = []
 
-            # Local fatigue decay (if enabled) / 行动疲劳衰减（若启用）
+            # Local fatigue decay (if enabled) / 行动疲劳衰减
             if bool(self._config.get("action_fatigue_enabled", True)):
                 fr = float(self._config.get("action_fatigue_decay_ratio", 0.92))
                 node["fatigue"] = max(0.0, min(1.0, float(node.get("fatigue", 0.0) or 0.0) * fr))
 
-        # ---- Step 3: apply triggers / 应用触发增益（驱动力增加） ----
+        # ---- Step 3: apply triggers / 搴旂敤瑙﹀彂澧炵泭锛堥┍鍔ㄥ姏澧炲姞锛?----
         for trig in triggers:
-            self._apply_trigger(trig, tick_number=tick_number)
+            self._apply_trigger(trig, tick_number=current_tick_number)
 
-        # ---- Step 4: prune nodes / 淘汰长期闲置节点 ----
-        self._prune_idle_nodes(tick_number=tick_number)
+        # ---- Step 4: prune nodes / 娣樻卑闀挎湡闂茬疆鑺傜偣 ----
+        self._prune_idle_nodes(tick_number=current_tick_number)
 
-        # ---- Step 5: competition + execution / 竞争与执行 ----
-        executed: list[dict[str, Any]] = []
+        # ---- Step 4.5: async completions / ?????? ----
+        # ????????? drive ???????????????? tick ????
+        # ?? expectation-contract ??? stub ??????????????????
+        async_completed: list[dict[str, Any]] = []
+        if self._pending_async_completions:
+            kept_pending: list[dict[str, Any]] = []
+            for entry in list(self._pending_async_completions):
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    due_tick = int(entry.get("due_tick_number", -1) or -1)
+                except Exception:
+                    due_tick = -1
+                if due_tick >= 0 and current_tick_number >= due_tick:
+                    rec = entry.get("completion_record")
+                    if isinstance(rec, dict):
+                        async_completed.append(dict(rec))
+                    action_id = str(entry.get("action_id", "") or "").strip()
+                    if action_id and action_id in self._nodes and isinstance(self._nodes.get(action_id), dict):
+                        # Clear the pending gate so the node can be scheduled again after completion.
+                        self._nodes[action_id].pop("pending_async_until_tick", None)
+                else:
+                    kept_pending.append(entry)
+            self._pending_async_completions = kept_pending
+
+        # ---- Step 5: competition + execution / 绔炰簤涓庢墽琛?----
+        executed: list[dict[str, Any]] = list(async_completed)
         focus_out: list[dict[str, Any]] = []
         modulation_out: dict[str, Any] = {}
-        # recall_requests_out：当“回忆”行动被执行时，输出一个结构化请求，
-        # 由上层观测台（Observatory）负责实际执行“记忆检索 -> MAP 赋能 -> 记忆反哺”副作用，
-        # 从而保持 ActionManager 本身不直接操作 HDB/StatePool（便于审计与测试）。
+        # recall_requests_out: structured recall requests emitted by recall actions.
+        # The upper observatory layer is responsible for recall lookup -> MAP activation -> memory feedback side effects.
         recall_requests_out: list[dict[str, Any]] = []
-        nt = (emotion_state.get("modulation", {}) or {}).get("attention", {}) or {}
 
         # Compute effective thresholds for all nodes once per tick.
-        # 为本 tick 的所有行动节点计算一次“实时阈值”（用于排序与执行判定）。
+        # This threshold is used for ordering and execution gating in the current tick.
         for node in self._nodes.values():
             eff = self._compute_effective_threshold(node=node, emotion_state=emotion_state)
             node["base_threshold"] = float(eff.get("base_threshold", node.get("threshold", 1.0) or 1.0))
@@ -372,24 +388,15 @@ class ActionManager:
             node["effective_threshold"] = float(eff.get("effective_threshold", node.get("threshold", 1.0) or 1.0))
             node["threshold_components"] = eff.get("components", {})
 
-        # Candidate selection (budget + conflict arbitration) / 候选选择（预算 + 冲突仲裁）
-        #
-        # 对齐理论 + 你的验收口径：
-        # 1) 行动器预算（Budget）：同一行动器（粗粒度用 action_kind 表示）在同一个 tick 内的执行数量应有限，
-        #    默认每 tick 只执行 1 个（可配置上调）。
-        # 2) 冲突仲裁（Conflict）：同一行动器内“不冲突”的行动可以并行执行；“冲突”的行动同 tick 只能一个胜出。
-        #    - 冲突域用 mutex_key/mutex_keys 表示（互斥资源 key）。
-        #    - 默认由行动器注册表（default_mutex_keys_by_action_kind）给出；
-        #    - 也允许触发源/规则在 params 中覆盖 mutex_key/mutex_keys 以细分冲突域。
-        #
-        # 竞争排序（用于挑胜者）：
-        #   1) 本 tick 增益 tick_gain_total（可近似理解为“本轮赋能更强”）
-        #   2) 驱动力 drive（行动意图更强）
-        #   3) 规则优先级 rule_priority（安全/终止类规则可更高）
-        #   4) action_id（稳定打破平局）
-
+        # Candidate selection (budget + conflict arbitration) / 鍊欓€夐€夋嫨锛堥绠?+ 鍐茬獊浠茶锛?        #
+        # 瀵归綈鐞嗚 + 浣犵殑楠屾敹鍙ｅ緞锛?        # 1) 琛屽姩鍣ㄩ绠楋紙Budget锛夛細鍚屼竴琛屽姩鍣紙绮楃矑搴︾敤 action_kind 琛ㄧず锛夊湪鍚屼竴涓?tick 鍐呯殑鎵ц鏁伴噺搴旀湁闄愶紝
+        #    榛樿姣?tick 鍙墽琛?1 涓紙鍙厤缃笂璋冿級銆?        # 2) 鍐茬獊浠茶锛圕onflict锛夛細鍚屼竴琛屽姩鍣ㄥ唴鈥滀笉鍐茬獊鈥濈殑琛屽姩鍙互骞惰鎵ц锛涒€滃啿绐佲€濈殑琛屽姩鍚?tick 鍙兘涓€涓儨鍑恒€?        #    - 鍐茬獊鍩熺敤 mutex_key/mutex_keys 琛ㄧず锛堜簰鏂ヨ祫婧?key锛夈€?        #    - 榛樿鐢辫鍔ㄥ櫒娉ㄥ唽琛紙default_mutex_keys_by_action_kind锛夌粰鍑猴紱
+        #    - 涔熷厑璁歌Е鍙戞簮/瑙勫垯鍦?params 涓鐩?mutex_key/mutex_keys 浠ョ粏鍒嗗啿绐佸煙銆?        #
+        # 绔炰簤鎺掑簭锛堢敤浜庢寫鑳滆€咃級锛?        #   1) 鏈?tick 澧炵泭 tick_gain_total锛堝彲杩戜技鐞嗚В涓衡€滄湰杞祴鑳芥洿寮衡€濓級
+        #   2) 椹卞姩鍔?drive锛堣鍔ㄦ剰鍥炬洿寮猴級
+        #   3) 瑙勫垯浼樺厛绾?rule_priority锛堝畨鍏?缁堟绫昏鍒欏彲鏇撮珮锛?        #   4) action_id锛堢ǔ瀹氭墦鐮村钩灞€锛?
         def _max_actions_per_kind(kind: str) -> int:
-            """Get per-kind execution budget for this tick / 获取每类行动器的本 tick 执行上限。"""
+            """Get per-kind execution budget for this tick."""
             default_n = int(self._config.get("max_actions_per_kind_per_tick_default", 1) or 1)
             override = self._config.get("max_actions_per_kind_per_tick", {}) or {}
             if isinstance(override, dict) and str(kind or "") in override:
@@ -400,7 +407,7 @@ class ActionManager:
             return max(0, min(64, default_n))
 
         def _tick_max_rule_priority(node: dict[str, Any]) -> int:
-            """Best-effort: read the max rule_priority from this tick sources / 取本 tick 触发源中最大的 rule_priority。"""
+            """Best-effort: read the max rule_priority from current tick trigger sources."""
             best = 0
             for src in (node.get("tick_sources", []) or []):
                 if not isinstance(src, dict):
@@ -412,7 +419,7 @@ class ActionManager:
             return int(best)
 
         def _rank_key(node: dict[str, Any]) -> tuple[float, float, int, str]:
-            """Sort key for competition within the same action_kind / 同一行动器内竞争排序键。"""
+            """Sort key for competition within the same action_kind."""
             energy_score = float(node.get("tick_gain_total", 0.0) or 0.0)
             drive_score = float(node.get("drive", 0.0) or 0.0)
             pri_score = _tick_max_rule_priority(node)
@@ -421,11 +428,11 @@ class ActionManager:
             return (energy_score, drive_score, pri_score, aid)
 
         def _node_mutex_keys(node: dict[str, Any]) -> list[str]:
-            """Compute mutex keys for a node / 计算行动节点的互斥资源 key 列表。"""
+            """Compute mutex keys for a node."""
             kind2 = str(node.get("action_kind", "") or "").strip()
             params2 = node.get("params") if isinstance(node.get("params"), dict) else {}
 
-            # 1) Explicit override from params / 优先使用规则/触发源显式指定的互斥 key
+            # 1) Explicit override from params / 浼樺厛浣跨敤瑙勫垯/瑙﹀彂婧愭樉寮忔寚瀹氱殑浜掓枼 key
             raw_keys = None
             for k in ("mutex_keys", "mutex_key", "conflict_keys", "conflict_key"):
                 if k in params2:
@@ -442,7 +449,7 @@ class ActionManager:
             elif isinstance(raw_keys, list):
                 keys = [str(x).strip() for x in raw_keys if str(x).strip()]
 
-            # 2) Default registration by action_kind / 默认用行动器注册表口径
+            # 2) Default registration by action_kind.
             if not keys:
                 dm = self._config.get("default_mutex_keys_by_action_kind", {}) or {}
                 if isinstance(dm, dict) and kind2 in dm:
@@ -452,11 +459,11 @@ class ActionManager:
                     elif isinstance(raw, list):
                         keys = [str(x).strip() for x in raw if str(x).strip()]
 
-            # 3) Fallback to action_kind itself / 兜底：以 action_kind 作为互斥域
+            # 3) Fallback to action_kind itself.
             if not keys and kind2:
                 keys = [kind2]
 
-            # Dedupe while keeping order / 去重（保持顺序）
+            # Dedupe while keeping order / 鍘婚噸锛堜繚鎸侀『搴忥級
             deduped: list[str] = []
             seen = set()
             for key in keys:
@@ -466,7 +473,7 @@ class ActionManager:
                 deduped.append(key)
             return deduped
 
-        # Build executable candidates / 生成可执行候选（已过阈值 + 冷却条件满足）
+        # Build executable candidates.
         candidates: list[dict[str, Any]] = []
         for node in self._nodes.values():
             if not self._should_execute(node, tick_number=tick_number):
@@ -475,7 +482,7 @@ class ActionManager:
                 continue
             candidates.append(node)
 
-        # Greedy selection with mutex + per-kind budget / 互斥资源 + 行动器预算的贪婪选择
+        # Greedy selection with mutex + per-kind budget / 浜掓枼璧勬簮 + 琛屽姩鍣ㄩ绠楃殑璐┆閫夋嫨
         exec_cap = int(self._config.get("max_total_actions_per_tick", 8) or 8)
         exec_cap = max(0, min(128, exec_cap))
         kind_counts: dict[str, int] = {}
@@ -507,17 +514,15 @@ class ActionManager:
             ok = True
             produced = {"focus_directives": [], "modulation": {}}
             failure_reason = ""
+            consume_drive = False
+            async_completion_due_tick: int | None = None
 
             if kind == "attention_focus":
                 params = (node.get("params", {}) or {}) if isinstance(node.get("params", {}), dict) else {}
                 directive = dict(params.get("focus_directive", {}) or {}) if isinstance(params.get("focus_directive", {}), dict) else {}
                 if not directive:
-                    # Convenience path:
-                    # If the trigger provides "target_*" fields directly, build a standard focus_directive.
-                    #
-                    # 便捷路径：
-                    # 若触发只给了 target_* 字段（而没给完整 focus_directive），这里自动补齐为标准指令格式，
-                    # 让 IESM 的 action_trigger 更易写、更易读（减少冗长 JSON）。
+                    # Convenience path: accept lightweight target_* fields and
+                    # normalize them into a standard focus_directive structure.
                     target_ref_id = str(params.get("target_ref_object_id", "") or params.get("ref_object_id", "") or "").strip()
                     target_ref_type = str(params.get("target_ref_object_type", "") or params.get("ref_object_type", "") or "").strip()
                     target_item_id = str(params.get("target_item_id", "") or params.get("item_id", "") or "").strip()
@@ -560,7 +565,8 @@ class ActionManager:
                 if directive:
                     produced["focus_directives"].append(directive)
             elif kind in {"attention_focus_mode", "attention_diverge_mode"}:
-                base_top_n = int(nt.get("top_n", 16) or 16)
+                params = (node.get("params", {}) or {}) if isinstance(node.get("params", {}), dict) else {}
+                base_top_n = int(params.get("top_n", 16) or 16)
                 if kind == "attention_focus_mode":
                     scale = float(self._config.get("mode_focus_top_n_scale", 0.70))
                 else:
@@ -581,28 +587,47 @@ class ActionManager:
                 else:
                     ok = False
                     failure_reason = "no_recall_candidate"
+            elif kind == "weather_stub":
+                # Stub executor for tool-like action (no real tool call).
+                #
+                # 鍏抽敭璁捐鐐癸紙瀵归綈浣犵殑瀹為獙鍙ｅ緞锛夛細
+                # - 鈥滃紑濮嬫墽琛屸€濆彂鐢熷湪鏈?tick锛氭秷鑰?drive锛屽苟鎶婅鍔ㄦ爣璁颁负 pending锛?                # - 鈥滄墽琛屽畬鎴愶紙success=true锛夆€濆欢杩熷埌鍚庣画 tick锛氱敱 async completion 闃熷垪浜у嚭璁板綍锛?                #   浠ヤ究 expectation_contract锛堟湡鏈涘绾︼級鑳藉湪鈥滃悗缁?tick鈥濊瀵熷埌鎵ц缁撴灉骞剁敓鎴愬鎯╁弽棣?tick銆?                params = (node.get("params", {}) or {}) if isinstance(node.get("params", {}), dict) else {}
+                delay = 1
+                try:
+                    delay = int(params.get("async_delay_ticks", 1) or 1)
+                except Exception:
+                    delay = 1
+                delay = max(1, min(8, int(delay)))
+                async_completion_due_tick = int(tick_number + delay)
+                node["pending_async_until_tick"] = int(async_completion_due_tick)
+                produced["async_completion"] = {"delay_ticks": int(delay), "due_tick_number": int(async_completion_due_tick)}
+                ok = False
+                failure_reason = "async_pending_completion"
+                consume_drive = True
             else:
                 ok = False
                 failure_reason = "unknown_action_kind"
 
-            # Always record an "attempt" for observability (even when failed).
-            # 无论成功与否，都记录一次“尝试”，便于前端观测：看见“尝试了什么、为什么失败、来源是先天还是内驱”。
+            # Always record an attempt for observability, even when execution fails.
+            # Always record an attempt for observability, even when execution fails.
             eff_threshold = float(node.get("effective_threshold", node.get("threshold", 0.0) or 0.0) or 0.0)
             drive_before = round(float(node.get("drive", 0.0) or 0.0), 8)
             node["last_attempt_tick"] = tick_number
 
-            if ok:
+            if not consume_drive:
+                consume_drive = bool(ok)
+
+            if consume_drive:
                 # Consume drive by threshold (not clear).
-                # 按“实时阈值”消耗 drive（不是清零）。
+                # Consume drive by effective threshold (not clear-to-zero).
                 node["drive"] = max(0.0, float(node.get("drive", 0.0)) - max(0.0, eff_threshold))
                 node["last_trigger_tick"] = tick_number
-                # Fatigue bump on execute / 执行后疲劳上升（避免无限循环）
+                # Fatigue bump on execute to avoid endless loops.
                 if bool(self._config.get("action_fatigue_enabled", True)):
                     inc = float(self._config.get("action_fatigue_increase_on_execute", 0.35))
                     node["fatigue"] = max(0.0, min(1.0, float(node.get("fatigue", 0.0) or 0.0) + max(0.0, inc)))
 
-            # Derive origin tags (passive vs active) from current + historical sources.
-            # 从触发源推断“被动/主动”标签（用于观测；不影响逻辑）。
+            # Derive origin tags (passive vs active) from current and historical sources.
             source_kinds = [str(s.get("kind", "") or "") for s in (node.get("tick_sources", []) or []) if isinstance(s, dict)]
             passive = any(k.startswith("iesm_") for k in source_kinds)
             active = any((k and not k.startswith("iesm_")) for k in source_kinds)
@@ -628,9 +653,7 @@ class ActionManager:
                 },
             }
 
-            # 若回忆行动成功执行，则生成“回忆请求”，交由上层执行。
-            # 说明：对齐理论 4.2.7.2 回忆流程：回忆不是只输出聚焦指令，
-            # 而是要把检索到的记忆赋能进入 MAP，并走默认的记忆反哺（memory_feedback）回到状态池。
+            # If a recall action executes successfully, emit a structured recall request for the upper layer.
             if ok and kind == "recall":
                 req = self._build_recall_request(
                     node=node,
@@ -641,7 +664,6 @@ class ActionManager:
                     effective_threshold=float(eff_threshold),
                     memory_activation_snapshot=memory_activation_snapshot,
                 )
-                produced["recall_request"] = dict(req)
                 rec["recall_request"] = dict(req)
                 recall_requests_out.append(dict(req))
 
@@ -649,16 +671,59 @@ class ActionManager:
                 rec["failure_reason"] = str(failure_reason)
             executed.append(rec)
 
+            # If this action is async, enqueue a completion record for later ticks.
+            if async_completion_due_tick is not None:
+                feedback_text = ""
+                try:
+                    feedback_text = str(((node.get("params", {}) or {}) if isinstance(node.get("params", {}), dict) else {}).get("feedback_text", "") or "")
+                except Exception:
+                    feedback_text = ""
+                completion_record = {
+                    "action_id": node.get("action_id", ""),
+                    "action_kind": kind,
+                    "attempted": False,
+                    "success": True,
+                    "drive_before": drive_before,
+                    "drive_after": round(float(node.get("drive", 0.0)), 8),
+                    "base_threshold": round(float(node.get("base_threshold", node.get("threshold", 0.0) or 0.0)), 8),
+                    "threshold_scale": round(float(node.get("threshold_scale", 1.0) or 1.0), 8),
+                    "effective_threshold": round(float(eff_threshold), 8),
+                    "fatigue": round(float(node.get("fatigue", 0.0) or 0.0), 8),
+                    "produced": {
+                        "system_feedback": {
+                            "text": feedback_text.strip() or "绯荤粺鍙嶉锛氬ぉ姘旀煡璇㈣鍔ㄥ凡瀹屾垚锛圫tub锛屽崰浣嶅疄鐜帮級",
+                            "kind": "weather_stub",
+                        },
+                        "async_completion": {
+                            "scheduled_tick_number": int(tick_number),
+                            "due_tick_number": int(async_completion_due_tick),
+                        },
+                    },
+                    "origin": {"passive_iesm": bool(passive), "active_internal": bool(active)},
+                    "async_completion": {
+                        "scheduled_tick_number": int(tick_number),
+                        "due_tick_number": int(async_completion_due_tick),
+                    },
+                }
+                # Keep pending list bounded.
+                if len(self._pending_async_completions) < 64:
+                    self._pending_async_completions.append(
+                        {
+                            "action_id": str(node.get("action_id", "") or ""),
+                            "action_kind": str(kind or ""),
+                            "due_tick_number": int(async_completion_due_tick),
+                            "completion_record": completion_record,
+                        }
+                    )
             if ok:
                 focus_out.extend(produced.get("focus_directives", []) or [])
                 modulation_out = self._merge_modulation(modulation_out, produced.get("modulation", {}) or {})
 
         focus_out = self._dedup_focus_directives(focus_out)
 
-        # Node snapshot for UI / 节点快照（供前端展示）
-        # 注意：这里应展示“当前最强的一批节点”，而不是仅展示本 tick 被选中竞争/执行的节点。
+        # Node snapshot for UI: show the strongest current nodes, not only the nodes selected this tick.
         nodes_ranked_for_snapshot = sorted(
-            list(self._nodes.values()),
+            self._nodes.values(),
             key=lambda n: float(n.get("drive", 0.0) or 0.0),
             reverse=True,
         )
@@ -684,7 +749,7 @@ class ActionManager:
             tick_id=tick_id,
             interface="run_action_cycle",
             success=True,
-            message="行动模块已计算 Drive 并尝试执行动作 / Drive updated and actions attempted",
+            message="琛屽姩妯″潡宸茶绠?Drive 骞跺皾璇曟墽琛屽姩浣?/ Drive updated and actions attempted",
             input_summary={
                 "tick_index": int(tick_index),
                 "cfs_signal_count": len(cfs_signals),
@@ -714,13 +779,12 @@ class ActionManager:
         )
 
         # Record executed history for the observatory UI (ring buffer).
-        # 记录最近执行历史（环形缓冲），供观测台“行动监控”页面实时查看。
-        self._append_executed_history(tick_id=tick_id, tick_number=tick_number, executed=executed)
+        # 璁板綍鏈€杩戞墽琛屽巻鍙诧紙鐜舰缂撳啿锛夛紝渚涜娴嬪彴鈥滆鍔ㄧ洃鎺р€濋〉闈㈠疄鏃舵煡鐪嬨€?        self._append_executed_history(tick_id=tick_id, tick_number=tick_number, executed=executed)
 
         return self._make_response(
             True,
             "OK",
-            "行动模块执行完成 / Action cycle finished",
+            "琛屽姩妯″潡鎵ц瀹屾垚 / Action cycle finished",
             data={
                 "executed_actions": executed,
                 "focus_directives_out": focus_out,
@@ -749,11 +813,9 @@ class ActionManager:
     def _append_executed_history(self, *, tick_id: str, tick_number: int, executed: list[dict[str, Any]]) -> None:
         """Append executed actions into a bounded history buffer.
 
-        追加“已执行行动”到一个有界历史缓冲：
-        - 仅用于观测与调试（不会反过来影响行动逻辑）。
-        - 让前端能看到“最近执行了哪些行动、来源是先天触发还是内驱触发”。
+        Used only for observation and debugging. This history must not feed back into
+        action selection logic.
         """
-        keep = int(self._config.get("executed_history_keep", 200) or 200)
         keep = max(0, min(5000, keep))
         if keep <= 0:
             return
@@ -774,7 +836,7 @@ class ActionManager:
             self._executed_history = self._executed_history[-keep:]
 
     # ================================================================== #
-    # Triggers / 触发源                                                   #
+    # Triggers / 瑙﹀彂婧?                                                  #
     # ================================================================== #
 
     def _triggers_from_focus_directives(self, directives: list[dict]) -> list[dict[str, Any]]:
@@ -805,22 +867,10 @@ class ActionManager:
     def _triggers_from_action_triggers(self, items: list[dict]) -> list[dict[str, Any]]:
         """Convert IESM action_triggers into internal trigger records.
 
-        将 IESM（先天规则）输出的 action_triggers 转为行动模块内部触发源记录。
-
-        说明（原型约定 / MVP contract）:
-        - IESM 的 action_trigger 是“结构化触发”，不直接执行代码。
-        - 这里把它映射为与本模块一致的 trigger schema:
-          {action_id, action_kind, gain, threshold, cooldown_ticks, params, source}
-        - 未识别/缺少字段的触发会被忽略（保持安全与可审计）。
-
-        支持字段（兼容写法）:
-        - action_id 或 id: 必填
-        - action_kind 或 kind: 选填（默认 custom）
-        - gain 或 drive_gain: 选填（默认 0）
-        - threshold: 选填（默认 1.0）
-        - cooldown_ticks: 选填（默认 0）
-        - params: 选填（dict）
-        - rule_id: 由规则引擎补充，用于审计
+        Contract:
+        - IESM action_trigger is a structured trigger, not direct code execution.
+        - This method maps it into the ActionManager trigger schema.
+        - Unknown or incomplete triggers are ignored for safety and auditability.
         """
         out: list[dict[str, Any]] = []
         for item in items:
@@ -848,9 +898,8 @@ class ActionManager:
             if not isinstance(params, dict):
                 params = {"raw": params}
             # Allow conflict keys to be declared at the top level for readability.
-            # 允许把互斥 key（mutex_key/mutex_keys）写在 action_trigger 顶层（更直观），
-            # 这里统一折叠到 params 中，供 ActionManager 的冲突仲裁读取。
-            if "mutex_key" not in params and isinstance(item.get("mutex_key"), str) and str(item.get("mutex_key") or "").strip():
+            # 鍏佽鎶婁簰鏂?key锛坢utex_key/mutex_keys锛夊啓鍦?action_trigger 椤跺眰锛堟洿鐩磋锛夛紝
+            # 杩欓噷缁熶竴鎶樺彔鍒?params 涓紝渚?ActionManager 鐨勫啿绐佷徊瑁佽鍙栥€?            if "mutex_key" not in params and isinstance(item.get("mutex_key"), str) and str(item.get("mutex_key") or "").strip():
                 params["mutex_key"] = str(item.get("mutex_key") or "").strip()
             if "mutex_keys" not in params and isinstance(item.get("mutex_keys"), list):
                 params["mutex_keys"] = [str(x).strip() for x in (item.get("mutex_keys") or []) if str(x).strip()]
@@ -900,8 +949,7 @@ class ActionManager:
             )
         elif complexity <= diverge_th:
             # When complexity is very low ("simple"), try to diverge.
-            # 复杂度很低（很“简”）时，尝试发散。
-            score = self._clamp01((diverge_th - complexity) / max(1e-6, diverge_th))
+            # 澶嶆潅搴﹀緢浣庯紙寰堚€滅畝鈥濓級鏃讹紝灏濊瘯鍙戞暎銆?            score = self._clamp01((diverge_th - complexity) / max(1e-6, diverge_th))
             out.append(
                 {
                     "action_id": "attention_diverge_mode",
@@ -957,7 +1005,7 @@ class ActionManager:
         ]
 
     # ================================================================== #
-    # Node ops / 节点维护                                                 #
+    # Node ops / 鑺傜偣缁存姢                                                 #
     # ================================================================== #
 
     def _apply_trigger(self, trig: dict[str, Any], *, tick_number: int) -> None:
@@ -990,16 +1038,14 @@ class ActionManager:
 
         node["action_kind"] = action_kind or node.get("action_kind", "")
         # Store baseline threshold on node; effective threshold is computed per tick.
-        # 节点内存放“基准阈值”，实时阈值在每 tick 根据调制再计算。
-        node["threshold"] = float(threshold)
+        # 鑺傜偣鍐呭瓨鏀锯€滃熀鍑嗛槇鍊尖€濓紝瀹炴椂闃堝€煎湪姣?tick 鏍规嵁璋冨埗鍐嶈绠椼€?        node["threshold"] = float(threshold)
         node["cooldown_ticks"] = cooldown
         node["params"] = dict(trig.get("params", {}) or {})
         node["drive"] = max(0.0, min(drive_max, float(node.get("drive", 0.0)) + gain))
         node["last_update_tick"] = tick_number
         node.setdefault("trigger_sources", []).append(trig.get("source", {}))
         # Per-tick trigger summary (for observability).
-        # 本 tick 触发源摘要（用于观测“被动/主动原因”）。
-        node["tick_gain_total"] = float(node.get("tick_gain_total", 0.0) or 0.0) + float(gain)
+        # 鏈?tick 瑙﹀彂婧愭憳瑕侊紙鐢ㄤ簬瑙傛祴鈥滆鍔?涓诲姩鍘熷洜鈥濓級銆?        node["tick_gain_total"] = float(node.get("tick_gain_total", 0.0) or 0.0) + float(gain)
         sk = str((trig.get("source", {}) or {}).get("kind", "") or "unknown")
         by = node.get("tick_gain_by_source_kind", {}) if isinstance(node.get("tick_gain_by_source_kind", {}), dict) else {}
         by[sk] = round(float(by.get(sk, 0.0) or 0.0) + float(gain), 8)
@@ -1011,17 +1057,27 @@ class ActionManager:
 
     def _should_execute(self, node: dict, *, tick_number: int) -> bool:
         # Stop/hold gate: when a node is explicitly stopped, prevent execution for a while.
-        # 停止门控：当节点被显式停止后，在 stop_until_tick 之前禁止执行。
         try:
             stop_until = int(node.get("stop_until_tick", -1) or -1)
         except Exception:
             stop_until = -1
         if stop_until >= 0 and tick_number <= stop_until:
             return False
+
+        # Async pending gate: if an async action is already scheduled, do not schedule it
+        # again until the completion tick arrives.
+        try:
+            pending_until = int(node.get("pending_async_until_tick", -1) or -1)
+        except Exception:
+            pending_until = -1
+        if pending_until >= 0 and tick_number <= pending_until:
+            return False
+
         drive = float(node.get("drive", 0.0) or 0.0)
         threshold = float(node.get("effective_threshold", node.get("threshold", 1.0) or 1.0) or 1.0)
         if drive < threshold:
             return False
+
         cooldown = int(node.get("cooldown_ticks", 0) or 0)
         if cooldown <= 0:
             return True
@@ -1029,27 +1085,35 @@ class ActionManager:
         return (tick_number - last) > cooldown
 
     def _compute_effective_threshold(self, *, node: dict[str, Any], emotion_state: dict) -> dict[str, Any]:
-        """
-        计算“实时阈值”（effective_threshold）。
+        """Compute the effective execution threshold for the current tick.
 
-        对齐理论核心 4.2.1.4：
-          - 先天基准阈值（base_threshold）
-          - 情绪调制因子（这里用 NT 线性缩放做 MVP）
-          - 行动近因/疲劳（这里用模块内 fatigue 做 MVP）
-
-        返回：
-          {
-            base_threshold,
-            threshold_scale,
-            effective_threshold,
-            components: {nt_scale, fatigue_scale, nt_snapshot, ...}
-          }
+        It combines base threshold, NT modulation, and local action fatigue.
+        Returns base_threshold, threshold_scale, effective_threshold, and component details.
         """
         base_threshold = float(node.get("threshold", 1.0) or 1.0)
+
+        # Optional: disable threshold modulation for specific nodes.
+        # This is useful for expectation-contract experiments where we want the
+        # action threshold to remain stable across different NT / fatigue states.
+        params = (node.get("params", {}) or {}) if isinstance(node.get("params", {}), dict) else {}
+        if bool(params.get("disable_threshold_modulation", False)):
+            return {
+                "base_threshold": float(base_threshold),
+                "threshold_scale": 1.0,
+                "effective_threshold": float(base_threshold),
+                "components": {
+                    "mode": "fixed_base_threshold",
+                    "nt_scale_raw": 1.0,
+                    "nt_scale_clamped": 1.0,
+                    "fatigue_scale": 1.0,
+                    "fatigue": float(node.get("fatigue", 0.0) or 0.0),
+                    "nt_snapshot": {},
+                },
+            }
         # 1) NT scaling
         nt = {}
-        # emotion_state 来自 EmotionManager.update_emotion_state 的 data 字段
-        # 常见字段：nt_state_after / nt_state_snapshot / modulation
+        # emotion_state 鏉ヨ嚜 EmotionManager.update_emotion_state 鐨?data 瀛楁
+        # 甯歌瀛楁锛歯t_state_after / nt_state_snapshot / modulation
         if isinstance(emotion_state.get("nt_state_after"), dict):
             nt = dict(emotion_state.get("nt_state_after") or {})
         elif isinstance(emotion_state.get("nt_state_before"), dict):
@@ -1106,7 +1170,7 @@ class ActionManager:
             self._nodes.pop(action_id, None)
 
     # ================================================================== #
-    # Builders / 构造器                                                   #
+    # Builders / 鏋勯€犲櫒                                                   #
     # ================================================================== #
 
     @staticmethod
@@ -1129,14 +1193,16 @@ class ActionManager:
         now_ms: int,
         memory_activation_snapshot: dict,
     ) -> dict | None:
-        """
-        从记忆赋能池里挑一个目标，生成 focus directive。
-        注意：这只是 MVP 的“回忆行动”落地方式，后续可扩展为更复杂的记忆检索与计划。
+        """Pick one target from the memory activation pool and emit a focus directive.
+
+        This is the current MVP implementation of recall action. It can be extended later
+        into richer retrieval and planning behavior.
         """
         params = (node.get("params", {}) or {}) if isinstance(node.get("params", {}), dict) else {}
-
         trigger_kind = str(params.get("trigger_kind", params.get("kind", "")) or "").strip()
-        trigger_target_ref = str(params.get("trigger_target_ref", params.get("trigger_target", "")) or "").strip()
+        trigger_target_ref = str(
+            params.get("target_ref", params.get("anchor_ref", params.get("target_ref_object_id", ""))) or ""
+        ).strip()
         anchor_ref_object_type = ""
         anchor_ref_object_id = ""
         if ":" in trigger_target_ref:
@@ -1189,8 +1255,7 @@ class ActionManager:
             return None
 
         # Prefer first structure ref.
-        # 优先聚焦到该记忆关联的第一个结构引用。
-        structure_id = ""
+        # 浼樺厛鑱氱劍鍒拌璁板繂鍏宠仈鐨勭涓€涓粨鏋勫紩鐢ㄣ€?        structure_id = ""
         display = ""
         refs = list(item.get("structure_ref_items", []) or [])
         if refs:
@@ -1243,22 +1308,10 @@ class ActionManager:
         effective_threshold: float,
         memory_activation_snapshot: dict,
     ) -> dict[str, Any]:
-        """
-        Build a structured recall request for the upper layer (Observatory).
-        构造“回忆请求”（结构化数据），交由上层（观测台/主流程）执行副作用。
+        """Build a structured recall request for the upper layer (Observatory).
 
-        为什么需要这个请求？
-        - 对齐理论核心 4.2.7.2：回忆行动执行后应把检索到的记忆赋能进入 MAP（记忆赋能池），并走默认记忆反哺回到 SP（状态池）。
-        - 但 ActionManager 自身不应直接操作 HDB/SP（可审计 + 可测试 + 解耦）。
-        - 因此这里输出一个“可执行请求”，上层收到后：
-            1) 调用 HDB.apply_memory_activation_targets() 把记忆写入 MAP
-            2) 调用默认 memory_feedback 把记忆内容投影回 SP
-
-        返回字段说明（MVP）：
-          - map_targets: 直接可喂给 HDB.apply_memory_activation_targets 的 targets 列表
-          - selected_memory: 本次挑选的 MAP 条目摘要（用于观测）
-          - target_interval_sec/target_ts_ms: 时间桶偏置（若有）
-          - source: 来自 IESM 规则的最相关来源（rule_id/rule_title 等）
+        The ActionManager itself should not directly mutate HDB or StatePool.
+        The upper layer receives this request and performs recall-related side effects.
         """
         params = (node.get("params", {}) or {}) if isinstance(node.get("params", {}), dict) else {}
         memory_activation_snapshot = memory_activation_snapshot or {}
@@ -1272,7 +1325,7 @@ class ActionManager:
         else:
             anchor_ref_object_id = trigger_target_ref
 
-        # ---- 1) Resolve time target (optional) / 解析时间目标（可选） ----
+        # ---- 1) Resolve time target (optional) / 瑙ｆ瀽鏃堕棿鐩爣锛堝彲閫夛級 ----
         time_basis = str(params.get("time_basis", params.get("time_base", "wallclock")) or "wallclock").strip().lower() or "wallclock"
         if time_basis in {"tick", "ticks"}:
             time_basis = "tick"
@@ -1318,12 +1371,11 @@ class ActionManager:
             target_interval_ticks = None
             target_tick_index = None
 
-        # ---- 2) Pick a memory candidate (competition) / 从 MAP（记忆赋能池）挑一个候选（竞争） ----
+        # ---- 2) Pick a memory candidate (competition) / 浠?MAP锛堣蹇嗚祴鑳芥睜锛夋寫涓€涓€欓€夛紙绔炰簤锛?----
         #
         # Theory alignment (4.2.7):
         # - Parameterized recall from time-feeling attributes should only consider memories that contain the anchor.
-        # 对齐理论（4.2.7）：
-        # - 由“时间感受属性”触发的带参回忆：候选必须包含该时间感受绑定的锚点。
+        # 中文说明：如果是 time_feeling 触发的带锚点回忆，只考虑包含该锚点结构的候选记忆。
         require_anchor = bool(trigger_kind == "time_feeling" and anchor_ref_object_type == "st" and anchor_ref_object_id.startswith("st_"))
         picked = self._pick_memory_activation_item(
             memory_activation_snapshot,
@@ -1338,7 +1390,6 @@ class ActionManager:
         display_text = str((picked or {}).get("display_text", "") or (picked or {}).get("event_summary", "") or "") or memory_id
         try:
             # Prefer episodic memory timestamp if present in MAP snapshot.
-            # 优先使用“记忆本身时间戳”（对齐理论 4.2.7.2 的按时间定位）。
             created_at = int((picked or {}).get("memory_created_at", (picked or {}).get("created_at", 0)) or 0)
         except Exception:
             created_at = 0
@@ -1351,7 +1402,7 @@ class ActionManager:
         except Exception:
             total_energy = 0.0
 
-        # Try best-effort structure_id for observability / 尝试提取结构 id（便于观测）
+        # Try best-effort structure_id for observability / 灏濊瘯鎻愬彇缁撴瀯 id锛堜究浜庤娴嬶級
         structure_id = ""
         try:
             refs = list((picked or {}).get("structure_ref_items", []) or [])
@@ -1364,8 +1415,8 @@ class ActionManager:
         except Exception:
             structure_id = ""
 
-        # ---- 3) Map Drive consumption to MAP activation delta (MVP) / Drive->MAP 赋能映射（MVP） ----
-        # 说明：Drive 单位与 ER/EV 不同，这里只是工程闭环映射，后续可脚本化升级。
+        # ---- 3) Map Drive consumption to MAP activation delta (MVP) ----
+        # 说明：这里只是把当前 recall action 的驱动强度映射到 MAP 的一次赋能增量。
         strength = self._clamp01(float(params.get("trigger_strength", 0.6) or 0.6))
         per_th = float(self._config.get("recall_map_delta_ev_per_threshold", 0.90) or 0.90)
         min_ev = float(self._config.get("recall_map_delta_ev_min", 0.08) or 0.08)
@@ -1381,8 +1432,7 @@ class ActionManager:
 
         map_targets: list[dict[str, Any]] = []
         if memory_id and delta_ev > 0.0:
-            # Register short-term fatigue for diversification (best-effort).
-            # 记忆疲劳（短期）：记录本次选择，便于后续多次回忆命中更多不同记忆。
+            # Register short-term recall fatigue for diversification (best-effort).
             self._recall_memory_last_picked_tick[str(memory_id)] = int(tick_index)
             map_targets.append(
                 {
@@ -1390,16 +1440,15 @@ class ActionManager:
                     "memory_id": memory_id,
                     "backing_structure_id": structure_id,
                     "target_display_text": display_text or memory_id,
-                    # Recall is mostly “virtual” activation in our current semantics.
-                    # 原型语义：回忆主要是“虚能量（EV）赋能”，让记忆作为候选回到 SP。
-                    "delta_er": 0.0,
+                    # Recall is mostly 鈥渧irtual鈥?activation in our current semantics.
+                    # 鍘熷瀷璇箟锛氬洖蹇嗕富瑕佹槸鈥滆櫄鑳介噺锛圗V锛夎祴鑳解€濓紝璁╄蹇嗕綔涓哄€欓€夊洖鍒?SP銆?                    "delta_er": 0.0,
                     "delta_ev": float(delta_ev),
                     "sources": [structure_id] if structure_id else [],
                     "modes": [mode_tag],
                 }
             )
 
-        # ---- 4) Best-effort rule source info for UI / 尽力提供规则来源信息（用于前端显示“因为什么规则”） ----
+        # ---- 4) Best-effort rule source info for UI / 灏藉姏鎻愪緵瑙勫垯鏉ユ簮淇℃伅锛堢敤浜庡墠绔樉绀衡€滃洜涓轰粈涔堣鍒欌€濓級 ----
         best_src: dict[str, Any] = {}
         try:
             srcs = [s for s in (node.get("tick_sources", []) or []) if isinstance(s, dict)]
@@ -1456,8 +1505,7 @@ class ActionManager:
                 "rule_priority": int(best_src.get("rule_priority", 0) or 0),
             },
             # Keep a small tail for audit; UI can choose to show/hide.
-            # 保留少量来源尾巴用于审计；前端可选择折叠显示。
-            "tick_sources": [dict(s) for s in (node.get("tick_sources", []) or []) if isinstance(s, dict)][:8],
+            # 淇濈暀灏戦噺鏉ユ簮灏惧反鐢ㄤ簬瀹¤锛涘墠绔彲閫夋嫨鎶樺彔鏄剧ず銆?            "tick_sources": [dict(s) for s in (node.get("tick_sources", []) or []) if isinstance(s, dict)][:8],
         }
 
     def _pick_memory_activation_item(
@@ -1471,16 +1519,12 @@ class ActionManager:
         anchor_ref_object_id: str = "",
         require_anchor: bool = False,
     ) -> dict | None:
-        """
-        Pick ONE recall candidate from MAP (memory_activation_snapshot).
-        从 MAP（记忆赋能池）里挑 1 条回忆候选（候选竞争，返回 1 条）。
+        """Pick one recall candidate from MAP (memory_activation_snapshot).
 
-        Theory alignment / 对齐理论核心 4.2.7（带参回忆口径）：
-          - 若 require_anchor=True：候选记忆必须包含 anchor_ref_object_id（通常是 st_* 锚点）。
-          - 候选之间需要竞争：综合 “目标时间接近度 + 记忆新近度 + 能量” 评分。
-          - 短期疲劳：最近被选中过的记忆会被惩罚，促进多次回忆命中不同记忆，避免对大量记忆赋能。
+        Selection considers anchor constraints, recency, energy, and short-term
+        recall fatigue. Returns at most one candidate.
         """
-        items = snapshot.get("items", []) or []
+        items = list(snapshot.get("items", snapshot.get("memory_items", [])) or []) if isinstance(snapshot, dict) else []
         rows = [it for it in items if isinstance(it, dict)]
         if not rows:
             return None
@@ -1562,16 +1606,19 @@ class ActionManager:
             return int(v)
 
         def _get_memory_fresh_at(it: dict) -> int:
-            """A 'freshness' timestamp used for recency bias.
+            """A freshness timestamp used for recency bias.
 
-            Prefer MAP update time when present, because it reflects recent activations/re-contacts.
-            优先使用 MAP 的更新时间（last_updated_at），因为它更贴近“最近被重新接触/被激活”的语义。
+            Prefer MAP last_updated_at when available, because it better reflects
+            recent activation or re-contact.
             """
-            mem_ts = _get_memory_created_at(it)
             try:
                 upd_ts = int(it.get("last_updated_at", 0) or 0)
             except Exception:
                 upd_ts = 0
+            try:
+                mem_ts = int(it.get("memory_created_at", it.get("created_at", 0)) or 0)
+            except Exception:
+                mem_ts = 0
             return int(max(int(mem_ts), int(upd_ts)))
 
         def _get_memory_tick_index(it: dict) -> int:
@@ -1665,14 +1712,9 @@ class ActionManager:
 
     @staticmethod
     def _parse_time_bucket_center_sec(ref_object_id: str) -> float | None:
-        """
-        Parse time bucket center seconds from a StatePool time bucket ref id.
-        从时间桶节点 ref_object_id 解析中心秒数（MVP 用于回忆偏置）。
+        """Parse time bucket center seconds from a StatePool time bucket ref id.
 
-        Expected examples / 期望格式示例：
-          - "sa_time_bucket_0_25s" -> 0.25
-          - "sa_time_bucket_37_5s" -> 37.5
-          - "sa_time_bucket_86400s" -> 86400.0
+        Example: "sa_time_bucket_37_5s" -> 37.5
         """
         s = str(ref_object_id or "").strip()
         if not s:
@@ -1705,7 +1747,7 @@ class ActionManager:
             return None
 
     # ================================================================== #
-    # Helpers / 工具函数                                                   #
+    # Helpers / 宸ュ叿鍑芥暟                                                   #
     # ================================================================== #
 
     def _build_config(self, config_override: dict | None) -> dict:
@@ -1731,7 +1773,7 @@ class ActionManager:
 
     @staticmethod
     def _dedup_focus_directives(items: list[dict]) -> list[dict]:
-        """按 directive_id 去重（保留最后一个），再按 target 去重（保留最后一个）。"""
+        """Deduplicate directives by directive_id, then by target, keeping the last one."""
         by_id: dict[str, dict] = {}
         for d in items:
             if not isinstance(d, dict):
@@ -1820,31 +1862,17 @@ class ActionManager:
         hold_ticks: int = 2,
         reason: str = "manual_stop",
     ) -> dict:
-        """
-        Stop/cancel action nodes.
-        行动停止/取消接口（对齐理论 4.2.1.1 中“停止/取消类行动”概念）。
+        """Stop or cancel action nodes.
 
-        说明：
-          - 原型阶段的“行动”多数是瞬时产物（focus_directive / modulation），并不存在长时间 running 进程；
-            因此 stop 的主要作用是：
-              1) 把某些行动节点 drive 清零（停止其意图维持）
-              2) 在若干 tick 内门控其执行（stop_until_tick）
-          - 未来若接入外部行动器（LLM/工具协议/机器人），stop 应被下游执行器实现为“真实取消”。
-
-        参数：
-          - mode:
-              - "action_id": 按 action_id 停止
-              - "action_kind": 按 action_kind（行动器类型）停止
-              - "all": 停止全部行动节点
-          - value: 对应 mode 的值（字符串或字符串列表）
-          - hold_ticks: 停止后门控的 tick 数（默认 2）
+        In the current prototype, most actions are short-lived products such as
+        focus directives or modulation outputs. Stopping mainly clears drive and
+        prevents execution for a short hold window.
         """
-        start_time = time.time()
         mode = str(mode or "").strip().lower() or "action_id"
         hold_ticks = max(0, min(10_000, int(hold_ticks or 0)))
         tick_number = int(self._tick_counter)
 
-        # Normalize value to a set of strings / 归一化 value 为 set[str]
+        # Normalize value to a set of strings / 褰掍竴鍖?value 涓?set[str]
         values: set[str] = set()
         if isinstance(value, str) and value.strip():
             values.add(value.strip())
@@ -1898,7 +1926,7 @@ class ActionManager:
             tick_id=trace_id,
             interface="stop_actions",
             success=True,
-            message="行动节点已停止 / action nodes stopped",
+            message="琛屽姩鑺傜偣宸插仠姝?/ action nodes stopped",
             input_summary={"mode": mode, "value_count": len(values), "hold_ticks": hold_ticks},
             output_summary={"stopped_count": len(stopped_ids)},
         )
@@ -1906,7 +1934,7 @@ class ActionManager:
         return self._make_response(
             True,
             "OK",
-            "行动节点已停止 / action nodes stopped",
+            "琛屽姩鑺傜偣宸插仠姝?/ action nodes stopped",
             data={
                 "mode": mode,
                 "values": sorted(list(values)),
@@ -1925,8 +1953,7 @@ class ActionManager:
         start_time = time.time()
 
         # Provide a detailed node snapshot for real-time observability.
-        # 提供更完整的行动节点快照，便于前端“实时监控行动器/行动接口状态”。
-        nodes = list(self._nodes.values())
+        # 鎻愪緵鏇村畬鏁寸殑琛屽姩鑺傜偣蹇収锛屼究浜庡墠绔€滃疄鏃剁洃鎺ц鍔ㄥ櫒/琛屽姩鎺ュ彛鐘舵€佲€濄€?        nodes = list(self._nodes.values())
         nodes.sort(key=lambda n: float(n.get("drive", 0.0) or 0.0), reverse=True)
         nodes_snapshot = [
             {
@@ -1956,7 +1983,7 @@ class ActionManager:
         return self._make_response(
             True,
             "OK",
-            "行动模块运行态快照 / action runtime snapshot",
+            "琛屽姩妯″潡杩愯鎬佸揩鐓?/ action runtime snapshot",
             data={
                 "module": __module_name__,
                 "version": __version__,
@@ -1969,8 +1996,7 @@ class ActionManager:
                     "executed_history_count": len(self._executed_history),
                 },
                 "nodes": nodes_snapshot,
-                # Recent executed actions (flattened) / 最近执行行动（扁平记录）
-                "recent_executed_actions": list(self._executed_history)[-80:],
+                # Recent executed actions (flattened) / 鏈€杩戞墽琛岃鍔紙鎵佸钩璁板綍锛?                "recent_executed_actions": list(self._executed_history)[-80:],
                 "stop_interface": {
                     "supported_modes": ["action_id", "action_kind", "all"],
                     "default_hold_ticks": 2,
@@ -2016,3 +2042,4 @@ class ActionManager:
                 detail={"traceback": traceback.format_exc()},
             )
             return self._make_response(False, "CONFIG_ERROR", f"Hot reload failed: {exc}", trace_id=trace_id, tick_id=trace_id, elapsed_ms=self._elapsed_ms(start_time))
+

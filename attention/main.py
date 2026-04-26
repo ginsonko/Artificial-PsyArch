@@ -1,23 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-AP 注意力模块（Attention Filter, AF）— 主模块
-============================================
-本模块负责在预算约束下，对状态池（SP）中的运行态对象做筛选/调制，
-输出 CAM（当前注意记忆体）。
-
-原型阶段 MVP：
-  - 从状态池快照中选 Top-N 候选
-  - （可选）按比例从 SP 扣能，形成 CAM 预算能量（记账式转移，不复制能量）
-  - 输出 cam_snapshot（runtime_snapshot），可直接作为结构级查存一体输入
-
-职责边界（与理论一致）：
-  ✓ 选择哪些对象进入 CAM
-  ✓ 为进入 CAM 的对象分配/划拨可被消耗的注意预算（预算能量）
-  ✓ 输出可审计的选择原因与预算记账
-  ✗ 不直接写 HDB（结构级/刺激级查存一体属于 HDB）
-  ✗ 不直接生成内源刺激（内源刺激在结构级阶段按 ρ_k 划拨残差产生）
-  ✗ 不直接决策最终行动（行动在 Drive 竞争后触发）
-"""
+"""Attention Filter module."""
 
 from __future__ import annotations
 
@@ -32,7 +14,7 @@ from ._logger import ModuleLogger
 
 
 def _load_yaml_config(path: str) -> dict:
-    """加载 YAML 配置文件。加载失败返回空 dict。"""
+    """Load YAML config. Return empty dict on failure."""
     try:
         import yaml
         with open(path, "r", encoding="utf-8") as fh:
@@ -45,50 +27,48 @@ def _load_yaml_config(path: str) -> dict:
 
 
 _DEFAULT_CONFIG: dict[str, Any] = {
-    # ---- 注意力资源预算（以“对象数量上限”为主）----
-    #
-    # 重要澄清（非常关键，避免误读）：
-    # - 这里的 top_n / max_cam_items 不是“永远取前 N 个”的硬编码逻辑；
-    # - 它仅表示 CAM（当前注意记忆体）允许保留的对象数量上限（cap），实际入选数量由“抑制阈值 + 能量分布”
-    #   动态决定，常常会 < cap，从而更像“只保留波峰”的拟人注意过程。
-    #
-    # Compatibility / 兼容性：
-    # - 旧配置使用 top_n；新配置优先读取 max_cam_items。
-    "top_n": 16,           # 兼容字段：CAM 上限（旧名）
-    "max_cam_items": 16,   # 新名：CAM 上限（cap）
-    "min_cam_items": 2,    # 最少保留多少个（防止 CAM 为空导致后续查存一体失去输入）
+    # ---- CAM capacity / CAM ?? ----
+    # `top_n` is the main CAM capacity cap. `max_cam_items` is kept as a
+    # compatibility alias for older observatory callers.
+    "top_n": 16,
 
-    # ---- 动态抑制阈值（Dynamic cutoff）----
-    # 思路：以“波峰优先级分数 * 比例”为阈值，低于阈值的对象会被注意力抑制，不进入 CAM。
-    # 该比例会随“能量/优先级分布集中度”动态变化：越集中 -> 阈值越高 -> CAM 越短；越分散 -> 阈值越低 -> CAM 越长。
+    # ---- Size-aware CAM resource accounting / ?????? ----
+    # ST / SG objects can be much larger than single SA items, so selection uses a
+    # simple token-count-based cost to avoid one oversized structure monopolizing CAM.
+    "size_cost_enabled": True,
+    "size_cost_ref_object_types": ["st", "sg"],
+    "size_cost_token_divisor": 12,
+    "size_cost_max_cost": 8,
+
+    # ---- Dynamic cutoff / ???? ----
+    # The cutoff ratio rises when candidate scores become more concentrated, so CAM
+    # keeps fewer low-value items under sharp peaks and more items under flatter peaks.
     "keep_score_ratio_base": 0.28,
     "keep_score_ratio_concentration_gain": 0.22,
     "keep_score_ratio_min": 0.18,
     "keep_score_ratio_max": 0.72,
     "score_entropy_eps": 1e-9,
 
-    # ---- 记账式能量划拨（抽取）----
+    # ---- CAM extraction / CAM ?? ----
     "consume_energy": True,
     "memory_energy_ratio": 0.5,
     "exclude_ref_object_types": ["em"],
 
-    # ---- 候选过滤 ----
+    # ---- Minimum energy gate / ?????? ----
     "min_total_energy": 0.0,
 
-    # ---- 排序权重（MVP 默认与 observatory stub 保持一致）----
+    # ---- Priority weights / ????? ----
     "priority_weight_total_energy": 1.25,
     "priority_weight_cp_abs": 0.35,
     "priority_weight_salience": 0.15,
     "priority_weight_updated_at": 1e-12,
-    # 预留：疲劳/近因进入注意力的调制位（默认 0，不改变当前语义）
     "priority_weight_fatigue": 0.0,
     "priority_weight_recency_gain": 0.0,
 
-    # ---- 聚焦指令 / Focus Directives ----
-    # focus_boost_weight: directives 提供的 focus_boost 会再乘该权重后计入 priority 分数
+    # ---- Focus directives / ???? ----
     "focus_boost_weight": 1.0,
 
-    # ---- 日志 ----
+    # ---- Logging / ?? ----
     "log_dir": "",
     "log_max_file_bytes": 5 * 1024 * 1024,
     "stdout_fallback_when_log_fail": True,
@@ -96,16 +76,7 @@ _DEFAULT_CONFIG: dict[str, Any] = {
 
 
 class AttentionFilter:
-    """
-    AP 注意力模块主类。
-
-    使用示例:
-        from attention import AttentionFilter
-        af = AttentionFilter()
-        resp = af.build_cam_from_pool(pool, trace_id="tick_001", tick_id="tick_001")
-        cam_snapshot = resp["data"]["cam_snapshot"]
-    """
-
+    """Attention Filter main class."""
     def __init__(self, config_path: str = "", config_override: dict | None = None):
         self._config_path = config_path or os.path.join(os.path.dirname(__file__), "config", "attention_config.yaml")
         self._config = self._build_config(config_override)
@@ -117,7 +88,7 @@ class AttentionFilter:
         self._total_calls = 0
 
     # ================================================================== #
-    # 接口一：build_cam_from_pool                                          #
+    # build_cam_from_pool                                                #
     # ================================================================== #
 
     def build_cam_from_pool(
@@ -134,17 +105,18 @@ class AttentionFilter:
         metadata: dict | None = None,
     ) -> dict:
         """
-        从状态池中构建 CAM（当前注意记忆体）。
+        Build the current attention memory (CAM) from the live StatePool snapshot.
 
-        参数:
-            pool: StatePool 实例（需要提供 get_state_snapshot/apply_energy_update）
-            trace_id/tick_id: 追踪标识
-            top_n: CAM（当前注意记忆体）对象数量上限（cap，上限不保证填满；真实入选由抑制阈值动态决定）
-            consume_energy: 是否真实从 SP 扣能（默认取配置）
-            memory_energy_ratio: 抽取比例（默认取配置，范围 [0,1]）
-            focus_directives: IESM 输出的注意力聚焦指令（本 tick 生效的输入）
-            modulation: EMgr 输出的调制包（本 tick 生效的输入；仅覆盖少量权重/阈值，不改变语义）
-            metadata: 预留扩展字段
+        Args:
+            pool: StatePool-like object implementing `get_state_snapshot` and
+                `apply_energy_update`.
+            trace_id / tick_id: runtime audit identifiers.
+            top_n: CAM capacity cap for this call.
+            consume_energy: whether selection should extract energy from StatePool.
+            memory_energy_ratio: extraction ratio in `[0, 1]`.
+            focus_directives: optional focus directives from IESM / action module.
+            modulation: per-tick modulation from emotion / action layers.
+            metadata: optional caller-side context.
         """
         start_time = time.time()
         tick_id = tick_id or trace_id
@@ -154,7 +126,7 @@ class AttentionFilter:
             return self._make_response(
                 success=False,
                 code="VALIDATION_ERROR",
-                message="trace_id 不能为空 / trace_id is required",
+                message="trace_id is required",
                 error={"code": "trace_id_required"},
                 trace_id=trace_id,
                 elapsed_ms=self._elapsed_ms(start_time),
@@ -164,21 +136,19 @@ class AttentionFilter:
             return self._make_response(
                 success=False,
                 code="VALIDATION_ERROR",
-                message="pool 必须提供 get_state_snapshot 接口 / pool must implement get_state_snapshot",
+                message="pool must implement get_state_snapshot",
                 error={"code": "pool_invalid"},
                 trace_id=trace_id,
                 elapsed_ms=self._elapsed_ms(start_time),
             )
 
-        # ---- 读取参数（注意力预算口径）----
-        # top_n 在这里被解释为“CAM 上限（cap）”，而不是“永远填满 Top-N”。
-        # 真实入选数量会受动态阈值抑制影响，从而更贴近理论中的“只维持波峰”。
+        # ---- Resolve CAM capacity / ???? CAM ?? ----
         modulation = modulation or {}
 
         base_cap = int(self._config.get("max_cam_items", self._config.get("top_n", 16)) or 16)
         mod_cap = modulation.get("max_cam_items")
         if mod_cap is None:
-            # 兼容：情绪调制沿用 top_n 字段
+            # Support both `max_cam_items` and `top_n` from modulation.
             mod_cap = modulation.get("top_n")
         resolved_top_n = int(top_n) if top_n is not None else (int(mod_cap) if mod_cap is not None else base_cap)
         resolved_top_n = max(1, int(resolved_top_n))
@@ -191,7 +161,7 @@ class AttentionFilter:
         ratio_raw = float(memory_energy_ratio) if memory_energy_ratio is not None else float(self._config.get("memory_energy_ratio", 0.5))
         resolved_ratio = max(0.0, min(1.0, ratio_raw))
 
-        # ---- 调制覆盖（仅影响排序权重/阈值，不改变“Top-N + 抽取扣能”语义）----
+        # ---- Resolve effective weights and cutoff params ----
         effective_weights = {
             "priority_weight_total_energy": float(modulation.get("priority_weight_total_energy", self._config.get("priority_weight_total_energy", 1.25))),
             "priority_weight_cp_abs": float(modulation.get("priority_weight_cp_abs", self._config.get("priority_weight_cp_abs", 0.35))),
@@ -210,7 +180,7 @@ class AttentionFilter:
             "score_entropy_eps": float(modulation.get("score_entropy_eps", self._config.get("score_entropy_eps", 1e-9))),
         }
 
-        # ---- 取状态池快照 ----
+        # ---- Acquire live StatePool snapshot ----
         try:
             snapshot_result = pool.get_state_snapshot(
                 trace_id=f"{trace_id}_attention_source",
@@ -226,13 +196,13 @@ class AttentionFilter:
                 tick_id=tick_id,
                 interface="build_cam_from_pool",
                 code="STATE_SNAPSHOT_ERROR",
-                message=f"获取状态池快照失败: {e}",
+                message=f"Failed to get state snapshot: {e}",
                 detail={"traceback": traceback.format_exc()},
             )
             return self._make_response(
                 success=False,
                 code="STATE_SNAPSHOT_ERROR",
-                message=f"获取状态池快照失败 / failed to get state snapshot: {e}",
+                message=f"failed to get state snapshot: {e}",
                 error={"code": "state_snapshot_error", "message": str(e)},
                 trace_id=trace_id,
                 elapsed_ms=self._elapsed_ms(start_time),
@@ -245,7 +215,31 @@ class AttentionFilter:
             if str(item.get("ref_object_type", "")) not in excluded
         ]
 
-        # ---- Step 2: compute priority once / 计算优先级（只算一次，避免重复算导致解释不一致）----
+        # ---- Step 2: compute priority once /                                      ----
+        size_cost_enabled = bool(self._config.get("size_cost_enabled", True))
+        size_cost_types = set(str(x) for x in (self._config.get("size_cost_ref_object_types") or ["st", "sg"]))
+        size_cost_token_divisor = float(self._config.get("size_cost_token_divisor", 12) or 12)
+        size_cost_token_divisor = max(1.0, float(size_cost_token_divisor))
+        size_cost_max_cost = int(self._config.get("size_cost_max_cost", 8) or 8)
+        size_cost_max_cost = max(1, int(size_cost_max_cost))
+
+        def _item_cost(it: dict) -> int:
+            if not size_cost_enabled:
+                return 1
+            rtype = str(it.get("ref_object_type", "") or "").strip()
+            if size_cost_types and rtype not in size_cost_types:
+                return 1
+            ref_snapshot = it.get("ref_snapshot", {}) or {}
+            token_count = 0
+            if isinstance(ref_snapshot, dict):
+                token_count = int(ref_snapshot.get("token_count", 0) or 0)
+                if token_count <= 0:
+                    token_count = len(ref_snapshot.get("flat_tokens", []) or [])
+            token_count = max(1, int(token_count))
+            cost = int(math.ceil(float(token_count) / float(size_cost_token_divisor)))
+            cost = max(1, min(int(size_cost_max_cost), int(cost)))
+            return int(cost)
+
         scored_items: list[dict] = []
         for item in eligible_items:
             try:
@@ -255,20 +249,101 @@ class AttentionFilter:
             copied = dict(item)
             copied["attention_priority"] = round(float(score), 8)
             copied["focus_boost"] = round(float(self._compute_focus_boost(item, focus_directives)), 8)
+            copied["attention_cost"] = int(_item_cost(copied))
+
+            # Ensure token_count is available for downstream CAM-only endogenous
+            # stimulus generation even when we do not carry the full payload.
+            try:
+                    rs = copied.get("ref_snapshot", {}) or {}
+                    if isinstance(rs, dict):
+                        tc = int(rs.get("token_count", 0) or 0)
+                        if tc <= 0:
+                            tc = len(rs.get("flat_tokens", []) or [])
+                    else:
+                        tc = 0
+                    copied["token_count"] = max(1, int(tc or 1))
+            except Exception:
+                copied["token_count"] = int(copied.get("token_count", 1) or 1)
             scored_items.append(copied)
 
         scored_items.sort(key=lambda it: float(it.get("attention_priority", 0.0) or 0.0), reverse=True)
 
-        # ---- Step 3: selection policy / 选择策略（对齐理论：波峰 + 抑制）----
-        # 1) 优先保留 focus_directives 指向的对象（带参聚焦的效果必须可见）；
-        # 2) 再用“动态阈值”抑制掉低于波峰一定比例的对象，使 CAM 通常不会太长；
-        # 3) 最后保证至少 min_cam_items（避免空 CAM）。
+        def _sequence_groups_of(it: dict) -> list[dict]:
+            ref_snapshot = it.get("ref_snapshot", {}) or {}
+            groups = ref_snapshot.get("sequence_groups", []) if isinstance(ref_snapshot, dict) else []
+            return [dict(group) for group in groups if isinstance(group, dict)]
+
+        def _goal_b_string_signature(it: dict) -> tuple[str, ...]:
+            groups = _sequence_groups_of(it)
+            if len(groups) != 1:
+                return ()
+            group = groups[0]
+            if not bool(group.get("order_sensitive", False)):
+                return ()
+            if str(group.get("string_unit_kind", "") or "") != "char_sequence":
+                return ()
+            units = [dict(unit) for unit in (group.get("units", []) or []) if isinstance(unit, dict)]
+            if not units:
+                tokens = [str(token) for token in (group.get("tokens", []) or []) if str(token)]
+            else:
+                units.sort(key=lambda unit: (int(unit.get("sequence_index", 0) or 0), str(unit.get("unit_id", "") or "")))
+                tokens = [str(unit.get("token", "") or unit.get("display_text", "") or "") for unit in units]
+                tokens = [token for token in tokens if token]
+            return tuple(tokens)
+
+        def _has_mixed_goal_b_groups(it: dict) -> bool:
+            groups = _sequence_groups_of(it)
+            if len(groups) <= 1:
+                return False
+            has_string = False
+            has_non_string = False
+            for group in groups:
+                is_string = bool(group.get("order_sensitive", False)) and str(group.get("string_unit_kind", "") or "") == "char_sequence"
+                if is_string:
+                    has_string = True
+                else:
+                    has_non_string = True
+            return bool(has_string and has_non_string)
+
+        def _is_goal_b_string_shell(it: dict) -> bool:
+            groups = _sequence_groups_of(it)
+            if not groups:
+                return False
+            has_any_string_payload = False
+            for group in groups:
+                string_text = str(group.get("string_token_text", "") or "").strip()
+                tokens = [str(token) for token in (group.get("tokens", []) or []) if str(token)]
+                if string_text or any(len(tok) > 1 for tok in tokens):
+                    has_any_string_payload = True
+                    is_legal_string = bool(group.get("order_sensitive", False)) and str(group.get("string_unit_kind", "") or "") == "char_sequence"
+                    if not is_legal_string:
+                        return True
+            return False if has_any_string_payload else False
+
+        goal_b_string_signatures = [sig for sig in (_goal_b_string_signature(it) for it in scored_items) if len(sig) >= 2]
+        for it in scored_items:
+            it["goal_b_mixed_groups"] = _has_mixed_goal_b_groups(it)
+
+        # Goal B filtering should not collapse legitimate independent objects.
+        # Keep distinct SA / string / structure candidates as long as they are real
+        # objects in the pool; only drop malformed mixed shells that would pollute
+        # CAM and endogenous stimulus construction.
+        filtered_scored_items: list[dict] = []
+        for it in scored_items:
+            if bool(it.get("goal_b_mixed_groups", False)):
+                continue
+            if _is_goal_b_string_shell(it):
+                continue
+            filtered_scored_items.append(it)
+        scored_items = filtered_scored_items
+
+        # ---- Step 3: selection policy ----
         consume_events: list[dict] = []
         consumed_total_er = 0.0
         consumed_total_ev = 0.0
         min_total_energy = max(0.0, float(effective_weights.get("min_total_energy", 0.0)))
 
-        # Focus target set / 聚焦目标集合
+        # Focus target set /          
         focus_ref_set: set[str] = set()
         focus_item_set: set[str] = set()
         for directive in focus_directives or []:
@@ -281,10 +356,27 @@ class AttentionFilter:
                 focus_item_set.add(iid)
             if rid:
                 # allow both "st:xxx" and raw "xxx" for compatibility
-                # 同时兼容 "st:xxx" 与 "xxx" 两种写法（因为部分指令可能没带 type）。
                 focus_ref_set.add(rid)
                 if rtype:
                     focus_ref_set.add(f"{rtype}:{rid}")
+
+        def _is_shadowed_atomic(it: dict) -> bool:
+            if not covered_atomic_tokens:
+                return False
+            ref_type = str(it.get("ref_object_type", "") or it.get("object_type", "") or "")
+            if ref_type == "sa":
+                token = str(it.get("display", "") or it.get("token", "") or it.get("display_text", "") or "")
+                return bool(token and (token in covered_atomic_tokens or token in covered_atomic_displays))
+            if ref_type not in {"st", "sg"}:
+                return False
+            groups = _sequence_groups_of(it)
+            if len(groups) != 1:
+                return False
+            units = [dict(unit) for unit in (groups[0].get("units", []) or []) if isinstance(unit, dict)]
+            if len(units) != 1:
+                return False
+            token = str(units[0].get("token", "") or units[0].get("display_text", "") or "")
+            return bool(token and token in covered_atomic_tokens)
 
         def _is_focus_target(it: dict) -> bool:
             iid = str(it.get("item_id", "") or "").strip()
@@ -296,7 +388,19 @@ class AttentionFilter:
                 return True
             return False
 
-        # ---- Dynamic cutoff / 动态阈值（按优先级分布集中度自适应）----
+        covered_atomic_tokens: set[str] = set()
+        covered_atomic_displays: set[str] = set()
+        for it in scored_items:
+            sig = _goal_b_string_signature(it)
+            if len(sig) < 2:
+                continue
+            for tok in sig:
+                token = str(tok or "").strip()
+                if token:
+                    covered_atomic_tokens.add(token)
+                    covered_atomic_displays.add(token)
+
+        # ---- Dynamic cutoff ----
         score_eps = max(0.0, float(effective_cutoff.get("score_entropy_eps", 1e-9) or 1e-9))
         score_weights: list[float] = []
         for it in scored_items:
@@ -333,30 +437,40 @@ class AttentionFilter:
 
         selected_candidates: list[dict] = []
         selected_item_ids: set[str] = set()
+        selected_budget_used = 0
+        skipped_by_budget_count = 0
 
-        def _select(it: dict, why: str) -> None:
+        def _select(it: dict, why: str) -> bool:
+            nonlocal selected_budget_used, skipped_by_budget_count
             iid = str(it.get("item_id", "") or "").strip()
             if not iid:
-                return
+                return False
             if iid in selected_item_ids:
-                return
+                return False
+            cost = max(1, int(it.get("attention_cost", 1) or 1))
+            if selected_budget_used + cost > resolved_top_n:
+                skipped_by_budget_count += 1
+                return False
             selected_item_ids.add(iid)
-            selected_candidates.append({**it, "selected_by": why})
+            selected_candidates.append({**it, "selected_by": why, "attention_cost": cost})
+            selected_budget_used += cost
+            return True
 
-        # 1) Focus-first / 聚焦优先
+        # 1) Focus-first /       
         for it in scored_items:
-            if len(selected_candidates) >= resolved_top_n:
+            if selected_budget_used >= resolved_top_n:
                 break
             if not _is_focus_target(it):
                 continue
             total_energy = float(it.get("er", 0.0) or 0.0) + float(it.get("ev", 0.0) or 0.0)
             if total_energy <= min_total_energy:
                 continue
+            if _is_shadowed_atomic(it):
+                continue
             _select(it, "focus_directive")
-
-        # 2) Cutoff selection / 阈值筛选（保留波峰）
+        # 2) Cutoff selection
         for it in scored_items:
-            if len(selected_candidates) >= resolved_top_n:
+            if selected_budget_used >= resolved_top_n:
                 break
             iid = str(it.get("item_id", "") or "").strip()
             if iid and iid in selected_item_ids:
@@ -364,26 +478,28 @@ class AttentionFilter:
             total_energy = float(it.get("er", 0.0) or 0.0) + float(it.get("ev", 0.0) or 0.0)
             if total_energy <= min_total_energy:
                 continue
+            if _is_shadowed_atomic(it):
+                continue
             score = float(it.get("attention_priority", 0.0) or 0.0)
             if score < cutoff_score:
                 continue
             _select(it, "cutoff")
-
-        # 3) Min-keep fill / 最少保留数兜底
+        # 3) Min-keep fill /            
         for it in scored_items:
-            if len(selected_candidates) >= resolved_top_n:
+            if selected_budget_used >= resolved_top_n:
                 break
             if len(selected_candidates) >= resolved_min_keep:
                 break
             iid = str(it.get("item_id", "") or "").strip()
             if iid and iid in selected_item_ids:
                 continue
+            if _is_shadowed_atomic(it):
+                continue
             total_energy = float(it.get("er", 0.0) or 0.0) + float(it.get("ev", 0.0) or 0.0)
             if total_energy <= min_total_energy:
                 continue
             _select(it, "min_keep")
-
-        # 4) Extraction / 记账式能量划拨（抽取）
+        # 4) Extraction
         selected_items: list[dict] = []
         for item in selected_candidates:
             before_er = round(float(item.get("er", 0.0)), 8)
@@ -412,13 +528,12 @@ class AttentionFilter:
                     pool_after_er = round(float(update_data.get("after", {}).get("er", max(0.0, before_er - memory_er))), 8)
                     pool_after_ev = round(float(update_data.get("after", {}).get("ev", max(0.0, before_ev - memory_ev))), 8)
                 except Exception:
-                    # 扣能失败不应中断 CAM 构建；记录日志并回退为“观测态不扣能”
                     self._logger.error(
                         trace_id=trace_id,
                         tick_id=tick_id,
                         interface="apply_energy_update",
                         code="ENERGY_UPDATE_ERROR",
-                        message="注意力预算扣能失败，已降级为不扣能继续",
+                        message="Energy update failed",
                         detail={"item_id": item.get("item_id", ""), "traceback": traceback.format_exc()},
                     )
                     pool_after_er = before_er
@@ -446,6 +561,7 @@ class AttentionFilter:
                     "ref_object_id": item.get("ref_object_id", ""),
                     "ref_object_type": item.get("ref_object_type", ""),
                     "display": item.get("display", ""),
+                    "attention_cost": int(item.get("attention_cost", 1) or 1),
                     "memory_er": memory_er,
                     "memory_ev": memory_ev,
                     "memory_total": round(memory_er + memory_ev, 8),
@@ -465,6 +581,82 @@ class AttentionFilter:
         cam_snapshot = self._make_cam_snapshot(selected_items=selected_items, trace_id=trace_id, tick_id=tick_id)
         structure_items = [item for item in selected_items if item.get("ref_object_type") == "st"]
 
+        # CAM snapshot integrity patch (for CS-first endogenous stimulus path)
+        # ------------------------------------------------------------
+        # In CS-first mode, HDB structure-level may run with max_rounds=0 and build endogenous stimulus
+        # fragments directly from CAM items. That path must NEVER treat an item's display text as a
+        # canonical token stream (it may contain "{...}" / "->" / debug text).
+        #
+        # The safest fix is: for CAM-selected items, ensure `ref_snapshot.flat_tokens/sequence_groups`
+        # are present by re-fetching the canonical snapshot from the pool store.
+        #
+        # Note:
+        # - This is bounded by CAM size (<= top_n), so the overhead is small.
+        # - We only overwrite missing fields to avoid stomping upstream data.
+        try:
+            pool_store = getattr(pool, "_store", None)
+            if pool_store is not None:
+                for cam_item in selected_items:
+                    try:
+                        spi_id = str(cam_item.get("item_id", "") or "")
+                        if not spi_id:
+                            continue
+                        full_item = pool_store.get(spi_id)
+                        if not isinstance(full_item, dict):
+                            continue
+                        full_snap = full_item.get("ref_snapshot", {}) if isinstance(full_item.get("ref_snapshot", {}), dict) else {}
+                        if not full_snap:
+                            continue
+                        cam_item.setdefault("ref_snapshot", {})
+                        if not isinstance(cam_item.get("ref_snapshot", {}), dict):
+                            cam_item["ref_snapshot"] = {}
+                        # Fill only missing fields (canonical tokens + counts).
+                        for key in ("token_count", "flat_tokens", "sequence_groups", "content_signature", "member_refs"):
+                            if key not in cam_item["ref_snapshot"] or not cam_item["ref_snapshot"].get(key):
+                                if key in full_snap and full_snap.get(key) is not None:
+                                    cam_item["ref_snapshot"][key] = full_snap.get(key)
+                        for key in ("display_text", "grouped_display_text", "semantic_display_text", "semantic_grouped_display_text", "visible_text"):
+                            if (not cam_item.get(key)) and full_item.get(key):
+                                cam_item[key] = full_item.get(key)
+                        if (not cam_item.get("display_text")) and full_snap.get("display_text"):
+                            cam_item["display_text"] = full_snap.get("display_text")
+                        if (not cam_item.get("grouped_display_text")) and full_snap.get("grouped_display_text"):
+                            cam_item["grouped_display_text"] = full_snap.get("grouped_display_text")
+                        if (not cam_item.get("semantic_display_text")) and full_snap.get("semantic_display_text"):
+                            cam_item["semantic_display_text"] = full_snap.get("semantic_display_text")
+                        if (not cam_item.get("visible_text")) and full_snap.get("visible_text"):
+                            cam_item["visible_text"] = full_snap.get("visible_text")
+                        fallback_display = (
+                            cam_item.get("display")
+                            or full_item.get("display")
+                            or full_snap.get("content_display")
+                            or full_snap.get("display")
+                            or full_snap.get("display_text")
+                            or ""
+                        )
+                        fallback_detail = (
+                            full_item.get("display_detail")
+                            or full_snap.get("content_display_detail")
+                            or full_snap.get("grouped_display_text")
+                            or ""
+                        )
+                        if fallback_display:
+                            cam_item.setdefault("display", fallback_display)
+                            if not cam_item.get("display_text"):
+                                cam_item["display_text"] = fallback_display
+                            if not cam_item.get("semantic_display_text"):
+                                cam_item["semantic_display_text"] = fallback_display
+                            if not cam_item.get("visible_text"):
+                                cam_item["visible_text"] = fallback_display
+                        if fallback_detail:
+                            cam_item.setdefault("display_detail", fallback_detail)
+                            if not cam_item.get("grouped_display_text"):
+                                cam_item["grouped_display_text"] = fallback_detail
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
         selected_by_counts: dict[str, int] = {}
         for it in selected_items:
             k = str(it.get("selected_by", "") or "unknown")
@@ -477,11 +669,19 @@ class AttentionFilter:
                 energy_eligible_count += 1
 
         report = {
-            "selection_basis": "注意力滤波：聚焦优先 + 动态阈值抑制 + 最少保留数兜底；入选对象再按比例抽取能量形成 CAM（有代价）。",
-            # top_n 为兼容字段：表示 CAM 上限（cap），不保证填满。
+            "selection_basis": "Focus-first + dynamic cutoff + minimum keep; selected items then consume energy into CAM.",
+            # top_n is the CAM capacity cap, not a guarantee to fill all slots
             "top_n": resolved_top_n,
-            "cam_item_cap": resolved_top_n,
             "min_cam_items": resolved_min_keep,
+            "cam_resource_budget": {
+                "enabled": bool(size_cost_enabled),
+                "used": int(selected_budget_used),
+                "cap": int(resolved_top_n),
+                "skipped_by_budget_count": int(skipped_by_budget_count),
+                "token_divisor": round(float(size_cost_token_divisor), 8),
+                "max_cost": int(size_cost_max_cost),
+                "cost_types": sorted(list(size_cost_types)),
+            },
             "consume_enabled": resolved_consume,
             "consume_ratio": round(resolved_ratio, 8),
             "modulation_applied": dict(modulation) if isinstance(modulation, dict) else {},
@@ -540,7 +740,7 @@ class AttentionFilter:
         return self._make_response(
             success=True,
             code="OK",
-            message="CAM 构建完成 / CAM built",
+            message="CAM        / CAM built",
             data={
                 "cam_snapshot": cam_snapshot,
                 "attention_report": report,
@@ -556,7 +756,7 @@ class AttentionFilter:
         )
 
     # ================================================================== #
-    # 接口二：get_runtime_snapshot                                         #
+    #       get_runtime_snapshot                                         #
     # ================================================================== #
 
     def get_runtime_snapshot(self, *, trace_id: str = "attention_snapshot") -> dict:
@@ -579,7 +779,7 @@ class AttentionFilter:
         )
 
     # ================================================================== #
-    # 接口三：reload_config                                                #
+    #       reload_config                                                #
     # ================================================================== #
 
     def reload_config(
@@ -598,7 +798,7 @@ class AttentionFilter:
                 return self._make_response(
                     success=False,
                     code="CONFIG_ERROR",
-                    message=f"配置文件加载失败或为空 / Config file failed to load or empty: {path}",
+                    message=f"Config file failed to load or empty: {path}",
                     trace_id=trace_id,
                     elapsed_ms=self._elapsed_ms(start_time),
                 )
@@ -607,7 +807,7 @@ class AttentionFilter:
             rejected: list[dict] = []
             for key, val in new_raw.items():
                 if key not in _DEFAULT_CONFIG:
-                    rejected.append({"key": key, "reason": "未知配置项 / Unknown config key"})
+                    rejected.append({"key": key, "reason": "       ?/ Unknown config key"})
                     continue
                 expected_type = type(_DEFAULT_CONFIG[key])
                 if isinstance(val, expected_type) or (expected_type is float and isinstance(val, (int, float))):
@@ -616,7 +816,7 @@ class AttentionFilter:
                 else:
                     rejected.append({
                         "key": key,
-                        "reason": f"类型不匹配 / Type mismatch: expected {expected_type.__name__}, got {type(val).__name__}",
+                        "reason": f"       ?/ Type mismatch: expected {expected_type.__name__}, got {type(val).__name__}",
                     })
 
             self._logger.update_config(
@@ -637,7 +837,7 @@ class AttentionFilter:
                 return self._make_response(
                     success=False,
                     code="CONFIG_ERROR",
-                    message=f"部分配置项被拒绝 / Some config items rejected: {len(rejected)}",
+                    message=f"             / Some config items rejected: {len(rejected)}",
                     data={"applied": applied, "rejected": rejected},
                     trace_id=trace_id,
                     elapsed_ms=self._elapsed_ms(start_time),
@@ -646,7 +846,7 @@ class AttentionFilter:
             return self._make_response(
                 success=True,
                 code="OK",
-                message=f"热加载完成 / Hot reload done: {len(applied)} applied, {len(rejected)} rejected",
+                message=f"Hot reload done: {len(applied)} applied, {len(rejected)} rejected",
                 data={"applied": applied, "rejected": rejected},
                 trace_id=trace_id,
                 elapsed_ms=self._elapsed_ms(start_time),
@@ -656,13 +856,13 @@ class AttentionFilter:
                 trace_id=trace_id,
                 interface="reload_config",
                 code="CONFIG_ERROR",
-                message=f"热加载失败: {e}",
+                message=f"reload config error: {e}",
                 detail={"traceback": traceback.format_exc()},
             )
             return self._make_response(
                 success=False,
                 code="CONFIG_ERROR",
-                message=f"热加载失败 / Hot reload failed: {e}",
+                message=f"Hot reload failed: {e}",
                 error={"code": "config_error", "message": str(e)},
                 trace_id=trace_id,
                 elapsed_ms=self._elapsed_ms(start_time),
@@ -674,8 +874,21 @@ class AttentionFilter:
         except Exception:
             pass
 
+    def clear_runtime_state(self, *, trace_id: str = "", reason: str = "runtime_reset") -> dict:
+        start_time = time.time()
+        total_calls_before = int(self._total_calls)
+        self._total_calls = 0
+        return self._make_response(
+            success=True,
+            code="OK",
+            message=f"注意力模块运行态已清空 / Attention runtime cleared ({reason})",
+            data={"total_calls_before": total_calls_before},
+            trace_id=trace_id,
+            elapsed_ms=self._elapsed_ms(start_time),
+        )
+
     # ================================================================== #
-    # 内部工具                                                            #
+    #                                                                   #
     # ================================================================== #
 
     def _build_config(self, config_override: dict | None) -> dict:
@@ -713,10 +926,8 @@ class AttentionFilter:
     @staticmethod
     def _compute_focus_boost(item: dict, focus_directives: list[dict] | None) -> float:
         """
-        计算聚焦增益（不改语义，只在排序时做可解释的加成）。
-
-        当前实现：严格按 target_ref_object_id/target_item_id 命中才加成，取最大值。
-        boost = directive.focus_boost * directive.strength
+                                               ?
+                     target_ref_object_id/target_item_id                  ?        boost = directive.focus_boost * directive.strength
         """
         if not focus_directives:
             return 0.0
@@ -819,3 +1030,11 @@ class AttentionFilter:
                 "logged": True,
             },
         }
+
+
+
+
+
+
+
+

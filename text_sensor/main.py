@@ -535,6 +535,7 @@ class TextSensor:
             include_echo_in_objects=self._config.get(
                 "include_echoes_in_stimulus_packet_objects", False
             ),
+            goal_b_char_sa_string_mode=bool(self._config.get("enable_goal_b_char_sa_string_mode", False)),
         )
 
         # ---- Step 12: 日志 & 返回 ----

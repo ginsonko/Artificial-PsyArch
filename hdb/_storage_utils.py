@@ -32,7 +32,7 @@ def load_json_file(path: str | Path, default: Any = None) -> Any:
 def write_json_file(path: str | Path, payload: Any) -> None:
     target = Path(path)
     ensure_dir(target.parent)
-    tmp_path = target.with_suffix(target.suffix + ".tmp")
+    tmp_path = target.with_suffix(target.suffix + f".{os.getpid()}.{time.time_ns()}.tmp")
     used_orjson = False
     try:
         import orjson

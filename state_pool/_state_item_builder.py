@@ -6,19 +6,21 @@ AP 状态池模块 — 状态池项构建器
 state_item 是状态池的核心运行态对象，包含完整的能量、动态指标、绑定状态和生命周期信息。
 """
 
+import copy
 import time
 import re
 from typing import Any
 
 from . import __schema_version__, __module_name__
 from ._id_generator import next_id
+from hdb._sequence_display import format_sequence_groups
 
 
 # ====================================================================== #
 #                     支持的引用对象类型                                    #
 # ====================================================================== #
 
-SUPPORTED_REF_TYPES = {"sa", "csa", "st", "em", "cfs_signal", "action_node"}
+SUPPORTED_REF_TYPES = {"sa", "csa", "st", "sg", "em", "cfs_signal", "action_node"}
 
 # 属性名兜底提取：用于在缺失 attribute_name 字段时，从 token 中解析稳定键。
 # 例如： "惩罚信号:存在（punish_signal）" -> punish_signal
@@ -85,6 +87,7 @@ def build_state_item(
         "sa": "sa_runtime_item",
         "csa": "csa_runtime_item",
         "st": "st_runtime_item",
+        "sg": "sg_runtime_item",
         "em": "em_runtime_item",
         "cfs_signal": "cfs_runtime_item",
         "action_node": "action_runtime_item",
@@ -209,7 +212,7 @@ def build_state_item(
             "confidence": 1.0,
             "field_registry_version": __schema_version__,
             "debug": {},
-            "ext": {},
+            "ext": _build_runtime_meta_ext(ref_object),
         },
     }
 
@@ -357,8 +360,10 @@ def _build_ref_snapshot(
     elif obj_type == "st":
         content = ref_object.get("content", {})
         structure = ref_object.get("structure", {})
+        structured_display = format_sequence_groups(structure.get("sequence_groups", []))
         display = (
-            content.get("display")
+            structured_display
+            or content.get("display")
             or content.get("normalized")
             or content.get("raw")
             or structure.get("display_text")
@@ -366,7 +371,8 @@ def _build_ref_snapshot(
         )
         snapshot["content_display"] = display
         snapshot["content_display_detail"] = (
-            structure.get("display_text")
+            structured_display
+            or structure.get("display_text")
             or content.get("normalized")
             or display
         )
@@ -374,20 +380,62 @@ def _build_ref_snapshot(
         snapshot["content_signature"] = structure.get("content_signature", "")
         snapshot["flat_tokens"] = list(structure.get("flat_tokens", []))
         snapshot["sequence_groups"] = list(structure.get("sequence_groups", []))
+        snapshot["member_refs"] = list(structure.get("member_refs", []))
+        snapshot["structure_ext"] = copy.deepcopy(structure.get("ext", {})) if isinstance(structure.get("ext", {}), dict) else {}
+    elif obj_type == "sg":
+        content = ref_object.get("content", {})
+        group_structure = ref_object.get("group_structure", {})
+        if not isinstance(group_structure, dict):
+            group_structure = {}
+        structured_display = format_sequence_groups(group_structure.get("sequence_groups", []))
+        display = (
+            structured_display
+            or content.get("display")
+            or content.get("normalized")
+            or content.get("raw")
+            or group_structure.get("display_text")
+            or ref_object.get("id", "")
+        )
+        snapshot["content_display"] = display
+        snapshot["content_display_detail"] = (
+            structured_display
+            or group_structure.get("display_text")
+            or content.get("normalized")
+            or display
+        )
+        snapshot["token_count"] = int(group_structure.get("token_count", len(group_structure.get("flat_tokens", []))))
+        snapshot["content_signature"] = group_structure.get("content_signature", "")
+        snapshot["flat_tokens"] = list(group_structure.get("flat_tokens", []))
+        snapshot["sequence_groups"] = list(group_structure.get("sequence_groups", []))
+        snapshot["member_refs"] = list(group_structure.get("member_refs", []))
+        group_obj = ref_object.get("group", {}) if isinstance(ref_object.get("group", {}), dict) else {}
+        snapshot["required_structure_ids"] = list(group_obj.get("required_structure_ids", ref_object.get("required_structure_ids", [])) or [])
+        snapshot["bias_structure_ids"] = list(group_obj.get("bias_structure_ids", ref_object.get("bias_structure_ids", [])) or [])
+        snapshot["group_ext"] = copy.deepcopy(group_structure.get("ext", {})) if isinstance(group_structure.get("ext", {}), dict) else {}
     elif obj_type == "em":
         content = ref_object.get("content", {})
         memory = ref_object.get("memory", {})
+        structured_display = format_sequence_groups(memory.get("sequence_groups", []))
         display = (
-            content.get("display")
+            memory.get("semantic_grouped_display_text")
+            or memory.get("grouped_display_text")
+            or structured_display
+            or content.get("display")
             or memory.get("display_text")
             or memory.get("event_summary")
             or ref_object.get("id", "")
         )
         snapshot["content_display"] = display
-        snapshot["content_display_detail"] = memory.get("event_summary", display)
+        snapshot["content_display_detail"] = (
+            memory.get("semantic_grouped_display_text")
+            or memory.get("grouped_display_text")
+            or structured_display
+            or memory.get("event_summary", display)
+        )
         snapshot["memory_id"] = memory.get("memory_id", ref_object.get("id", ""))
         snapshot["structure_refs"] = list(memory.get("structure_refs", []))
         snapshot["group_refs"] = list(memory.get("group_refs", []))
+        snapshot["sequence_groups"] = list(memory.get("sequence_groups", []))
         snapshot["backing_structure_id"] = memory.get("backing_structure_id", "")
     elif obj_type == "cfs_signal":
         content = ref_object.get("content", {})
@@ -401,6 +449,26 @@ def _build_ref_snapshot(
         snapshot["content_display"] = str(ref_object.get("id", ""))
 
     return snapshot
+
+
+def _build_runtime_meta_ext(ref_object: dict) -> dict:
+    """Preserve lightweight runtime metadata needed by later modules."""
+    result: dict[str, Any] = {}
+
+    meta = ref_object.get("meta", {})
+    if isinstance(meta, dict):
+        meta_ext = meta.get("ext", {})
+        if isinstance(meta_ext, dict):
+            result.update(copy.deepcopy(meta_ext))
+
+    structure = ref_object.get("structure", {})
+    if isinstance(structure, dict):
+        structure_ext = structure.get("ext", {})
+        if isinstance(structure_ext, dict):
+            if "cognitive_stitching" in structure_ext and isinstance(structure_ext.get("cognitive_stitching"), dict):
+                result.setdefault("cognitive_stitching", copy.deepcopy(structure_ext.get("cognitive_stitching", {})))
+
+    return result
 
 
 def _extract_ref_object_display(ref_object: dict | None) -> str:

@@ -91,6 +91,54 @@ default_er_decay_ratio: 0.95
 # Reference / 参考: Default 0.90. Lower it if speculative activation should wash out faster.
 default_ev_decay_ratio: 0.9
 
+# ---- Runtime-Bound Attributes / 运行态绑定属性 ----
+
+# bound_attribute_apply_decay / 是否对 runtime-bound attributes 执行衰减
+# Purpose / 作用: Treat bound attributes as persistent runtime state (CFS/time-feeling/reward tags, etc.) that decays every tick.
+# Meaning / 意义: When enabled, bound attribute ER/EV will decay in maintenance, so feelings are not just "peak triggers".
+# Reference / 参考: Default true. Disable only for debugging (to observe raw accumulation).
+bound_attribute_apply_decay: true
+
+# bound_attribute_er_decay_ratio / bound attribute ER 每 Tick 保留系数
+# Purpose / 作用: Retention ratio for ER inside each bound attribute.
+# Meaning / 意义: Higher preserves positive feelings longer; lower clears faster.
+# Reference / 参考: Default 0.97.
+bound_attribute_er_decay_ratio: 0.97
+
+# bound_attribute_ev_decay_ratio / bound attribute EV 每 Tick 保留系数
+# Purpose / 作用: Retention ratio for EV inside each bound attribute.
+# Meaning / 意义: Higher preserves negative feelings longer; lower clears faster.
+# Reference / 参考: Default 0.97.
+bound_attribute_ev_decay_ratio: 0.97
+
+# bound_attribute_decay_ignore_names / 衰减忽略名单
+# Purpose / 作用: Attribute names in this list will not be decayed by the bound-attribute decay pass.
+# Meaning / 意义: Use this to keep constant tags stable while still decaying real feelings.
+# Reference / 参考: Default [].
+bound_attribute_decay_ignore_names: []
+
+# enable_cfs_correctness_transfer / 是否启用“违和下降 -> 正确感上升”的守恒式转换
+# Purpose / 作用: When dissonance (EV) drops on an object, transfer the same amount into correctness (ER).
+# Meaning / 意义: This models mismatch resolved -> correctness gained without inventing extra energy.
+# Reference / 参考: Default true.
+enable_cfs_correctness_transfer: true
+
+# cfs_dissonance_attribute_name / 守恒转换的“违和感”属性名
+# Purpose / 作用: Attribute name used as the EV source for correctness transfer.
+# Reference / 参考: Default "cfs_dissonance".
+cfs_dissonance_attribute_name: "cfs_dissonance"
+
+# cfs_correctness_attribute_name / 守恒转换的“正确感”属性名
+# Purpose / 作用: Attribute name used as the ER sink for correctness transfer.
+# Reference / 参考: Default "cfs_correctness".
+cfs_correctness_attribute_name: "cfs_correctness"
+
+# snapshot_bound_attribute_energy_top_n / 快照中 bound attributes 能量 TopN
+# Purpose / 作用: Limit bound attribute entries in StatePool snapshots to keep payload size stable.
+# Meaning / 意义: Only the strongest bound attributes (by total energy) are included in snapshot detail.
+# Reference / 参考: Default 64.
+snapshot_bound_attribute_energy_top_n: 64
+
 # ---- Soft Capacity / 软上限衰减调制（资源约束） ----
 
 # soft_capacity_enabled / 是否启用“软上限衰减调制”
@@ -171,6 +219,18 @@ priority_stimulus_target_ref_types: ["st"]
 # Meaning / 意义: Keeps the packet-delta diagnostics focused on meaningful verification rather than micro-cancellation.
 # Reference / 参考: Default 0.01. Lower for fine debugging, higher for cleaner logs.
 priority_neutralization_min_effect_threshold: 0.01
+
+# enable_event_component_neutralization / 是否启用事件组分优先中和
+# Purpose / 作用: Allows priority packet neutralization to complement matched components inside cognitive stitching events.
+# Meaning / 意义: Only the smaller side of a matched component ledger is filled, so this path reduces component CP instead of smearing same-direction energy into the whole event.
+# Reference / 参考: Default true. Recommended for the current conservative CS rollout.
+enable_event_component_neutralization: true
+
+# event_component_neutralization_ratio_cap / 事件组分单个 Tick 补足比例上限
+# Purpose / 作用: Caps how much of a component deficit may be filled during one priority-neutralization pass.
+# Meaning / 意义: 1.0 allows full complementary fill when packet energy is sufficient; smaller values slow down event verification for a more conservative rollout.
+# Reference / 参考: Default 1.0.
+event_component_neutralization_ratio_cap: 1.0
 
 # ---- Pruning / 淘汰 ----
 

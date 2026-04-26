@@ -373,6 +373,7 @@ def build_stimulus_packet(
     trace_id: str,
     tick_id: str,
     include_echo_in_objects: bool = True,
+    goal_b_char_sa_string_mode: bool = False,
 ) -> dict:
     now_ms = int(time.time() * 1000)
     pkt_id = next_id("spkt")
@@ -394,6 +395,9 @@ def build_stimulus_packet(
         round_created: int,
         decay_count: int,
         sequence_index: int,
+        order_sensitive: bool = False,
+        string_unit_kind: str = "",
+        string_token_text: str = "",
     ) -> None:
         ext = member.setdefault("ext", {})
         ext["packet_context"] = {
@@ -405,6 +409,9 @@ def build_stimulus_packet(
             "round_created": round_created,
             "decay_count": decay_count,
             "sequence_index": sequence_index,
+            "order_sensitive": bool(order_sensitive),
+            "string_unit_kind": str(string_unit_kind or ""),
+            "string_token_text": str(string_token_text or ""),
         }
 
     def build_frame_groups(
@@ -448,6 +455,89 @@ def build_stimulus_packet(
 
         frame_groups = []
         packet_group_index = start_group_index
+
+        if goal_b_char_sa_string_mode and feature_sas:
+            group_feature_sas = list(feature_sas)
+            string_token_text = "".join(
+                str(sa.get("content", {}).get("raw", sa.get("content", {}).get("display", "")) or "")
+                for sa in group_feature_sas
+            )
+            grouped_sa_ids: list[str] = []
+            grouped_csa_ids: list[str] = []
+            for seq_index, feature_sa in enumerate(group_feature_sas):
+                anchor_id = str(feature_sa.get("id", ""))
+                if not anchor_id:
+                    continue
+                grouped_sa_ids.append(anchor_id)
+                annotate_member(
+                    feature_sa,
+                    source_type=source_type,
+                    group_index=packet_group_index,
+                    source_group_index=0,
+                    origin_frame_id=origin_frame_id,
+                    echo_depth=echo_depth,
+                    round_created=round_created,
+                    decay_count=decay_count,
+                    sequence_index=seq_index,
+                    order_sensitive=True,
+                    string_unit_kind="char_sequence",
+                    string_token_text=string_token_text,
+                )
+                group_attrs = sorted(
+                    attribute_map.get(anchor_id, []),
+                    key=lambda sa: (
+                        int(sa.get("stimulus", {}).get("global_sequence_index", 0)),
+                        int(sa.get("created_at", 0)),
+                    ),
+                )
+                for attr_offset, attr_sa in enumerate(group_attrs, start=1):
+                    grouped_sa_ids.append(str(attr_sa.get("id", "")))
+                    annotate_member(
+                        attr_sa,
+                        source_type=source_type,
+                        group_index=packet_group_index,
+                        source_group_index=0,
+                        origin_frame_id=origin_frame_id,
+                        echo_depth=echo_depth,
+                        round_created=round_created,
+                        decay_count=decay_count,
+                        sequence_index=seq_index * 1000 + attr_offset,
+                        order_sensitive=True,
+                        string_unit_kind="char_sequence",
+                        string_token_text=string_token_text,
+                    )
+                group_csas = sorted(csa_map.get(anchor_id, []), key=lambda csa: int(csa.get("created_at", 0)))
+                for csa_offset, csa in enumerate(group_csas, start=1):
+                    grouped_csa_ids.append(str(csa.get("id", "")))
+                    annotate_member(
+                        csa,
+                        source_type=source_type,
+                        group_index=packet_group_index,
+                        source_group_index=0,
+                        origin_frame_id=origin_frame_id,
+                        echo_depth=echo_depth,
+                        round_created=round_created,
+                        decay_count=decay_count,
+                        sequence_index=seq_index * 1000 + 500 + csa_offset,
+                        order_sensitive=True,
+                        string_unit_kind="char_sequence",
+                        string_token_text=string_token_text,
+                    )
+            frame_groups.append(
+                {
+                    "group_index": packet_group_index,
+                    "source_type": source_type,
+                    "origin_frame_id": origin_frame_id,
+                    "source_group_index": 0,
+                    "sa_ids": [sid for sid in grouped_sa_ids if sid],
+                    "csa_ids": [cid for cid in grouped_csa_ids if cid],
+                    "order_sensitive": True,
+                    "string_unit_kind": "char_sequence",
+                    "string_token_text": string_token_text,
+                }
+            )
+            return frame_groups
+
         for feature_sa in feature_sas:
             anchor_id = str(feature_sa.get("id", ""))
             source_group_index = int(feature_sa.get("stimulus", {}).get("group_index", 0))

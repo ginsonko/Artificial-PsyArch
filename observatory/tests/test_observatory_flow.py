@@ -32,8 +32,7 @@ def _seed_structure():
             "display_text": f"{HI}/{YA}",
             "flat_tokens": [HI, YA],
             "sequence_groups": [
-                {"group_index": 0, "source_type": "current", "origin_frame_id": "seed", "tokens": [HI]},
-                {"group_index": 1, "source_type": "current", "origin_frame_id": "seed", "tokens": [YA]},
+                {"group_index": 0, "source_type": "current", "origin_frame_id": "seed", "tokens": list(HI + YA)},
             ],
         },
     }
@@ -328,8 +327,10 @@ def test_observatory_static_flow_order_matches_runtime():
     app_js_text = app_js.read_text(encoding="utf-8")
     html_text = html_renderer.read_text(encoding="utf-8")
 
-    assert app_js_text.index("5. 缓存中和") < app_js_text.index("6. 刺激级查存一体")
-    assert app_js_text.index("6. 刺激级查存一体") < app_js_text.index("7. 状态池回写与结构投影")
+    # Frontend flow blocks may be renumbered when optional stages (e.g. Cognitive Stitching) are enabled/disabled.
+    # 前端流程块的序号可能会因为“可选阶段开关”（例如认知拼接）而变化，因此这里按标题关键词做顺序约束，不依赖固定编号。
+    assert app_js_text.index("缓存中和") < app_js_text.index("刺激级查存一体")
+    assert app_js_text.index("刺激级查存一体") < app_js_text.index("状态池回写与结构投影")
     assert html_text.rindex("<a href='#cache'>") < html_text.rindex("<a href='#stimulus'>")
     assert html_text.rindex("<a href='#stimulus'>") < html_text.rindex("<a href='#projection'>")
     # NOTE:
@@ -340,7 +341,7 @@ def test_observatory_static_flow_order_matches_runtime():
     assert "actionRuntimeAutoTimer" in app_js_text
     # The UI title is Chinese-first but should still contain the bilingual keyword.
     # UI 标题中文优先，但仍应包含双语关键词，便于稳定检索与回归测试。
-    assert ("9. Memory Feedback / 记忆反哺" in app_js_text) or ("9. 记忆反哺（Memory Feedback）" in app_js_text)
+    assert ("记忆反哺" in app_js_text) and ("Memory Feedback" in app_js_text)
     assert app_js_text.count("function renderSettingsInput(") == 1
     assert app_js_text.count("function fmtMemoryActivationCard(") == 1
     assert app_js_text.count("async function refreshDashboard(") == 1

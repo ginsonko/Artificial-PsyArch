@@ -32,6 +32,20 @@ defaults:
     focus_boost: 0.9
     deduplicate_by: target_ref_object_id
     max_directives_per_rule: 8
+  habituation:
+    # 先天规则“习惯化/疲劳衰减”机制（软限制，不是硬开关）
+    # 设计目标：
+    # - 避免认知感受/递质/行动驱动长期爆炸并维持高位
+    # - 允许在短时强刺激下仍然强烈（先强后钝），并在停止触发后自然恢复
+    #
+    # 口径：
+    # - 引擎会对每条 rule 维护“最近 window_ticks 内该 rule 的原始赋能量之和（raw_energy_sum）”
+    # - 当 raw_energy_sum > start_total 时开始衰减；达到 full_total 时衰减到 min_scale（可为 0）
+    enabled: true
+    window_ticks: 10
+    start_total: 6.0
+    full_total: 18.0
+    min_scale: 0.0
 rules:
 - id: state_window_fast_cp_rise
   title: '状态窗口：认知压（CP）快速上升 -> 触发记录（emit_script）'
@@ -74,7 +88,7 @@ rules:
 # ======================================================================
 
 - id: cfs_dissonance_from_cp_abs
-  title: 'CFS脚本：认知压大小（|CP|）过高 -> 违和感（并绑定属性）'
+  title: 'CFS脚本：认知压大小（|CP|）-> 违和感（持续态 + 属性绑定）'
   phase: cfs
   enabled: true
   priority: 90
@@ -84,22 +98,27 @@ rules:
       preset: cp_abs_state
       selector:
         mode: top_n
-        top_n: 12
+        top_n: 8
         ref_object_types: ['st', 'sa']
-      op: '>='
-      value: 0.5
+      op: exists
   then:
   - cfs_emit:
       kind: dissonance
       from: metric_matches
       scope: object
-      max_signals: 8
+      max_signals: 4
+      emit_gate:
+        mode: strength_delta
+        min_delta: 0.05
+        min_interval_ticks: 2
+        bind_attribute_even_when_skipped: true
+      min_strength: 0.3
       strength:
         from: match_value
         policy: linear_clamp
-        min: 0.5
+        min: 0.0
         max: 2.0
-        out_min: 0.3
+        out_min: 0.0
         out_max: 1.0
       bind_attribute:
         attribute_name: cfs_dissonance
@@ -108,7 +127,25 @@ rules:
         value_type: numerical
         modality: internal
         er: 0.0
-        ev: 0.0
+        ev: '{{{strength}}}'
+  note: '对齐理论3.8.2：违和感来源于高偏差/高认知压。原型以 |CP| 作为指标，并把“强违和”粗略记为 punish_signal 供压力通道使用（可编辑/可替换）。'
+
+- id: cfs_punish_signal_from_cp_abs_high
+  title: 'CFS脚本：强违和（|CP|高）-> 惩罚信号（punish_signal，属性绑定）'
+  phase: cfs
+  enabled: true
+  priority: 89
+  cooldown_ticks: 0
+  when:
+    metric:
+      preset: cp_abs_state
+      selector:
+        mode: top_n
+        top_n: 8
+        ref_object_types: ['st', 'sa']
+      op: '>='
+      value: 0.7
+  then:
   - pool_bind_attribute:
       selector:
         mode: specific_item
@@ -123,14 +160,13 @@ rules:
         er: 0.0
         ev: 0.0
       reason: 'iesm:dissonance->punish_signal (MVP)'
-  note: '对齐理论3.8.2：违和感来源于高偏差/高认知压。原型以 |CP| 作为指标，并把“强违和”粗略记为 punish_signal 供压力通道使用（可编辑/可替换）。'
 
 - id: cfs_correct_event_from_cp_abs_drop
   title: 'CFS脚本：违和显著下降 -> 正确事件（硬约束：上一tick需处于违和）'
   phase: cfs
   enabled: true
   priority: 85
-  cooldown_ticks: 1
+  cooldown_ticks: 0
   when:
     metric:
       preset: got_cp_abs
@@ -139,10 +175,10 @@ rules:
         top_n: 12
         ref_object_types: ['st', 'sa']
       op: '<='
-      value: -0.5
+      value: -0.8
       prev_gate:
         op: '>='
-        value: 0.5
+        value: 0.8
   then:
   - cfs_emit:
       kind: correct_event
@@ -157,13 +193,20 @@ rules:
         max: 1.2
         out_min: 0.4
         out_max: 1.0
-      bind_attribute:
-        attribute_name: cfs_correct_event
+      bind_attributes:
+      - attribute_name: cfs_correct_event
         display: '正确事件:{{{strength}}}'
         value_from: strength
         value_type: numerical
         modality: internal
-        er: 0.0
+        er: '{{{strength}}}'
+        ev: 0.0
+      - attribute_name: cfs_correctness
+        display: '正确感:{{{strength}}}'
+        value_from: strength
+        value_type: numerical
+        modality: internal
+        er: '{{{strength}}}'
         ev: 0.0
   - pool_bind_attribute:
       selector:
@@ -179,6 +222,20 @@ rules:
         er: 0.0
         ev: 0.0
       reason: 'iesm:correct_event->reward_signal (MVP)'
+  - pool_bind_attribute:
+      selector:
+        mode: specific_item
+        item_id: '{{{match_item_id}}}'
+      attribute:
+        attribute_name: cfs_correctness
+        attribute_value: '{{{strength}}}'
+        raw: 'cfs_correctness:{{{strength}}}'
+        display: '正确感:{{{strength}}}'
+        value_type: numerical
+        modality: internal
+        er: '{{{strength}}}'
+        ev: 0.0
+      reason: 'iesm:correct_event->cfs_correctness (dissonance drop)'
   note: '对齐理论3.8.2：正确事件必须依托违和显著下降。原型把正确事件粗略记为 reward_signal（可编辑/可替换），用于期待通道。'
 
 - id: cfs_surprise_from_er_surge_cp_positive
@@ -224,7 +281,7 @@ rules:
         value_from: strength
         value_type: numerical
         modality: internal
-        er: 0.0
+        er: '{{{strength}}}'
         ev: 0.0
   note: '对齐理论3.8.2：惊来自“实能量侧突增导致的短时高偏差”，并且要求 CP 为正（ER>EV）。本规则用 got_er 近似“实能量突增”，并用 cp_delta>=0 过滤掉 EV 侧突增的误报。'
 
@@ -276,7 +333,7 @@ rules:
         value_from: strength
         value_type: numerical
         modality: internal
-        er: 0.0
+        er: '{{{strength}}}'
         ev: 0.0
   # 实时验证（每 tick 一次）：只要“期待”仍满足存在条件（EV 高 + reward_signal），就持续做验证/不验的渐变对抗。
   # 说明：
@@ -324,7 +381,7 @@ rules:
             value_from: strength
             value_type: numerical
             modality: internal
-            er: 0.0
+            er: '{{{strength}}}'
             ev: 0.0
       # 渐变不验（unverified）
       - cfs_emit:
@@ -354,7 +411,7 @@ rules:
             value_from: strength
             value_type: numerical
             modality: internal
-            er: 0.0
+            er: '{{{strength}}}'
             ev: 0.0
       else:
       # 目标对象消失或不可采样：视作“不验为主”（fallback）
@@ -385,7 +442,7 @@ rules:
             value_from: strength
             value_type: numerical
             modality: internal
-            er: 0.0
+            er: '{{{strength}}}'
             ev: 0.0
   note: '对齐理论3.8.2：期待来自“预测结构(EV) + 奖励信号”。验证采用渐变混合（verify_mix）：允许部分验证、对称对抗，并为“预测收敛”提供连续信号。该实现为“实时持续验证”，不再硬编码固定验证时机。'
 
@@ -436,7 +493,7 @@ rules:
         value_type: numerical
         modality: internal
         er: 0.0
-        ev: 0.0
+        ev: '{{{strength}}}'
   # 实时验证（每 tick 一次）：只要“压力”仍满足存在条件（EV 高 + punish_signal），就持续做验证/不验的渐变对抗。
   - branch:
       when:
@@ -477,7 +534,7 @@ rules:
             value_type: numerical
             modality: internal
             er: 0.0
-            ev: 0.0
+            ev: '{{{strength}}}'
       - cfs_emit:
           kind: pressure_unverified
           from: metric_matches
@@ -506,7 +563,7 @@ rules:
             value_type: numerical
             modality: internal
             er: 0.0
-            ev: 0.0
+            ev: '{{{strength}}}'
       else:
       - cfs_emit:
           kind: pressure_unverified
@@ -536,7 +593,7 @@ rules:
             value_type: numerical
             modality: internal
             er: 0.0
-            ev: 0.0
+            ev: '{{{strength}}}'
   note: '对齐理论3.8.2：压力来自“预测结构(EV) + 惩罚信号”。验证采用渐变混合（verify_mix）：允许部分验证、对称对抗，并为“预测收敛”提供连续信号。该实现为“实时持续验证”，不再硬编码固定验证时机。'
 
 - id: cfs_grasp_from_stimulus_match
@@ -574,7 +631,7 @@ rules:
         value_from: strength
         value_type: numerical
         modality: internal
-        er: 0.0
+        er: '{{{strength}}}'
         ev: 0.0
   note: '对齐理论3.8.3：把握感/置信度应来自匹配质量、残余比例、结构级一致性等。原型把这些组合成 grasp_score（见 observatory/_app.py），并以此触发 grasp。'
 
@@ -605,6 +662,24 @@ rules:
         max: 1.0
         out_min: 0.0
         out_max: 1.0
+  - pool_bind_attribute:
+      selector:
+        mode: specific_ref
+        ref_object_id: st_global_cfs
+        ref_object_type: st
+      create_if_missing: true
+      create_ref_object_type: st
+      create_display: '[GlobalCFS]'
+      attribute:
+        attribute_name: cfs_complexity
+        attribute_value: '{{{match_value}}}'
+        raw: '复杂度:{{{match_value}}}'
+        display: '复杂度:{{{match_value}}}'
+        value_type: numerical
+        modality: internal
+        er: '{{{match_value}}}'
+        ev: 0.0
+      reason: 'iesm:cfs_complexity->global_attr'
   note: '对齐理论3.8.3：繁/简建议结合 CAM 大小与状态池波峰数量/聚集度。原型用 complexity_score（见 observatory/_app.py，使用 CAM size + 有效波峰数量）输出可解释的综合强度。'
 
 - id: cfs_repetition_from_item_fatigue
@@ -680,12 +755,90 @@ rules:
         source_kind: iesm_cfs
   note: '对齐理论3.10.2：当出现违和/期待/压力等 CFS，对其绑定对象触发“注意力聚焦”行动器。这里用 Drive 竞争执行，避免硬插入注意力。'
 
+- id: innate_action_weather_stub_from_query_weather
+  title: '先天行动规则：外源输入出现“查询 + 天气” -> 触发“天气查询（Stub）”行动节点（Action/Drive）'
+  phase: directives
+  enabled: true
+  priority: 67
+  cooldown_ticks: 0
+  when:
+    all:
+    - metric:
+        metric: item.exists
+        selector:
+          mode: contains_text
+          contains_text: '天气'
+          ref_object_types:
+          - input
+        op: '>='
+        value: 0.0
+    - metric:
+        metric: item.exists
+        selector:
+          mode: contains_text
+          contains_text: '查询'
+          ref_object_types:
+          - input
+        op: '>='
+        value: 0.0
+  then:
+  - action_trigger:
+      from: metric_matches
+      match_policy: strongest
+      max_triggers: 1
+      action_kind: weather_stub
+      action_id: weather_stub
+      gain: 0.75
+      threshold: 0.60
+      cooldown_ticks: 0
+      params:
+        # disable_threshold_modulation: 为了让 if 条件样本稳定复现，不受 NT 与行动疲劳影响。
+        disable_threshold_modulation: true
+        # async_delay_ticks: 让“执行完成”在下一 tick 才出现，便于期望契约在后续 tick 结算奖惩。
+        async_delay_ticks: 1
+        feedback_text: '【系统反馈】天气查询已执行（Stub，占位实现，无真实天气数据）。'
+        source_kind: iesm_weather
+  note: '用于 if 条件自训练样本：当输入明确包含“查询 + 天气”时，给予较强 drive 增益，使 weather_stub 更可能跨过阈值并在下一 tick 完成。'
+
+- id: innate_action_weather_stub_from_weather_only
+  title: '先天行动规则：外源输入出现“天气” -> 弱触发“天气查询（Stub）”行动节点（Action/Drive）'
+  phase: directives
+  enabled: true
+  priority: 66
+  cooldown_ticks: 0
+  when:
+    metric:
+      preset: total_energy_state
+      selector:
+        mode: contains_text
+        contains_text: '天气'
+        ref_object_types:
+        - input
+      op: '>='
+      value: 0.0
+  then:
+  - action_trigger:
+      from: metric_matches
+      match_policy: strongest
+      max_triggers: 1
+      action_kind: weather_stub
+      action_id: weather_stub
+      gain: 0.35
+      threshold: 0.60
+      cooldown_ticks: 0
+      params:
+        disable_threshold_modulation: true
+        async_delay_ticks: 1
+        feedback_text: '【系统反馈】（Stub）我尝试执行天气查询，但目前驱动力不足以完成。'
+        source_kind: iesm_weather
+  note: '用于制造“失败样本”：只出现“天气”但缺少明确“查询/执行”意图时，只给弱增益，通常不足以跨过阈值。'
+
 - id: innate_action_recall_from_expect_pressure
   title: '先天行动规则：期待/压力 -> 触发“回忆”行动节点（recall）'
   phase: directives
   enabled: true
   priority: 62
-  cooldown_ticks: 0
+  cooldown_ticks: 2
   when:
     all:
     - cfs:
@@ -694,7 +847,7 @@ rules:
         - pressure
         - expectation_verified
         - pressure_verified
-        min_strength: 0.45
+        min_strength: 0.48
     - metric:
         preset: map_item_count
         op: '>='
@@ -707,7 +860,7 @@ rules:
       action_kind: recall
       action_id: recall_top_memory
       gain: '{{{match_value}}}'
-      threshold: 0.40
+      threshold: 0.70
       cooldown_ticks: 0
       params:
         trigger_kind: '{{{match_kind}}}'
@@ -737,7 +890,7 @@ rules:
         - st
         - sa
       op: '>='
-      value: 0.08
+      value: 0.25
       window_ticks: 1
   then:
   - action_trigger:
@@ -746,9 +899,9 @@ rules:
       max_triggers: 1
       action_kind: recall
       action_id: recall_time_feeling
-      gain: '{{{match_value}}}'
-      threshold: 0.40
-      cooldown_ticks: 0
+      gain: 0.20
+      threshold: 0.36
+      cooldown_ticks: 2
       params:
         # trigger_kind: 用于审计与前端显示来源
         trigger_kind: time_feeling

@@ -90,28 +90,28 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "nt_channels": {
         # base: baseline / 基线值（衰减回归到 base，而不是回归到 0）
         # soft_cap_k: per-channel soft cap strength / 每通道软上限强度参数（可选覆盖默认）
-        "DA": {"min": 0.0, "max": 1.0, "decay_ratio": 0.94, "base": 0.0, "soft_cap_k": 0.35},
-        "ADR": {"min": 0.0, "max": 1.0, "decay_ratio": 0.92, "base": 0.0, "soft_cap_k": 0.35},
-        "OXY": {"min": 0.0, "max": 1.0, "decay_ratio": 0.95, "base": 0.0, "soft_cap_k": 0.35},
-        "SER": {"min": 0.0, "max": 1.0, "decay_ratio": 0.96, "base": 0.0, "soft_cap_k": 0.35},
-        "END": {"min": 0.0, "max": 1.0, "decay_ratio": 0.93, "base": 0.0, "soft_cap_k": 0.35},
-        "COR": {"min": 0.0, "max": 1.0, "decay_ratio": 0.90, "base": 0.0, "soft_cap_k": 0.35},
+        "DA": {"min": 0.0, "max": 1.0, "decay_ratio": 0.91, "base": 0.12, "soft_cap_k": 0.35},
+        "ADR": {"min": 0.0, "max": 1.0, "decay_ratio": 0.85, "base": 0.05, "soft_cap_k": 0.35},
+        "OXY": {"min": 0.0, "max": 1.0, "decay_ratio": 0.93, "base": 0.12, "soft_cap_k": 0.35},
+        "SER": {"min": 0.0, "max": 1.0, "decay_ratio": 0.94, "base": 0.18, "soft_cap_k": 0.35},
+        "END": {"min": 0.0, "max": 1.0, "decay_ratio": 0.91, "base": 0.10, "soft_cap_k": 0.35},
+        "COR": {"min": 0.0, "max": 1.0, "decay_ratio": 0.86, "base": 0.06, "soft_cap_k": 0.35},
     },
-    "global_decay_ratio": 0.94,
+    "global_decay_ratio": 0.92,
     "cfs_to_nt_gains": {
-        "dissonance": {"COR": 0.28, "ADR": 0.06},
-        "correct_event": {"DA": 0.30, "OXY": 0.18, "SER": 0.08},
-        "surprise": {"ADR": 0.35},
-        "expectation": {"DA": 0.12},
-        "pressure": {"COR": 0.30, "END": 0.12, "ADR": 0.08},
+        "dissonance": {"COR": 0.08, "ADR": 0.02},
+        "correct_event": {"DA": 0.12, "OXY": 0.07, "SER": 0.03},
+        "surprise": {"ADR": 0.06},
+        "expectation": {"DA": 0.05},
+        "pressure": {"COR": 0.10, "END": 0.05, "ADR": 0.03},
         # Verification states (continuous, non-binary) / 验证态（连续渐变，非二极管）
-        "expectation_verified": {"DA": 0.18, "SER": 0.06},
-        "expectation_unverified": {"COR": 0.08, "ADR": 0.04},
-        "pressure_verified": {"COR": 0.18, "ADR": 0.10, "END": 0.04},
-        "pressure_unverified": {"END": 0.10, "COR": -0.05, "SER": 0.03},
-        "complexity": {"ADR": 0.08},
-        "repetition": {"COR": 0.10},
-        "grasp": {"SER": 0.10},
+        "expectation_verified": {"DA": 0.08, "SER": 0.03},
+        "expectation_unverified": {"COR": 0.03, "ADR": 0.015},
+        "pressure_verified": {"COR": 0.07, "ADR": 0.04, "END": 0.02},
+        "pressure_unverified": {"END": 0.04, "COR": -0.02, "SER": 0.01},
+        "complexity": {"ADR": 0.015},
+        "repetition": {"COR": 0.015},
+        "grasp": {"SER": 0.03},
     },
     "cfs_to_rwd_pun": {
         "correct_event": {"rwd": 1.0, "pun": 0.0},
@@ -141,8 +141,8 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     # 对齐理论 3.9.3：reward_signal 获得 ER（现实验证）应推动 DA 等通道变化；
     # pun 同理推动 COR/ADR 等“警戒/唤醒”通道变化。
     "rwd_pun_to_nt_gains": {
-        "rwd": {"DA": 0.18, "OXY": 0.06, "SER": 0.03},
-        "pun": {"COR": 0.16, "ADR": 0.06, "END": 0.04},
+        "rwd": {"DA": 0.08, "OXY": 0.03, "SER": 0.015},
+        "pun": {"COR": 0.06, "ADR": 0.03, "END": 0.02},
     },
     "modulation": {
         "attention": {
