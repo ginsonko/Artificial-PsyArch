@@ -9,7 +9,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from observatory.experiment.runner import (
+    EXPERIMENT_DEFAULT_APP_OVERRIDES,
     RunOptions,
+    apply_experiment_default_app_overrides,
     _compact_latest_metrics_preview,
     _resolve_time_sensor_runtime_overrides,
     run_dataset,
@@ -280,7 +282,7 @@ def test_expectation_contract_metric_eq_treats_missing_action_count_as_zero():
     assert detail["target"] == 0
 
 
-def test_run_dataset_disables_input_chunking_by_default_for_tick_alignment():
+def test_run_dataset_honors_dataset_chunking_override_and_applies_mainline_runtime():
     dataset_name = f"contract_chunk_alignment_{uuid.uuid4().hex}.yaml"
     run_id = f"test_contract_chunk_alignment_{uuid.uuid4().hex}"
     ref = _write_imported_dataset(
@@ -289,6 +291,8 @@ def test_run_dataset_disables_input_chunking_by_default_for_tick_alignment():
 seed: 1
 time_basis: tick
 tick_dt_ms: 100
+app_config_override:
+  input_chunking_enabled: false
 episodes:
   - id: ep_contract_chunk_alignment
     ticks:
@@ -314,8 +318,9 @@ episodes:
         result = run_dataset(app=app, dataset_ref=ref, options=RunOptions(), run_id=run_id)
         assert result["success"] is True
         manifest = result["manifest"]
-        assert manifest["dataset_runtime_override"]["experiment_default_overrides"]["input_chunking_enabled"] is False
-        assert manifest["dataset_runtime_override"]["experiment_default_overrides_applied"]["input_chunking_enabled"] is True
+        assert manifest["dataset_runtime_override"]["experiment_default_overrides"]["input_chunking_enabled"] is True
+        assert manifest["dataset_runtime_override"]["experiment_default_overrides_applied"]["input_chunking_enabled"] is False
+        assert manifest["dataset_runtime_override"]["app_config_override"]["input_chunking_enabled"] is False
         assert manifest["dataset_runtime_override"]["experiment_default_overrides"]["induction_projection_mode"] == "growth"
         assert manifest["dataset_runtime_override"]["experiment_default_overrides"]["enable_cognitive_stitching"] is False
         assert manifest["dataset_runtime_override"]["experiment_default_overrides"]["cognitive_stitching_stage"] == "disabled"
@@ -353,6 +358,32 @@ episodes:
         run_dir = resolve_run_dir(run_id)
         if run_dir.exists():
             shutil.rmtree(run_dir, ignore_errors=True)
+
+
+def test_realtime_cycle_alignment_helper_matches_experiment_mainline_overrides():
+    app = _ChunkingFakeExperimentApp()
+    app._config.update(
+        {
+            "input_chunking_enabled": False,
+            "enable_goal_b_char_sa_string_mode": False,
+            "induction_projection_mode": "residual",
+            "enable_cognitive_stitching": True,
+            "cognitive_stitching_stage": "post_induction",
+        }
+    )
+
+    result = apply_experiment_default_app_overrides(
+        app,
+        source="pytest_realtime_api_cycle",
+    )
+
+    assert result["source"] == "pytest_realtime_api_cycle"
+    assert result["baseline_conforms_to_growth_cs_off"] is True
+    assert result["runtime_refresh_applied"] is True
+    assert result["effective_app_baseline"] == EXPERIMENT_DEFAULT_APP_OVERRIDES
+    assert app.runtime_override_snapshots[-1] == EXPERIMENT_DEFAULT_APP_OVERRIDES
+    for key, expected in EXPERIMENT_DEFAULT_APP_OVERRIDES.items():
+        assert app._config.get(key) == expected
 
 
 def test_run_dataset_expectation_contract_success_emits_synthetic_feedback_tick():

@@ -618,6 +618,108 @@ def _experiment_default_overrides_applied(dataset_app_config_override: dict[str,
     return {key: key not in dataset_keys for key in EXPERIMENT_DEFAULT_APP_OVERRIDES.keys()}
 
 
+def apply_experiment_default_app_overrides(
+    app: Any,
+    *,
+    app_config_override: dict[str, Any] | None = None,
+    source: str = "experiment_runner",
+    refresh_runtime: bool = True,
+) -> dict[str, Any]:
+    """Apply the same current-mainline app overrides used by dataset runs.
+
+    The realtime observatory and the headless dataset runner both execute
+    `ObservatoryApp.run_cycle()`.  This helper keeps their pre-tick runtime
+    baseline aligned so a saved legacy config cannot silently send one entry
+    point through an old rollback path.
+    """
+
+    override = copy.deepcopy(app_config_override) if isinstance(app_config_override, dict) else {}
+    applied_defaults: dict[str, bool] = {}
+    changed_keys: list[str] = []
+    errors: list[str] = []
+    runtime_refresh_applied = False
+    cfg = getattr(app, "_config", None)
+    if not isinstance(cfg, dict):
+        return {
+            "source": source,
+            "applied": False,
+            "runtime_refresh_applied": False,
+            "app_config_override": override,
+            "app_config_override_keys": sorted(override.keys()),
+            "experiment_default_overrides": copy.deepcopy(EXPERIMENT_DEFAULT_APP_OVERRIDES),
+            "experiment_default_overrides_applied": _experiment_default_overrides_applied(override),
+            "effective_app_baseline": {},
+            "baseline_conforms_to_growth_cs_off": False,
+            "changed_keys": [],
+            "errors": ["app._config is unavailable"],
+        }
+
+    for key, value in EXPERIMENT_DEFAULT_APP_OVERRIDES.items():
+        applied = key not in override
+        applied_defaults[key] = bool(applied)
+        if not applied:
+            continue
+        if cfg.get(key) != value:
+            changed_keys.append(key)
+        cfg[key] = copy.deepcopy(value)
+
+    for key, value in override.items():
+        if cfg.get(key) != value:
+            changed_keys.append(str(key))
+        cfg[key] = copy.deepcopy(value)
+
+    if refresh_runtime:
+        try:
+            if hasattr(app, "_apply_runtime_overrides"):
+                app._apply_runtime_overrides()  # type: ignore[attr-defined]
+                runtime_refresh_applied = True
+            else:
+                sensor_override = app._sensor_config_override() if hasattr(app, "_sensor_config_override") else {}  # type: ignore[attr-defined]
+                sensor = getattr(app, "sensor", None)
+                sensor_config = getattr(sensor, "_config", None)
+                if isinstance(sensor_config, dict):
+                    sensor_config.update(sensor_override)
+                    for attr_name in ("_normalizer", "_segmenter", "_scorer", "_echo_mgr"):
+                        obj = getattr(sensor, attr_name, None)
+                        if hasattr(obj, "update_config"):
+                            obj.update_config(sensor_config)
+                hdb_override = app._hdb_config_override() if hasattr(app, "_hdb_config_override") else {}  # type: ignore[attr-defined]
+                hdb = getattr(app, "hdb", None)
+                hdb_config = getattr(hdb, "_config", None)
+                if isinstance(hdb_config, dict):
+                    hdb_config.update(hdb_override)
+                    for attr_name in ("_stimulus", "_cut"):
+                        obj = getattr(hdb, attr_name, None)
+                        if hasattr(obj, "update_config"):
+                            obj.update_config(hdb_config)
+                runtime_refresh_applied = True
+        except Exception as exc:
+            errors.append(str(exc))
+
+    effective_config = {
+        key: copy.deepcopy(cfg.get(key))
+        for key in EXPERIMENT_DEFAULT_APP_OVERRIDES.keys()
+    }
+    baseline_conforms = bool(
+        str(cfg.get("induction_projection_mode", "")).strip().lower() == "growth"
+        and not bool(cfg.get("enable_cognitive_stitching", False))
+        and str(cfg.get("cognitive_stitching_stage", "")).strip().lower() == "disabled"
+    )
+    return {
+        "source": source,
+        "app_config_override": override,
+        "app_config_override_keys": sorted(override.keys()),
+        "experiment_default_overrides": copy.deepcopy(EXPERIMENT_DEFAULT_APP_OVERRIDES),
+        "experiment_default_overrides_applied": applied_defaults,
+        "applied": bool(override or any(applied_defaults.values())),
+        "runtime_refresh_applied": bool(runtime_refresh_applied),
+        "effective_app_baseline": effective_config,
+        "baseline_conforms_to_growth_cs_off": baseline_conforms,
+        "changed_keys": sorted(set(changed_keys)),
+        "errors": errors,
+    }
+
+
 def load_dataset_ticks(
     *,
     dataset_ref: DatasetFileRef,
@@ -918,40 +1020,13 @@ def run_dataset(
         with lock_ctx:
             progress_cb({"run_id": run_id, "status": "running", "stage": "applying_overrides", "stage_label": "正在应用数据集运行覆盖"})
             try:
-                applied_defaults: dict[str, bool] = {}
-                for key, value in EXPERIMENT_DEFAULT_APP_OVERRIDES.items():
-                    applied = key not in dataset_app_config_override
-                    applied_defaults[key] = bool(applied)
-                    if applied:
-                        app._config[key] = copy.deepcopy(value)  # type: ignore[attr-defined]
-                if dataset_app_config_override:
-                    app._config.update(copy.deepcopy(dataset_app_config_override))  # type: ignore[attr-defined]
-                if hasattr(app, "_apply_runtime_overrides"):
-                    app._apply_runtime_overrides()  # type: ignore[attr-defined]
-                else:
-                    sensor_override = app._sensor_config_override() if hasattr(app, "_sensor_config_override") else {}  # type: ignore[attr-defined]
-                    app.sensor._config.update(sensor_override)  # type: ignore[attr-defined]
-                    app.sensor._normalizer.update_config(app.sensor._config)  # type: ignore[attr-defined]
-                    app.sensor._segmenter.update_config(app.sensor._config)  # type: ignore[attr-defined]
-                    app.sensor._scorer.update_config(app.sensor._config)  # type: ignore[attr-defined]
-                    app.sensor._echo_mgr.update_config(app.sensor._config)  # type: ignore[attr-defined]
-                    hdb_override = app._hdb_config_override() if hasattr(app, "_hdb_config_override") else {}  # type: ignore[attr-defined]
-                    app.hdb._config.update(hdb_override)  # type: ignore[attr-defined]
-                    app.hdb._stimulus.update_config(app.hdb._config)  # type: ignore[attr-defined]
-                    app.hdb._cut.update_config(app.hdb._config)  # type: ignore[attr-defined]
-                manifest["dataset_runtime_override"]["experiment_default_overrides_applied"] = applied_defaults
-                manifest["dataset_runtime_override"]["applied"] = bool(
-                    dataset_app_config_override or any(applied_defaults.values())
-                )
-                effective_config = dict(getattr(app, "_config", {}) or {})
-                manifest["dataset_runtime_override"]["effective_app_baseline"] = {
-                    key: copy.deepcopy(effective_config.get(key))
-                    for key in EXPERIMENT_DEFAULT_APP_OVERRIDES.keys()
-                }
-                manifest["dataset_runtime_override"]["baseline_conforms_to_growth_cs_off"] = bool(
-                    str(effective_config.get("induction_projection_mode", "")).strip().lower() == "growth"
-                    and not bool(effective_config.get("enable_cognitive_stitching", False))
-                    and str(effective_config.get("cognitive_stitching_stage", "")).strip().lower() == "disabled"
+                manifest["dataset_runtime_override"].update(
+                    apply_experiment_default_app_overrides(
+                        app,
+                        app_config_override=dataset_app_config_override,
+                        source="experiment_runner",
+                        refresh_runtime=True,
+                    )
                 )
             except Exception:
                 pass

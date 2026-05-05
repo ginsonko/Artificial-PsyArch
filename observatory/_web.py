@@ -30,6 +30,7 @@ import traceback
 
 from ._app import ObservatoryApp
 from . import experiment as exp
+from .experiment.runner import apply_experiment_default_app_overrides
 
 
 EXPERIMENT_TERMINAL_STATUSES = {"completed", "stopped_max_ticks", "cancelled", "failed"}
@@ -1023,7 +1024,15 @@ def _build_handler():
                     text = payload.get("text")
                     try:
                         with self.server.app_lock:
+                            alignment = apply_experiment_default_app_overrides(
+                                self.server.app,
+                                source="realtime_api_cycle",
+                            )
                             report = self.server.app.run_cycle(text=text)
+                            if isinstance(report, dict):
+                                observatory_report = report.setdefault("observatory", {})
+                                if isinstance(observatory_report, dict):
+                                    observatory_report["runtime_alignment"] = alignment
                     except Exception as exc:
                         self._send_json(
                             {
@@ -1041,7 +1050,16 @@ def _build_handler():
                 if parsed.path == "/api/tick":
                     count = max(1, int(payload.get("count", 1)))
                     with self.server.app_lock:
+                        alignment = apply_experiment_default_app_overrides(
+                            self.server.app,
+                            source="realtime_api_tick",
+                        )
                         reports = self.server.app.run_tick_cycles(count=count)
+                        for report in reports:
+                            if isinstance(report, dict):
+                                observatory_report = report.setdefault("observatory", {})
+                                if isinstance(observatory_report, dict):
+                                    observatory_report["runtime_alignment"] = alignment
                     self._send_json({"success": True, "data": reports})
                     return
                 if parsed.path == "/api/check":
