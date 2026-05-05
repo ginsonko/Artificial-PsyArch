@@ -7,6 +7,13 @@ from __future__ import annotations
 
 import time
 
+from ._context_metadata import (
+    context_path_depth,
+    extract_context_metadata,
+    extract_residual_metadata,
+    has_context_metadata,
+    has_residual_metadata,
+)
 from ._id_generator import next_id
 
 
@@ -43,6 +50,66 @@ class SnapshotEngine:
             sum(float(item.get("ev", 0.0)) for item in memory_activation_items),
             8,
         )
+        runtime_context_summary = {}
+        summary_getter = getattr(structure_store, "get_runtime_context_summary", None)
+        if callable(summary_getter):
+            try:
+                runtime_context_summary = summary_getter()
+            except Exception:
+                runtime_context_summary = {}
+        if not isinstance(runtime_context_summary, dict) or not runtime_context_summary:
+            structures = list(structure_store.iter_structures())
+            structure_dbs = list(structure_store.iter_structure_dbs())
+            contextual_structure_count = 0
+            multi_context_structure_count = 0
+            structure_context_path_depth_total = 0
+            signature_context_pairs: dict[str, set[str]] = {}
+            for structure in structures:
+                if has_context_metadata(structure):
+                    contextual_structure_count += 1
+                    depth = context_path_depth(structure)
+                    structure_context_path_depth_total += depth
+                    if depth > 1:
+                        multi_context_structure_count += 1
+                context_meta = extract_context_metadata(structure)
+                signature = str(structure.get("structure", {}).get("content_signature", "") or "").strip()
+                context_key = str(
+                    context_meta.get("context_owner_structure_id")
+                    or context_meta.get("context_ref_object_id")
+                    or ""
+                ).strip()
+                if signature and context_key:
+                    signature_context_pairs.setdefault(signature, set()).add(context_key)
+            same_content_multi_context_count = sum(
+                1 for contexts in signature_context_pairs.values()
+                if len(contexts) > 1
+            )
+            diff_entry_count = 0
+            contextual_diff_entry_count = 0
+            residual_diff_entry_count = 0
+            diff_entry_with_memory_ref_count = 0
+            for structure_db in structure_dbs:
+                owner_structure_id = str(structure_db.get("owner_structure_id", "") or "")
+                for entry in list(structure_db.get("diff_table", []) or []):
+                    if not isinstance(entry, dict):
+                        continue
+                    diff_entry_count += 1
+                    if entry.get("memory_refs"):
+                        diff_entry_with_memory_ref_count += 1
+                    if self._is_contextual_diff_entry(entry, owner_structure_id=owner_structure_id):
+                        contextual_diff_entry_count += 1
+                    if self._is_residual_local_diff_entry(entry):
+                        residual_diff_entry_count += 1
+            runtime_context_summary = {
+                "contextual_structure_count": contextual_structure_count,
+                "multi_context_structure_count": multi_context_structure_count,
+                "structure_context_path_depth_mean": round(float(structure_context_path_depth_total) / float(contextual_structure_count), 8) if contextual_structure_count else 0.0,
+                "same_content_multi_context_count": same_content_multi_context_count,
+                "diff_entry_count": diff_entry_count,
+                "contextual_diff_entry_count": contextual_diff_entry_count,
+                "residual_diff_entry_count": residual_diff_entry_count,
+                "diff_entry_with_memory_ref_count": diff_entry_with_memory_ref_count,
+            }
         snapshot = {
             "snapshot_id": next_id("hdbs"),
             "object_type": "runtime_snapshot",
@@ -60,6 +127,14 @@ class SnapshotEngine:
                 "memory_activation_total_energy": round(memory_activation_total_er + memory_activation_total_ev, 8),
                 "issue_count": len(issue_queue),
                 "active_repair_job_count": len(active_jobs),
+                "contextual_structure_count": int(runtime_context_summary.get("contextual_structure_count", 0) or 0),
+                "multi_context_structure_count": int(runtime_context_summary.get("multi_context_structure_count", 0) or 0),
+                "structure_context_path_depth_mean": round(float(runtime_context_summary.get("structure_context_path_depth_mean", 0.0) or 0.0), 8),
+                "same_content_multi_context_count": int(runtime_context_summary.get("same_content_multi_context_count", 0) or 0),
+                "diff_entry_count": int(runtime_context_summary.get("diff_entry_count", 0) or 0),
+                "contextual_diff_entry_count": int(runtime_context_summary.get("contextual_diff_entry_count", 0) or 0),
+                "residual_diff_entry_count": int(runtime_context_summary.get("residual_diff_entry_count", 0) or 0),
+                "diff_entry_with_memory_ref_count": int(runtime_context_summary.get("diff_entry_with_memory_ref_count", 0) or 0),
             },
         }
         if include_stats:
@@ -73,6 +148,10 @@ class SnapshotEngine:
                     "structure_id": item.get("id", ""),
                     "display_text": item.get("structure", {}).get("display_text", ""),
                     "signature": item.get("structure", {}).get("content_signature", ""),
+                    "context_ref_object_id": extract_context_metadata(item).get("context_ref_object_id", ""),
+                    "context_ref_object_type": extract_context_metadata(item).get("context_ref_object_type", ""),
+                    "context_owner_structure_id": extract_context_metadata(item).get("context_owner_structure_id", ""),
+                    "context_path_ids": list(extract_context_metadata(item).get("context_path_ids", [])),
                     "base_weight": item.get("stats", {}).get("base_weight", 0.0),
                     "recent_gain": item.get("stats", {}).get("recent_gain", 1.0),
                     "fatigue": item.get("stats", {}).get("fatigue", 0.0),
@@ -188,6 +267,38 @@ class SnapshotEngine:
         ]
         snapshot["issues"] = list(issue_queue[-top_k:])
         return snapshot
+
+    @staticmethod
+    def _is_contextual_diff_entry(entry: dict, *, owner_structure_id: str) -> bool:
+        if not isinstance(entry, dict):
+            return False
+        context = extract_context_metadata(entry)
+        path_depth = context_path_depth(entry)
+        ref_object_id = str(context.get("context_ref_object_id", "") or "").strip()
+        context_owner_structure_id = str(context.get("context_owner_structure_id", "") or "").strip()
+        if path_depth > 1:
+            return True
+        if ref_object_id and ref_object_id != owner_structure_id:
+            return True
+        if context_owner_structure_id and context_owner_structure_id != owner_structure_id:
+            return True
+        return False
+
+    @staticmethod
+    def _is_residual_local_diff_entry(entry: dict) -> bool:
+        if not isinstance(entry, dict):
+            return False
+        relation_type = str(entry.get("ext", {}).get("relation_type", "") or "").strip()
+        residual = extract_residual_metadata(entry)
+        residual_kind = str(residual.get("residual_origin_kind", "") or "").strip()
+        return bool(
+            relation_type == "incoming_extension"
+            or "residual" in relation_type
+            or "residual" in residual_kind
+            or relation_type == "structure_raw_residual"
+            or relation_type == "stimulus_raw_residual"
+            or relation_type == "residual_context_common"
+        )
 
     def _summarize_issue_types(self, issue_queue: list[dict]) -> dict[str, int]:
         summary: dict[str, int] = {}

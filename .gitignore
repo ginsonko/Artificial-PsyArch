@@ -8,6 +8,7 @@
 # ---- Python / 缓存 ----
 __pycache__/
 *.py[cod]
+*.tsbuildinfo
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -25,6 +26,19 @@ env/
 # ---- 观测台输出（运行后生成）----
 observatory/outputs/
 reports/
+
+# ---- 私有 LLM/API 配置与运行审计输出（不要入库）----
+observatory/outputs/llm_review_config.json
+observatory/outputs/auto_tuner/llm_config.json
+observatory/outputs/auto_tuner/llm_suggestions/
+observatory/outputs/auto_tuner/audit*.jsonl
+
+# ---- 前端依赖/构建缓存 ----
+node_modules/
+observatory/frontend/node_modules/
+observatory/frontend/dist/
+observatory/frontend/vite.config.js
+observatory/frontend/vite.config.d.ts
 
 # ---- Bench logs / 压测日志 ----
 bench_logs_pool/

@@ -1,0 +1,5 @@
+attention_memory_energy_ratio: 0.64
+memory_feedback_stimulus_packet_structure_projection_ratio: 0.29
+attention_top_n: 19
+induction_source_max_items: 4
+induction_source_ev_quota_ratio: 0.23

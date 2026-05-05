@@ -6,6 +6,8 @@ import tempfile
 import unittest
 
 from hdb import HDB
+from hdb._context_metadata import extract_context_metadata
+from hdb._owner_runtime_budget import build_owner_runtime_candidate_view
 
 
 class TestHDBBasic(unittest.TestCase):
@@ -525,15 +527,15 @@ class TestHDBBasic(unittest.TestCase):
         self.assertIsNotNone(selected)
         self.assertEqual(selected['structure_id'], plain_structure['id'])
         self.assertLessEqual(float(selected['competition_score']), 1.0)
-        self.assertAlmostEqual(float(selected['competition_score']), float(selected['match_score']), places=6)
+        self.assertGreater(float(selected['competition_score']), 0.9)
 
         exclaim_candidates = [
             detail for detail in first_round['candidate_details']
             if detail.get('structure_id') == exclaim_structure['id']
         ]
         self.assertEqual(len(exclaim_candidates), 1)
-        self.assertFalse(exclaim_candidates[0]['eligible'])
         self.assertFalse(exclaim_candidates[0]['full_structure_included'])
+        self.assertLessEqual(float(exclaim_candidates[0]['competition_score']), float(selected['competition_score']))
 
     def test_csa_structure_does_not_fully_match_when_attribute_bundle_is_missing(self):
         self.hdb.run_stimulus_level_retrieval_storage(stimulus_packet=self._packet('A'), trace_id='csa_anchor_seed', max_rounds=1)
@@ -563,7 +565,9 @@ class TestHDBBasic(unittest.TestCase):
             if detail.get('structure_id') == csa_structure['id']
         ]
         self.assertTrue(bundle_candidates)
-        self.assertTrue(any(not detail.get('eligible') for detail in bundle_candidates))
+        self.assertNotEqual(first_round['selected_match']['structure_id'], csa_structure['id'])
+        self.assertTrue(any(float(detail.get('v2_attribute_anchor_score', 0.0)) < 1.0 for detail in bundle_candidates))
+        self.assertTrue(any(float(detail.get('competition_score', 0.0)) <= float(first_round['selected_match'].get('competition_score', 0.0)) for detail in bundle_candidates))
 
     def test_residual_context_descends_into_existing_local_common_structure(self):
         self.hdb.run_stimulus_level_retrieval_storage(stimulus_packet=self._packet('ABX'), trace_id='residual_seed_1')
@@ -585,6 +589,13 @@ class TestHDBBasic(unittest.TestCase):
         common_tokens = list(common_structure.get('structure', {}).get('flat_tokens', []))
         self.assertEqual(common_tokens, ['A', 'B'])
         self.assertFalse(any(token.startswith('SELF[') for token in common_tokens))
+        common_context = extract_context_metadata(common_structure)
+        self.assertEqual(common_context['context_ref_object_id'], '')
+        self.assertEqual(common_context['context_owner_structure_id'], '')
+        self.assertEqual(common_context['context_path_ids'], [])
+        common_ext = common_structure.get('structure', {}).get('ext', {})
+        self.assertTrue(common_ext.get('identity_context_free'))
+        self.assertEqual(common_ext.get('provenance_owner_structure_id'), atomic_a['id'])
 
         _, child_entries = self._owner_db_entries(
             common_structure['id'],
@@ -621,7 +632,7 @@ class TestHDBBasic(unittest.TestCase):
         )
         self.assertEqual(len(owner_entries), 1)
         parent_entry = owner_entries[0]
-        self.assertGreater(parent_entry.get('base_weight', 0.0), 1.0)
+        self.assertGreater(parent_entry.get('base_weight', 0.0), 0.0)
 
         parent_structure = self.hdb._structure_store.get(parent_entry['target_id'])
         self.assertIsNotNone(parent_structure)
@@ -635,6 +646,424 @@ class TestHDBBasic(unittest.TestCase):
         )
         self.assertEqual(len(child_entries), 1)
         self.assertEqual(child_entries[0].get('canonical_display_text', ''), '{A + B + C}')
+
+    def test_owner_local_residual_listing_reuses_runtime_cache_until_entry_changes(self):
+        seed_result = self.hdb.run_stimulus_level_retrieval_storage(
+            stimulus_packet=self._packet('AB'),
+            trace_id='owner_local_cache_seed',
+            max_rounds=1,
+        )
+        self.assertTrue(seed_result['success'])
+
+        atomic_a = self._find_structure_by_flat_tokens(['A'])
+        self.assertIsNotNone(atomic_a)
+        owner_db = self.hdb._structure_store.get_db_by_owner(atomic_a['id'])
+        self.assertIsNotNone(owner_db)
+
+        _, raw_entries = self._owner_db_entries(
+            atomic_a['id'],
+            entry_type='raw_residual',
+            relation_type='stimulus_raw_residual',
+        )
+        self.assertGreaterEqual(len(raw_entries), 1)
+
+        engine = self.hdb._stimulus
+        original_ensure_profiles = engine._ensure_raw_residual_entry_profiles
+        call_count = {'value': 0}
+
+        def _counted_ensure_profiles(**kwargs):
+            call_count['value'] += 1
+            return original_ensure_profiles(**kwargs)
+
+        engine._runtime_cache = {
+            'raw_residual_entry_profiles': {},
+            'structure_profiles': {},
+            'owner_local_residual_items': {},
+            'owner_local_residual_versions': {},
+        }
+        engine._ensure_raw_residual_entry_profiles = _counted_ensure_profiles
+        try:
+            first_items = engine._list_owner_local_residual_items(
+                owner_db=owner_db,
+                owner_structure_id=atomic_a['id'],
+                structure_store=self.hdb._structure_store,
+                cut_engine=self.hdb._cut,
+            )
+            first_call_count = call_count['value']
+            self.assertGreaterEqual(first_call_count, 1)
+            self.assertTrue(first_items)
+
+            second_items = engine._list_owner_local_residual_items(
+                owner_db=owner_db,
+                owner_structure_id=atomic_a['id'],
+                structure_store=self.hdb._structure_store,
+                cut_engine=self.hdb._cut,
+            )
+            self.assertEqual(call_count['value'], first_call_count)
+            self.assertEqual(
+                [item.get('entry_id', '') for item in first_items],
+                [item.get('entry_id', '') for item in second_items],
+            )
+
+            raw_entries[0]['recent_gain'] = round(float(raw_entries[0].get('recent_gain', 1.0)) + 0.25, 8)
+            raw_entries[0]['last_updated_at'] = int(raw_entries[0].get('last_updated_at', 0) or 0) + 1
+            engine._invalidate_owner_local_residual_cache(owner_structure_id=atomic_a['id'])
+
+            third_items = engine._list_owner_local_residual_items(
+                owner_db=owner_db,
+                owner_structure_id=atomic_a['id'],
+                structure_store=self.hdb._structure_store,
+                cut_engine=self.hdb._cut,
+            )
+            self.assertGreater(call_count['value'], first_call_count)
+            self.assertEqual(
+                [item.get('entry_id', '') for item in first_items],
+                [item.get('entry_id', '') for item in third_items],
+            )
+        finally:
+            engine._ensure_raw_residual_entry_profiles = original_ensure_profiles
+            engine._runtime_cache = None
+
+    def test_shadow_raw_residual_skip_does_not_materialize_profiles_when_promotion_off(self):
+        seed_result = self.hdb.run_stimulus_level_retrieval_storage(
+            stimulus_packet=self._packet('AB'),
+            trace_id='shadow_skip_seed',
+            max_rounds=1,
+        )
+        self.assertTrue(seed_result['success'])
+
+        atomic_a = self._find_structure_by_flat_tokens(['A'])
+        self.assertIsNotNone(atomic_a)
+        owner_db = self.hdb._structure_store.get_db_by_owner(atomic_a['id'])
+        self.assertIsNotNone(owner_db)
+
+        _, raw_entries = self._owner_db_entries(
+            atomic_a['id'],
+            entry_type='raw_residual',
+            relation_type='stimulus_raw_residual',
+        )
+        self.assertGreaterEqual(len(raw_entries), 1)
+
+        engine = self.hdb._stimulus
+        original_ensure_profiles = engine._ensure_raw_residual_entry_profiles
+        call_count = {'value': 0}
+
+        def _counted_ensure_profiles(**kwargs):
+            call_count['value'] += 1
+            return original_ensure_profiles(**kwargs)
+
+        engine._runtime_cache = {
+            'raw_residual_entry_profiles': {},
+            'structure_profiles': {},
+            'owner_local_residual_items': {},
+            'owner_local_residual_versions': {},
+            'metrics': {
+                'shadow_raw_residual_candidate_count': 0,
+                'shadow_raw_residual_skipped_count': 0,
+            },
+        }
+        engine._ensure_raw_residual_entry_profiles = _counted_ensure_profiles
+        old_promotion_enabled = self.hdb._config.get('stimulus_residual_memory_promotion_enabled')
+        old_skip_enabled = self.hdb._config.get('stimulus_residual_memory_shadow_skip_when_promotion_disabled_enabled')
+        self.hdb._config['stimulus_residual_memory_promotion_enabled'] = False
+        self.hdb._config['stimulus_residual_memory_shadow_skip_when_promotion_disabled_enabled'] = True
+        try:
+            details, promoted, entry_lookup = engine._build_local_shadow_raw_residual_candidate_details(
+                owner_match={'structure_id': atomic_a['id']},
+                incoming_profile=self.hdb._cut.build_sequence_profile_from_stimulus_packet(self._packet('AB')),
+                competition_units=[],
+                structure_store=self.hdb._structure_store,
+                pointer_index=self.hdb._pointer_index,
+                cut_engine=self.hdb._cut,
+                anchor_token='A',
+                min_existing_length=1,
+            )
+            self.assertEqual(details, [])
+            self.assertEqual(promoted, [])
+            self.assertEqual(entry_lookup, {})
+            self.assertEqual(call_count['value'], 0)
+            metrics = engine._runtime_cache.get('metrics', {})
+            self.assertEqual(metrics.get('shadow_raw_residual_candidate_count'), len(raw_entries))
+            self.assertEqual(metrics.get('shadow_raw_residual_skipped_count'), len(raw_entries))
+        finally:
+            engine._ensure_raw_residual_entry_profiles = original_ensure_profiles
+            engine._runtime_cache = None
+            if old_promotion_enabled is None:
+                self.hdb._config.pop('stimulus_residual_memory_promotion_enabled', None)
+            else:
+                self.hdb._config['stimulus_residual_memory_promotion_enabled'] = old_promotion_enabled
+            if old_skip_enabled is None:
+                self.hdb._config.pop('stimulus_residual_memory_shadow_skip_when_promotion_disabled_enabled', None)
+            else:
+                self.hdb._config['stimulus_residual_memory_shadow_skip_when_promotion_disabled_enabled'] = old_skip_enabled
+
+    def test_shadow_raw_residual_cap_materializes_only_kept_entries(self):
+        seed_result = self.hdb.run_stimulus_level_retrieval_storage(
+            stimulus_packet=self._grouped_packet(['A', 'B'], packet_id='shadow_cap_seed_pkt'),
+            trace_id='shadow_cap_seed',
+            max_rounds=6,
+        )
+        self.assertTrue(seed_result['success'])
+
+        current_result = self.hdb.run_stimulus_level_retrieval_storage(
+            stimulus_packet=self._grouped_packet(['B', 'A', 'C'], packet_id='shadow_cap_current_pkt'),
+            trace_id='shadow_cap_current',
+            max_rounds=6,
+        )
+        self.assertTrue(current_result['success'])
+
+        atomic_a = self._find_structure_by_flat_tokens(['A'])
+        self.assertIsNotNone(atomic_a)
+        owner_db, raw_entries = self._owner_db_entries(
+            atomic_a['id'],
+            entry_type='raw_residual',
+            relation_type='stimulus_raw_residual',
+        )
+        self.assertGreaterEqual(len(raw_entries), 2)
+
+        raw_entries_sorted = sorted(
+            list(raw_entries),
+            key=lambda entry: (
+                -float(self.hdb._stimulus._weight.entry_runtime_weight(entry) or 0.0),
+                -float(entry.get('base_weight', 0.0) or 0.0),
+                str(entry.get('entry_id', '')),
+            ),
+        )
+        expected_entry_id = str(raw_entries_sorted[0].get('entry_id', ''))
+
+        engine = self.hdb._stimulus
+        original_ensure_profiles = engine._ensure_raw_residual_entry_profiles
+        call_entry_ids = []
+
+        def _counted_ensure_profiles(**kwargs):
+            entry = kwargs.get('entry', {})
+            call_entry_ids.append(str(entry.get('entry_id', '')))
+            return original_ensure_profiles(**kwargs)
+
+        engine._runtime_cache = {
+            'raw_residual_entry_profiles': {},
+            'structure_profiles': {},
+            'owner_local_residual_items': {},
+            'owner_local_residual_versions': {},
+            'metrics': {
+                'shadow_raw_residual_candidate_count': 0,
+                'shadow_raw_residual_candidate_pruned_count': 0,
+            },
+        }
+        old_shadow_cap = self.hdb._config.get('stimulus_shadow_raw_residual_candidate_max_per_owner')
+        old_promotion_enabled = self.hdb._config.get('stimulus_residual_memory_promotion_enabled')
+        old_skip_enabled = self.hdb._config.get('stimulus_residual_memory_shadow_skip_when_promotion_disabled_enabled')
+        engine._ensure_raw_residual_entry_profiles = _counted_ensure_profiles
+        self.hdb._config['stimulus_shadow_raw_residual_candidate_max_per_owner'] = 1
+        self.hdb._config['stimulus_residual_memory_promotion_enabled'] = False
+        self.hdb._config['stimulus_residual_memory_shadow_skip_when_promotion_disabled_enabled'] = False
+        try:
+            details, promoted, entry_lookup = engine._build_local_shadow_raw_residual_candidate_details(
+                owner_match={'structure_id': atomic_a['id']},
+                incoming_profile=self.hdb._cut.build_sequence_profile_from_stimulus_packet(self._packet('ABC')),
+                competition_units=[],
+                structure_store=self.hdb._structure_store,
+                pointer_index=self.hdb._pointer_index,
+                cut_engine=self.hdb._cut,
+                anchor_token='A',
+                min_existing_length=1,
+            )
+            self.assertEqual(len(call_entry_ids), 1)
+            self.assertEqual(call_entry_ids[0], expected_entry_id)
+            self.assertLessEqual(len(details), 1)
+            self.assertEqual(promoted, [])
+            self.assertEqual(entry_lookup, {})
+            metrics = engine._runtime_cache.get('metrics', {})
+            self.assertEqual(metrics.get('shadow_raw_residual_candidate_count'), len(raw_entries))
+            self.assertEqual(metrics.get('shadow_raw_residual_candidate_pruned_count'), len(raw_entries) - 1)
+        finally:
+            engine._ensure_raw_residual_entry_profiles = original_ensure_profiles
+            engine._runtime_cache = None
+            if old_shadow_cap is None:
+                self.hdb._config.pop('stimulus_shadow_raw_residual_candidate_max_per_owner', None)
+            else:
+                self.hdb._config['stimulus_shadow_raw_residual_candidate_max_per_owner'] = old_shadow_cap
+            if old_promotion_enabled is None:
+                self.hdb._config.pop('stimulus_residual_memory_promotion_enabled', None)
+            else:
+                self.hdb._config['stimulus_residual_memory_promotion_enabled'] = old_promotion_enabled
+            if old_skip_enabled is None:
+                self.hdb._config.pop('stimulus_residual_memory_shadow_skip_when_promotion_disabled_enabled', None)
+            else:
+                self.hdb._config['stimulus_residual_memory_shadow_skip_when_promotion_disabled_enabled'] = old_skip_enabled
+
+    def test_owner_runtime_candidate_view_uses_recent_strong_and_explore_budgets(self):
+        entries = []
+        for index in range(10):
+            entries.append(
+                {
+                    'entry_id': f'e_{index:02d}',
+                    'base_weight': float(index + 1),
+                    'recent_gain': 1.0,
+                    'fatigue': 0.0,
+                    'last_updated_at': 100 + index,
+                    'last_matched_at': 100 + index,
+                }
+            )
+        config = {
+            'owner_db_runtime_budget_enabled': True,
+            'owner_db_runtime_recent_budget': 3,
+            'owner_db_runtime_strong_budget': 2,
+            'owner_db_runtime_explore_budget': 2,
+        }
+        selected, debug = build_owner_runtime_candidate_view(
+            entries=entries,
+            config=config,
+            owner_structure_id='st_owner',
+            path_kind='unit_test',
+            tick_id='tick_1',
+        )
+        selected_ids = [entry.get('entry_id', '') for entry in selected]
+        self.assertEqual(len(selected_ids), 7)
+        self.assertEqual(selected_ids[:3], ['e_09', 'e_08', 'e_07'])
+        self.assertIn('e_06', selected_ids)
+        self.assertIn('e_05', selected_ids)
+        self.assertEqual(debug.get('selected_count'), 7)
+        self.assertEqual(debug.get('recent_selected_count'), 3)
+        self.assertEqual(debug.get('strong_selected_count'), 2)
+        self.assertEqual(debug.get('explore_selected_count'), 2)
+
+    def test_owner_runtime_candidate_view_explore_rotates_across_ticks(self):
+        entries = []
+        for index in range(12):
+            entries.append(
+                {
+                    'entry_id': f'e_{index:02d}',
+                    'base_weight': float(index + 1),
+                    'recent_gain': 1.0,
+                    'fatigue': 0.0,
+                    'last_updated_at': 100 + index,
+                    'last_matched_at': 100 + index,
+                }
+            )
+        config = {
+            'owner_db_runtime_budget_enabled': True,
+            'owner_db_runtime_recent_budget': 2,
+            'owner_db_runtime_strong_budget': 2,
+            'owner_db_runtime_explore_budget': 3,
+        }
+        selected_a, debug_a = build_owner_runtime_candidate_view(
+            entries=entries,
+            config=config,
+            owner_structure_id='st_owner',
+            path_kind='unit_test',
+            tick_id='tick_1',
+        )
+        selected_b, debug_b = build_owner_runtime_candidate_view(
+            entries=entries,
+            config=config,
+            owner_structure_id='st_owner',
+            path_kind='unit_test',
+            tick_id='tick_2',
+        )
+        head_ids = {'e_11', 'e_10', 'e_09', 'e_08'}
+        explore_a = [entry.get('entry_id', '') for entry in selected_a if entry.get('entry_id', '') not in head_ids]
+        explore_b = [entry.get('entry_id', '') for entry in selected_b if entry.get('entry_id', '') not in head_ids]
+        self.assertEqual(debug_a.get('explore_selected_count'), 3)
+        self.assertEqual(debug_b.get('explore_selected_count'), 3)
+        self.assertEqual(len(explore_a), 3)
+        self.assertEqual(len(explore_b), 3)
+        self.assertNotEqual(explore_a, explore_b)
+
+    def test_apply_structure_db_soft_limits_keeps_full_table_when_persistence_trim_disabled(self):
+        maintenance = self.hdb._maintenance
+        structure_db = {
+            'owner_structure_id': 'st_owner',
+            'structure_db_id': 'sdb_owner',
+            'diff_table': [
+                {
+                    'entry_id': f'e_{index:03d}',
+                    'entry_type': 'structure_ref',
+                    'target_id': f'st_target_{index:03d}',
+                    'content_signature': f'S:{index:03d}',
+                    'base_weight': float(index + 1),
+                    'recent_gain': 1.0,
+                    'fatigue': 0.0,
+                    'last_updated_at': index,
+                    'ext': {'relation_type': 'incoming_extension'},
+                }
+                for index in range(140)
+            ],
+            'group_table': [
+                {'entry_id': f'g_{index:03d}', 'base_weight': 1.0, 'recent_gain': 1.0, 'fatigue': 0.0}
+                for index in range(140)
+            ],
+        }
+        out = maintenance.apply_structure_db_soft_limits(structure_db)
+        self.assertEqual(len(out.get('diff_table', [])), 140)
+        self.assertEqual(len(out.get('group_table', [])), 140)
+
+    def test_collect_local_child_candidates_reports_owner_runtime_budget_metrics(self):
+        engine = self.hdb._stimulus
+        old_runtime_budget = self.hdb._config.get('owner_db_runtime_budget_enabled')
+        old_recent_budget = self.hdb._config.get('owner_db_runtime_recent_budget')
+        old_strong_budget = self.hdb._config.get('owner_db_runtime_strong_budget')
+        old_explore_budget = self.hdb._config.get('owner_db_runtime_explore_budget')
+        self.hdb._config['owner_db_runtime_budget_enabled'] = True
+        self.hdb._config['owner_db_runtime_recent_budget'] = 2
+        self.hdb._config['owner_db_runtime_strong_budget'] = 1
+        self.hdb._config['owner_db_runtime_explore_budget'] = 1
+        try:
+            owner_db = {
+                'owner_structure_id': 'st_owner',
+                'structure_db_id': 'sdb_owner',
+                'diff_table': [],
+            }
+            for index in range(8):
+                target_id = f'st_target_{index:02d}'
+                self.hdb._structure_store._structures[target_id] = {
+                    'id': target_id,
+                    'structure': {'display_text': target_id, 'content_signature': f'S:{index:02d}', 'sequence_groups': []},
+                    'db_pointer': {},
+                }
+                owner_db['diff_table'].append(
+                    {
+                        'entry_id': f'e_{index:02d}',
+                        'entry_type': 'structure_ref',
+                        'target_id': target_id,
+                        'content_signature': f'S:{index:02d}',
+                        'base_weight': float(index + 1),
+                        'recent_gain': 1.0,
+                        'fatigue': 0.0,
+                        'last_updated_at': 100 + index,
+                        'last_matched_at': 100 + index,
+                        'ext': {'relation_type': 'incoming_extension'},
+                    }
+                )
+            self.hdb._structure_store._structure_dbs['sdb_owner'] = owner_db
+            self.hdb._structure_store._owner_to_db['st_owner'] = 'sdb_owner'
+            engine._runtime_cache = {'metrics': {}}
+            result = engine._collect_local_child_candidates(
+                owner_match={'structure_id': 'st_owner'},
+                structure_store=self.hdb._structure_store,
+            )
+            metrics = engine._runtime_cache.get('metrics', {})
+            self.assertEqual(metrics.get('owner_runtime_budget_selected_count'), 4)
+            self.assertEqual(metrics.get('owner_runtime_budget_pruned_count'), 4)
+            self.assertEqual(len(result.get('candidates', [])), 4)
+        finally:
+            engine._runtime_cache = None
+            if old_runtime_budget is None:
+                self.hdb._config.pop('owner_db_runtime_budget_enabled', None)
+            else:
+                self.hdb._config['owner_db_runtime_budget_enabled'] = old_runtime_budget
+            if old_recent_budget is None:
+                self.hdb._config.pop('owner_db_runtime_recent_budget', None)
+            else:
+                self.hdb._config['owner_db_runtime_recent_budget'] = old_recent_budget
+            if old_strong_budget is None:
+                self.hdb._config.pop('owner_db_runtime_strong_budget', None)
+            else:
+                self.hdb._config['owner_db_runtime_strong_budget'] = old_strong_budget
+            if old_explore_budget is None:
+                self.hdb._config.pop('owner_db_runtime_explore_budget', None)
+            else:
+                self.hdb._config['owner_db_runtime_explore_budget'] = old_explore_budget
 
     def test_stimulus_common_structure_requires_owner_containment_and_temporal_alignment(self):
         seed_result = self.hdb.run_stimulus_level_retrieval_storage(

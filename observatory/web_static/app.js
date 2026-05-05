@@ -87,7 +87,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     "episodicDetail",
     "settingsTabs",
     "settingsPanel",
-    "placeholderCards",
     "sensorMeta",
     "timeSensorMeta",
     "timeSensorBuckets",
@@ -323,7 +322,7 @@ function a(value) {
 }
 
 function esc(value) {
-  return String(value ?? "")
+  return readableApText(value)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -359,13 +358,19 @@ function pp(value) {
   return JSON.stringify(value ?? null, null, 2);
 }
 
+function readableApText(value) {
+  const text = String(value ?? "");
+  if (!text.includes(" + ")) return text;
+  return text.replace(/\{([^{}]*)\}/g, (_, inner) => `{${String(inner).replace(/\s+\+\s+/g, " ")}}`);
+}
+
 // Plain object formatting helpers (no JSON in UI) / 纯文本格式化工具（UI 中不展示 JSON）
 // 目标：让观测台更适合“验收/审计”而不是“直接丢一坨 JSON”。
 function fmtScalarPlain(value, depth = 0) {
   if (value === null || value === undefined) return "-";
   if (typeof value === "number") return String(Number.isFinite(value) ? n(value) : value);
   if (typeof value === "boolean") return y(value);
-  if (typeof value === "string") return value;
+  if (typeof value === "string") return readableApText(value);
   if (Array.isArray(value)) {
     const parts = value.map((v) => fmtScalarPlain(v, depth + 1)).filter(Boolean);
     return parts.length ? parts.slice(0, 12).join(" / ") : "-";
@@ -558,6 +563,63 @@ function renderThresholdModulationHtml(thresholdMod, ntLabels) {
   ].join("");
 }
 
+function renderActionLearningSummaryHtml(summary) {
+  const s = summary && typeof summary === "object" ? summary : {};
+  const examples = a(s.examples);
+  const cards = [
+    card("人形主路径", s.humanlike_runtime_sync_enabled === false ? "关闭" : "开启", `全局信号节点 ${s.runtime_signal_node_active_count ?? 0} | 行动节点 ${s.runtime_action_node_active_count ?? 0}`),
+    card("局部塑形开关", s.local_drive_modulation_enabled === false ? "关闭" : "开启", "对象级 reward/punish 是否参与本轮 drive 塑形"),
+    card("目标行动节点", s.targeted_node_count ?? 0, "带 target_ref / target_item 的行动节点"),
+    card("局部命中节点", s.local_lookup_hit_count ?? 0, `text_fallback ${s.local_lookup_text_fallback_hit_count ?? 0} | miss ${s.local_lookup_miss_count ?? 0} / skipped ${s.local_lookup_skipped_count ?? 0}`),
+    card("目标缺失 / 关闭", s.local_target_missing_count ?? 0, `disabled ${s.local_modulation_disabled_count ?? 0}`),
+    card("局部调制节点", s.local_modulated_node_count ?? 0, `平均 scale ${n(s.local_drive_scale_mean ?? 1.0)}`),
+    card("局部奖励增益", n(s.local_reward_drive_bonus_total ?? 0), "对象级 reward 带来的 drive 额外放大"),
+    card("局部惩罚代价", n(s.local_punish_drive_penalty_total ?? 0), "对象级 punish 带来的 drive 压低"),
+    card("行动节点执行显影", s.runtime_action_node_executed_count ?? 0, `target_ref ${s.runtime_action_target_ref_count ?? 0} | target_item ${s.runtime_action_target_item_count ?? 0}`),
+  ].join("");
+  const exampleRows = rows(examples.map((item) => ({
+    title: `${item.action_kind || "-"} · ${item.action_id || "-"}`,
+    desc:
+      `目标 ${item.target_display || item.target_ref_object_id || item.target_item_id || "-"}\n` +
+      `reward ${n(item.reward)} | punish ${n(item.punish)} | scale ${n(item.scale_clamped)}\n` +
+      `奖励增益 ${n(item.reward_bonus_gain)} | 惩罚代价 ${n(item.punish_penalty_gain)}`,
+  })), "本轮没有局部塑形命中的行动节点。");
+  return `<div class="detail-grid">${cards}</div><div class="sub-section"><div class="sub-title">局部塑形样例</div>${exampleRows}</div>`;
+}
+
+function localModReasonLabel(mod) {
+  const reason = mod && typeof mod === "object" && mod.detail && typeof mod.detail === "object"
+    ? String(mod.detail.reason || "")
+    : "";
+  const labels = {
+    local_feedback_not_found: "未命中反馈",
+    config_disabled: "全局关闭",
+    node_disabled: "节点关闭",
+    target_required_but_missing: "缺少目标",
+    lookup_target_missing: "无目标可查",
+    non_positive_gain: "gain<=0",
+  };
+  return labels[reason] || reason || "跳过";
+}
+
+function formatLocalDriveModulationText(mod) {
+  const m = mod && typeof mod === "object" ? mod : {};
+  const reason = m.detail && typeof m.detail === "object" ? String(m.detail.reason || "") : "";
+  let status = String(m.lookup_status || "");
+  if (!status) {
+    if (m.lookup_hit) status = "hit";
+    else if (reason === "local_feedback_not_found") status = "miss";
+    else status = "skipped";
+  }
+  if (status === "hit") {
+    return `命中 reward ${n(m.reward)} / punish ${n(m.punish)} / scale ${n(m.scale_clamped ?? 1)}`;
+  }
+  if (status === "miss") {
+    return "未命中反馈";
+  }
+  return `跳过 ${localModReasonLabel(m)}`;
+}
+
 function renderEmotionNtStateHtml(emotion) {
   // Emotion NT channels renderer / 情绪递质通道展示（中文优先）
   const e = emotion && typeof emotion === "object" ? emotion : {};
@@ -565,6 +627,7 @@ function renderEmotionNtStateHtml(emotion) {
   const snap = e.nt_state_snapshot || {};
   const channels = (snap.channels && typeof snap.channels === "object" ? snap.channels : {}) || {};
   const after = (e.nt_state_after && typeof e.nt_state_after === "object" ? e.nt_state_after : {}) || {};
+  const channelKeys = emotionChannelKeys(e);
 
   const soft = snap.soft_cap && typeof snap.soft_cap === "object" ? snap.soft_cap : {};
   const softEnabled = soft.enabled !== false;
@@ -572,7 +635,7 @@ function renderEmotionNtStateHtml(emotion) {
     ? `<div class="soft-note">软上限（极限算法）已启用：eps=${esc(String(soft.eps ?? "-"))}，k_default=${esc(String(soft.k_default ?? "-"))}。公式（正向增量）：${esc(String(soft.formula_zh || "after=max-gap*exp(-delta/k)"))}</div>`
     : `<div class="soft-note">软上限（极限算法）未启用：通道会用硬钳制 clamp 到 max。</div>`;
 
-  const rowsData = Object.keys(channels)
+  const rowsData = channelKeys
     .map((ch) => {
       const spec = channels[ch] || {};
       const v = after[ch] ?? spec.value ?? 0.0;
@@ -713,9 +776,10 @@ function listOr(values, fallback = "无", separator = " / ") {
 // CFS kind label / 认知感受 kind 中文名（含简写）
 // 说明：用户界面尽量中文优先；保留英文 kind 便于与日志/规则字段对齐。
 function cfsKindLabel(kind) {
-  const k = String(kind || "");
+  const k = String(kind || "").trim();
   const map = {
     dissonance: "违和感（dissonance）",
+    correctness: "正确感（correctness）",
     correct_event: "正确事件/正确感（correct_event）",
     surprise: "惊（surprise）",
     expectation: "期待（expectation）",
@@ -725,6 +789,10 @@ function cfsKindLabel(kind) {
     pressure_verified: "压力验证（pressure_verified）",
     pressure_unverified: "压力不验（pressure_unverified）",
     complexity: "繁/简（complexity）",
+    simplicity: "简感/轻松感（simplicity）",
+    cfs_simplicity: "简感/轻松感（simplicity）",
+    relief: "释然感/缓解感（relief）",
+    reassurance: "安心感/安抚感（reassurance）",
     repetition: "重复感/疲劳（repetition）",
     grasp: "把握感/置信度（grasp）",
   };
@@ -764,15 +832,181 @@ function projectionTargetId(item) {
   return item?.memory_id || item?.structure_id || item?.target_structure_id || "-";
 }
 
+function projectionKindLabel(kind, memoryPathMode = "", projectedRefType = "") {
+  const key = String(kind || "").trim();
+  const runtimeOnly = String(memoryPathMode || "").trim() === "runtime_em_only";
+  if (key === "memory_runtime_projection") {
+    const projectionType = String(projectedRefType || "").trim().toLowerCase();
+    if (projectionType === "em") return "残差运行态对象（EM 兼容壳）";
+    if (projectionType === "st") return "残差运行态对象（ST 语义）";
+    return "残差运行态对象";
+  }
+  const map = {
+    structure: "结构对象（ST）",
+    memory: runtimeOnly ? "残差记忆对象" : "记忆对象（EM）",
+  };
+  return map[key] || (key ? key : "结构对象（ST）");
+}
+
 function fmtStateTitle(item) {
   const t = item.ref_object_type || item.object_type || "obj";
-  return `[${refTypeLabel(t)}] ${item.display || item.display_text || item.ref_object_id || "-"}`;
+  return `[${refTypeLabel(t)}] ${readableApText(item.display || item.display_text || item.ref_object_id || "-")}`;
+}
+
+function residualKindLabel(kind) {
+  const k = String(kind || "").trim();
+  const map = {
+    stimulus_raw_residual: "刺激级原始残差",
+    structure_raw_residual: "结构级原始残差",
+    residual_context: "残差上下文链",
+    residual_context_common: "残差共有结构",
+  };
+  return map[k] || (k ? k : "非残差链直出");
+}
+
+function runtimeMetaView(item) {
+  const snap = item?.ref_snapshot && typeof item.ref_snapshot === "object" ? item.ref_snapshot : {};
+  return { ...snap, ...item, ref_snapshot: snap };
+}
+
+function fmtContextObjectRef(refType, refId) {
+  const id = String(refId || "").trim();
+  if (!id) return "-";
+  const typeLabel = refTypeLabel(refType);
+  return typeLabel && typeLabel !== "-" ? `${typeLabel}:${id}` : id;
+}
+
+function contextPathDepthOf(item) {
+  const depth = a(item?.context_path_ids).map((x) => String(x || "").trim()).filter(Boolean).length;
+  if (depth > 0) return depth;
+  return item?.context_ref_object_id || item?.context_owner_structure_id ? 1 : 0;
+}
+
+function fmtContextPath(pathIds, maxLen = 4) {
+  const ids = a(pathIds).map((x) => String(x || "").trim()).filter(Boolean);
+  if (!ids.length) return "无显式来源路径";
+  const head = ids.slice(0, maxLen).join(" → ");
+  return ids.length > maxLen ? `${head} → …（共 ${ids.length} 层）` : head;
+}
+
+function hasContextMeta(item) {
+  const view = runtimeMetaView(item);
+  return Boolean(
+    view?.context_ref_object_id ||
+    view?.context_owner_id ||
+    view?.context_owner_structure_id ||
+    a(view?.context_path_ids).length ||
+    view?.context_text,
+  );
+}
+
+function hasResidualMeta(item) {
+  const view = runtimeMetaView(item);
+  return Boolean(view?.residual_origin_kind || view?.residual_origin_entry_id || view?.residual_kind || view?.source_em_id);
+}
+
+function isResidualMemoryRuntimeItem(item) {
+  const view = runtimeMetaView(item);
+  const refType = String(view?.ref_object_type || view?.object_type || "").trim().toLowerCase();
+  const sourceEmId = String(view?.source_em_id || view?.memory_id || "").trim();
+  const residualKind = String(view?.residual_kind || "").trim().toLowerCase();
+  if (refType === "em" && sourceEmId) return true;
+  if (String(view?.residual_memory_as_structure || "").toLowerCase() === "true" && sourceEmId) return true;
+  return Boolean(sourceEmId && residualKind === "memory");
+}
+
+function residualRuntimeObjectTypeLabel(item) {
+  const view = runtimeMetaView(item);
+  const projectionType = String(
+    view?.projection_ref_object_type ||
+    view?.projected_ref_object_type ||
+    view?.memory_projection_object_type_actual ||
+    view?.ref_object_type ||
+    view?.object_type ||
+    ""
+  ).trim().toLowerCase();
+  if (projectionType === "em") return "残差运行态对象（EM 兼容壳）";
+  if (projectionType === "st") return "残差运行态对象（ST 语义）";
+  return "残差运行态对象";
+}
+
+function fmtContextSummary(item) {
+  if (!item) return "无对象";
+  const view = runtimeMetaView(item);
+  const ownerId = String(view.context_owner_id || view.context_owner_structure_id || "").trim();
+  const refId = String(view.context_ref_object_id || "").trim();
+  const refType = String(view.context_ref_object_type || "").trim();
+  const contextText = String(view.context_text || "").trim();
+  const pathIds = a(view.context_path_ids).map((x) => String(x || "").trim()).filter(Boolean);
+  const depth = contextPathDepthOf(view);
+  if (!ownerId && !refId && !pathIds.length && !contextText) {
+    return "当前没有显式来源字段，通常表示它是完整身份对象或本轮直接进入的叶子对象。";
+  }
+  const parts = [];
+  if (contextText) {
+    parts.push(`来源文本 ${readableApText(contextText)}`);
+  }
+  if (ownerId) {
+    parts.push(`上级结构 ${ownerId}`);
+  }
+  if (refId && refId !== ownerId) {
+    parts.push(`直接参考 ${fmtContextObjectRef(refType, refId)}`);
+  }
+  parts.push(`路径深度 ${depth}`);
+  parts.push(`路径 ${fmtContextPath(pathIds)}`);
+  return parts.join(" | ");
+}
+
+function fmtResidualSummary(item) {
+  if (!item) return "无对象";
+  const view = runtimeMetaView(item);
+  const kind = String(view.residual_origin_kind || "").trim();
+  const residualKind = String(view.residual_kind || "").trim();
+  const sourceEmId = String(view.source_em_id || "").trim();
+  const entryId = String(view.residual_origin_entry_id || "").trim();
+  if (!kind && !entryId && !residualKind && !sourceEmId) {
+    return "当前不在显式残差链上，更接近直接命中/直接投影对象。";
+  }
+  const parts = [];
+  if (residualKind === "memory") parts.push("类型 记忆残差");
+  else if (residualKind === "structure") parts.push("类型 结构残差");
+  if (kind) parts.push(`来源 ${residualKindLabel(kind)}`);
+  if (sourceEmId) parts.push(`记忆源 ${sourceEmId}`);
+  if (entryId) parts.push(`残差条目 ${entryId}`);
+  return parts.join(" | ");
+}
+
+function buildContextAuditRows(items, limit = 6) {
+  return a(items)
+    .filter((item) => hasContextMeta(item) || hasResidualMeta(item))
+    .slice(0, limit)
+    .map((item) => ({
+      title: fmtStateTitle(item),
+      desc:
+        `上下文 ${fmtContextSummary(item)}\n` +
+        `残差 ${fmtResidualSummary(item)}\n` +
+        `ER ${n(item.er)} | EV ${n(item.ev)} | CP ${n(item.cp_abs)} | 总 ${n(te(item))}`,
+    }));
+}
+
+function buildStructureContextRows(items, limit = 6) {
+  return a(items)
+    .filter((item) => hasContextMeta(item) || hasResidualMeta(item))
+    .slice(0, limit)
+    .map((item) => ({
+      title: `${readableApText(item.display_text || item.structure_id || "-")} · ${item.structure_id || "-"}`,
+      desc:
+        `来源/激活路径 ${fmtContextSummary(item)}\n` +
+        `残差 ${fmtResidualSummary(item)}\n` +
+        `签名 ${item.signature || "-"}\n` +
+        `权重 W ${n(item.base_weight)} | 近因增益 G ${n(item.recent_gain)} | 疲劳 ${n(item.fatigue)}`,
+    }));
 }
 
 function fmtGroupText(group) {
   if (!group) return "";
   if (typeof group?.display_text === "string" && group.display_text.trim()) {
-    return group.display_text.trim();
+    return readableApText(group.display_text.trim());
   }
 
   const orderedUnits = a(group?.units)
@@ -784,7 +1018,7 @@ function fmtGroupText(group) {
     );
   if (!orderedUnits.length) {
     const rawTokens = a(group?.tokens).map((token) => String(token || "").trim()).filter(Boolean);
-    return rawTokens.length ? `{${rawTokens.join(" + ")}}` : "";
+    return rawTokens.length ? `{${rawTokens.join(" ")}}` : "";
   }
 
   const unitsById = new Map(
@@ -830,7 +1064,7 @@ function fmtGroupText(group) {
         .map((member) => member?.token || member?.display_text || "")
         .filter(Boolean);
       if (memberTokens.length) {
-        rawSegments.push({ text: `(${memberTokens.join(" + ")})`, grouped: false });
+        rawSegments.push({ text: `(${memberTokens.join(" ")})`, grouped: false });
         emittedBundleIds.add(bundleId);
         a(bundle?.member_unit_ids).forEach((memberId) => {
           const text = String(memberId || "");
@@ -873,7 +1107,7 @@ function fmtGroupText(group) {
     deduped.push(text);
   });
 
-  return deduped.length ? `{${deduped.join(" + ")}}` : "";
+  return deduped.length ? `{${deduped.join(" ")}}` : "";
 }
 
 function fmtSequenceGroups(groups) {
@@ -896,7 +1130,7 @@ function groupedTextFromItem(item) {
 
 function pickGroupedText(item, fallback = "-") {
   if (!item) return fallback;
-  return (
+  return readableApText(
     item.grouped_display_text ||
     item.canonical_grouped_display_text ||
     item.raw_grouped_display_text ||
@@ -970,13 +1204,19 @@ function fmtStimulusGroup(group) {
 
 function fmtProjectionCard(item) {
   const targetId = projectionTargetId(item);
+  const view = runtimeMetaView(item);
+  const extraLines = [];
+  const memoryPathMode = String(item?.path_mode || "").trim();
+  if (hasContextMeta(view)) extraLines.push(`上下文 ${fmtContextSummary(view)}`);
+  if (hasResidualMeta(view)) extraLines.push(`残差 ${fmtResidualSummary(view)}`);
   return {
-    title: `${item.display_text || targetId || "-"} · ${item.projection_kind || "structure"}`,
+    title: `${item.display_text || targetId || "-"} · ${projectionKindLabel(item?.projection_kind, memoryPathMode, item?.projected_ref_object_type || item?.projection_ref_object_type || "")}`,
     desc:
       `目标 ${targetId}` +
       `${item.backing_structure_id ? ` | backing ${item.backing_structure_id}` : ""}\n` +
       `ER ${n(item.er)} | EV ${n(item.ev)}\n` +
-      `原因 ${item.reason || "-"}${item.result ? ` | 结果 ${item.result}` : ""}`,
+      `原因 ${item.reason || "-"}${item.result ? ` | 结果 ${item.result}` : ""}` +
+      `${extraLines.length ? `\n${extraLines.join("\n")}` : ""}`,
   };
 }
 
@@ -1003,7 +1243,94 @@ function sortMemoryActivations(items, sortBy = "energy_desc") {
   return rows;
 }
 
+function emotionChannelKeys(emotion) {
+  const e = emotion && typeof emotion === "object" ? emotion : {};
+  const keys = new Set();
+  const labels = e.nt_channel_labels && typeof e.nt_channel_labels === "object" ? e.nt_channel_labels : {};
+  const meta = e.nt_channel_meta && typeof e.nt_channel_meta === "object" ? e.nt_channel_meta : {};
+  const after = e.nt_state_after && typeof e.nt_state_after === "object" ? e.nt_state_after : {};
+  const channels = e.nt_state_snapshot?.channels && typeof e.nt_state_snapshot.channels === "object"
+    ? e.nt_state_snapshot.channels
+    : {};
+  [labels, meta, after, channels].forEach((bucket) => {
+    Object.keys(bucket || {}).forEach((key) => {
+      const text = String(key || "").trim();
+      if (text) keys.add(text);
+    });
+  });
+  return Array.from(keys).sort((left, right) => String(left).localeCompare(String(right), "zh-Hans-CN"));
+}
+
+function inductionModeLabel(mode) {
+  const key = String(mode || "").trim();
+  if (key === "er_induction") return "ER 诱发";
+  if (key === "ev_propagation") return "EV 传播";
+  return key || "-";
+}
+
+function memoryPathModeFromActivation(memoryActivation) {
+  const activation = memoryActivation && typeof memoryActivation === "object" ? memoryActivation : {};
+  return activation.path_mode || (activation.dedicated_memory_pool_enabled === false ? "runtime_em_only" : "dedicated_map");
+}
+
+function buildMemoryUiModel(report, hdbSnapshot) {
+  const rpt = report && typeof report === "object" ? report : {};
+  const hdb = hdbSnapshot && typeof hdbSnapshot === "object" ? hdbSnapshot : {};
+  const hdbSummary = hdb.summary && typeof hdb.summary === "object" ? hdb.summary : hdb;
+  const memoryActivation = rpt.memory_activation && typeof rpt.memory_activation === "object" ? rpt.memory_activation : {};
+  const snapshot = memoryActivation.snapshot && typeof memoryActivation.snapshot === "object" ? memoryActivation.snapshot : {};
+  const snapshotSummary = snapshot.summary && typeof snapshot.summary === "object" ? snapshot.summary : {};
+  const pathMode = memoryPathModeFromActivation(memoryActivation);
+  const runtimeOnly = pathMode === "runtime_em_only";
+  const count = runtimeOnly
+    ? +snapshotSummary.count || 0
+    : (+hdbSummary.memory_activation_count || +snapshotSummary.count || 0);
+  const totalEr = runtimeOnly
+    ? +snapshotSummary.total_er || 0
+    : (+hdbSummary.memory_activation_total_er || +snapshotSummary.total_er || 0);
+  const totalEv = runtimeOnly
+    ? +snapshotSummary.total_ev || 0
+    : (+hdbSummary.memory_activation_total_ev || +snapshotSummary.total_ev || 0);
+  const totalEnergy = runtimeOnly
+    ? +snapshotSummary.total_energy || (totalEr + totalEv)
+    : (+hdbSummary.memory_activation_total_energy || +snapshotSummary.total_energy || (totalEr + totalEv));
+  return {
+    pathMode,
+    runtimeOnly,
+    pathLabel: runtimeOnly ? "状态池残差对象主链" : "MAP 兼容主链",
+    summaryLabel: runtimeOnly ? "运行态残差对象" : "MAP 兼容池（旧记忆赋能）",
+    shortLabel: runtimeOnly ? "残差对象" : "MAP 兼容池",
+    listTitle: runtimeOnly ? "残差对象视图" : "MAP 兼容视图",
+    listEmptyText: runtimeOnly ? "当前没有活跃残差对象。" : "当前没有 MAP 兼容条目。",
+    count,
+    totalEr,
+    totalEv,
+    totalEnergy,
+    items: runtimeOnly ? a(snapshot.items) : a(hdb.recent_memory_activations),
+    applyLabel: runtimeOnly ? "残差对象赋能" : "MAP兼容赋能",
+    applyNote: runtimeOnly
+      ? `状态池残差对象主链 | 总EV ${n(totalEv)}`
+      : `MAP 兼容主链 | 总EV ${n(totalEv)}`,
+  };
+}
+
 function fmtMemoryActivationCard(item) {
+  if (item?.runtime_only) {
+    const runtimeProjectionLabel = residualRuntimeObjectTypeLabel(item);
+    return {
+      title: `${item.display_text || item.grouped_display_text || item.memory_id || "-"} | ${item.item_id || item.memory_id || "-"}`,
+      desc:
+        `${runtimeProjectionLabel}\n` +
+        `当前能量 ER ${n(item.er)} | EV ${n(item.ev)} | Total ${n(te(item))}\n` +
+        `本轮落池 ER ${n(item.last_delta_er)} | EV ${n(item.last_delta_ev)}\n` +
+        `路径 ${item.path_mode || "runtime_em_only"} | 创建 ${tm(item.created_at)} | 最近更新 ${tm(item.last_updated_at)}\n` +
+        `来源 owner ${item.context_owner_id || "-"} | ref ${item.context_ref_object_id || "-"}\n` +
+        `来源文本 ${item.context_text || "-"}\n` +
+        `关联结构 / ST ${listOr(a(item.structure_ref_items).map((ref) => ref.display_text || ref.structure_id), "-", " / ")}\n` +
+        `关联结构组 / SG ${listOr(a(item.group_ref_items).map((ref) => ref.group_id), "-", " / ")}\n` +
+        `来源残差 / Source EM ${item.source_em_id || item.memory_id || "-"}`,
+    };
+  }
   const modeTotals = item?.mode_totals || {};
   const modeTotalsEr = item?.mode_totals_er || {};
   const modeTotalsEv = item?.mode_totals_ev || {};
@@ -1026,12 +1353,12 @@ function fmtMemoryActivationCard(item) {
       `模式累计 / By Mode er_induction ER ${n(modeTotalsEr.er_induction)} | EV ${n(modeTotalsEv.er_induction)} | Total ${n(modeTotals.er_induction)}\n` +
       `模式累计 / By Mode ev_propagation ER ${n(modeTotalsEr.ev_propagation)} | EV ${n(modeTotalsEv.ev_propagation)} | Total ${n(modeTotals.ev_propagation)}${extraModes ? `\n其它模式 / Extra Modes ${extraModes}` : ""}\n` +
       `更新 / Updates ${item.update_count || 0} | 命中 / Hits ${item.hit_count || 0} | 最近更新 / Updated ${tm(item.last_updated_at)}\n` +
-      `记忆反哺 / Feedback ${item.feedback_count || 0} | 上次 ER ${n(item.last_feedback_er)} | 上次 EV ${n(item.last_feedback_ev)} | 累计 ER ${n(item.total_feedback_er)} | 累计 EV ${n(item.total_feedback_ev)}\n` +
+      `兼容回流 / Compat Feedback ${item.feedback_count || 0} | 上次 ER ${n(item.last_feedback_er)} | 上次 EV ${n(item.last_feedback_ev)} | 累计 ER ${n(item.total_feedback_er)} | 累计 EV ${n(item.total_feedback_ev)}\n` +
       `结构引用 / ST ${listOr(a(item.structure_ref_items).map((ref) => ref.display_text || ref.structure_id), "-", " / ")}\n` +
       `结构组引用 / SG ${listOr(a(item.group_ref_items).map((ref) => ref.group_id), "-", " / ")}\n` +
       `来源结构 / Source ST ${listOr(item.source_structure_ids, "-", " / ")}\n` +
       `最近赋能 / Latest Activation ${recentEvent.trace_id || "-"} | ER ${n(recentEvent.delta_er)} | EV ${n(recentEvent.delta_ev)} | ${tm(recentEvent.timestamp_ms)}\n` +
-      `最近反哺 / Latest Feedback ${recentFeedback.trace_id || "-"} | ER ${n(recentFeedback.delta_er)} | EV ${n(recentFeedback.delta_ev)} | 目标 ${recentFeedback.target_count || 0} | ${tm(recentFeedback.timestamp_ms)}`,
+      `最近兼容回流 / Latest Compat Feedback ${recentFeedback.trace_id || "-"} | ER ${n(recentFeedback.delta_er)} | EV ${n(recentFeedback.delta_ev)} | 目标 ${recentFeedback.target_count || 0} | ${tm(recentFeedback.timestamp_ms)}`,
   };
 }
 
@@ -1039,11 +1366,11 @@ function fmtMemoryFeedbackResult(item) {
   return {
     title: `${item.display_text || item.memory_id || "-"} | ${item.memory_kind || "-"}`,
     desc:
-      `本轮反哺 / Feedback Delta ER ${n(item.delta_er)} | EV ${n(item.delta_ev)}\n` +
+      `本轮兼容回流 / Compat Feedback Delta ER ${n(item.delta_er)} | EV ${n(item.delta_ev)}\n` +
       `记忆内容 / Memory ${item.grouped_display_text || item.display_text || "-"}\n` +
       `回流目标 / Returned Targets ${listOr(item.target_display_texts, "-", " / ")}\n` +
       `${item.memory_kind === "stimulus_packet"
-        ? `反哺刺激包 / Feedback Packet ${item.packet?.grouped_display_text || item.packet?.display_text || "-"}\n落池后残余 / Residual After Apply ${item.landed_packet?.grouped_display_text || item.landed_packet?.display_text || "-"}`
+        ? `兼容反馈刺激包 / Compat Feedback Packet ${item.packet?.grouped_display_text || item.packet?.display_text || "-"}\n落池后残余 / Residual After Apply ${item.landed_packet?.grouped_display_text || item.landed_packet?.display_text || "-"}`
         : `结构回流 / Structure Projections ${listOr(a(item.projections).map((projection) => projection.display_text || projection.structure_id), "-", " / ")}`}`,
   };
 }
@@ -1132,17 +1459,74 @@ function fmtNeutralizationDiagnostic(item, fmtTarget) {
   const refType = String(item.target_ref_object_type || "").trim();
   // 若已经使用 fmtTargetWithPool，则它已包含 id/type/属性等信息，这里不重复拼接 refPart。
   const refPart = !useFmt && refId ? ` | ${refTypeLabel(refType)}:${refId}` : "";
+  const status = NEUTRALIZATION_STATUS_LABELS[String(item.status || "").trim()] || String(item.status || "未标记");
+  const reason = NEUTRALIZATION_REASON_LABELS[String(item.skipped_reason || "").trim()] || String(item.skipped_reason || "正常");
+  const mode = String(item.neutralization_mode || "").trim() === "soft_partial_cache" ? "结构软匹配 + SA结算" : (
+    String(item.neutralization_mode || "").trim() === "event_component_complementary" ? "事件组分互补中和" : "精确结构中和"
+  );
+  const saSummary =
+    Number(item.sa_target_count || 0) > 0 || Number(item.sa_settled_count || 0) > 0
+      ? `命中 SA ${item.sa_resolved_count || 0}/${item.sa_target_count || 0} | 已结算 ${item.sa_settled_count || 0}`
+      : "本轮没有可结算的 SA";
+  const saPreview = a(item.sa_settlements)
+    .slice(0, 4)
+    .map((row) => `${row.target_display || row.target_ref_object_id || "-"}:${row.energy_key || "-"} 缺口 ${n(row.deficit)} | 包内 ${n(row.packet_available)} | 实结算 ${n(row.consumed)}`)
+    .join(" / ");
+  const requiredLine =
+    item.raw_required_amount !== undefined && Number(item.raw_required_amount) !== Number(item.required_amount)
+      ? `原始差额 ${n(item.raw_required_amount)} | 本轮预算 ${n(item.required_amount)}`
+      : `需要 / Required ${n(item.required_amount)}`;
   return {
     title: `${disp}${refPart} | ${item.required_energy_key || "-"}`,
     desc:
-      `需要 / Required ${n(item.required_amount)} | 可供 / Available ${n(item.available_amount)} | 已中和 / Consumed ${n(item.consumed_amount)} | 缺口 / Shortfall ${n(item.shortfall_amount)}\n` +
-      `匹配单元 / Matched units ${item.matched_unit_count || 0}\n` +
-      `匹配内容 / Matched tokens ${listOr(item.matched_tokens, "-", " / ")}`,
+      `状态 ${status} | 模式 ${mode} | 原因 ${reason}\n` +
+      `${requiredLine} | 可供 ${n(item.available_amount)} | 包内同侧余量 ${n(item.packet_available_amount)} | 已中和 ${n(item.consumed_amount)} | 缺口 ${n(item.shortfall_amount)} | 全差额缺口 ${n(item.full_shortfall_amount)}\n` +
+      `匹配分 ${n(item.match_score)} | 结构覆盖 ${n(item.structure_coverage)} | 输入覆盖 ${n(item.input_coverage)} | 顺序 ${n(item.order_score)} | bundle ${n(item.bundle_score)}\n` +
+      `潜在覆盖 结构 ${n(item.potential_structure_coverage)} / 输入 ${n(item.potential_input_coverage)} | common ${item.common_length || 0} | 匹配单元 ${item.matched_unit_count || 0}\n` +
+      `${saSummary}${saPreview ? `\nSA 结算预览 ${saPreview}` : ""}\n` +
+      `匹配内容 ${listOr(item.matched_tokens, "-", " / ")}`,
   };
 }
 
 function card(key, value, note = "") {
   return `<article class="card"><div class="label">${esc(key)}</div><div class="value">${esc(value)}</div><div class="note">${esc(note)}</div></article>`;
+}
+
+function shortInputPreview(value, limit = 28) {
+  const text = String(value ?? "");
+  if (!text) return "";
+  return text.length > limit ? `${text.slice(0, Math.max(0, limit - 1))}…` : text;
+}
+
+function buildInputQueueViewModel(report) {
+  const queue = report?.input_queue || {};
+  const sensor = report?.sensor || {};
+  const processedText = String(queue.tick_text || sensor.input_text || "").trim();
+  const submittedText = String(queue.submitted_text || "").trim();
+  const queueSourceText = String(queue.source_text || "").trim();
+  const pendingAfter = Math.max(0, Number(queue.pending_count_after_dequeue || 0) || 0);
+  const queuedCount = Math.max(0, Number(queue.queued_from_new_input_count || 0) || 0);
+  const processedLabel = processedText || "空 Tick";
+  const submittedLabel = submittedText || "无";
+  const queueSourceLabel = queueSourceText || "无";
+  const summaryParts = [`处理 ${shortInputPreview(processedLabel)}`];
+  if (submittedText) {
+    summaryParts.push(`提交 ${shortInputPreview(submittedText)}`);
+  } else if (queueSourceText && queueSourceText !== processedText) {
+    summaryParts.push(`最近提交 ${shortInputPreview(queueSourceText)}`);
+  }
+  if (pendingAfter > 0) summaryParts.push(`余量 ${pendingAfter}`);
+  return {
+    processedText,
+    processedLabel,
+    submittedText,
+    submittedLabel,
+    queueSourceText,
+    queueSourceLabel,
+    pendingAfter,
+    queuedCount,
+    summaryText: summaryParts.join(" | "),
+  };
 }
 
 function empty(text) {
@@ -1698,6 +2082,7 @@ function renderActionRuntime() {
   const nodes = a(snap.nodes);
   const exs = a(snap.executors_registry);
   const executed = a(snap.recent_executed_actions);
+  const actionLearningSummary = snap.action_learning_summary || {};
 
   // Chinese-first action kind label / 行动类型中文名（中文优先）
   const actionKindTitle = (kind) => {
@@ -1709,7 +2094,7 @@ function renderActionRuntime() {
   };
   E.actionRuntimeMeta.textContent =
     `tick_counter（节拍计数）=${stats.tick_counter ?? "-"} | 行动节点=${stats.node_count ?? nodes.length} | 行动器注册=${exs.length} | ` +
-    `最近执行记录=${stats.executed_history_count ?? executed.length} | 模块版本=${snap.version || "-"}`;
+    `最近执行记录=${stats.executed_history_count ?? executed.length} | 局部塑形节点=${actionLearningSummary.local_modulated_node_count ?? 0} | 模块版本=${snap.version || "-"}`;
 
   const fmtSchema = (schema) => {
     const pairs = Object.entries(schema && typeof schema === "object" ? schema : {}).filter(([k]) => String(k || "").trim());
@@ -1737,8 +2122,10 @@ function renderActionRuntime() {
       // threshold_components: explain why threshold changed (NT/fatigue/etc.).
       title: `${actionKindTitle(node.action_kind || "")} · ${node.action_id || "-"}`,
       desc:
-        `drive ${n(node.drive)} | 基准阈值 ${n(node.base_threshold)} | 实时阈值 ${n(node.effective_threshold)}（scale ${n(node.threshold_scale)}）\n` +
+        `drive ${n(node.drive)} | 本轮消耗 ${n(node.tick_consumed_drive_total ?? node.last_consumed_drive ?? 0)} | 基准阈值 ${n(node.base_threshold)} | 实时阈值 ${n(node.effective_threshold)}（scale ${n(node.threshold_scale)}）\n` +
+        `目标 ${node.target_display || node.target_ref_object_id || node.target_item_id || "-"}\n` +
         `阈值分量（components）${Object.keys(node.threshold_components || {}).length ? Object.entries(node.threshold_components || {}).map(([k, v]) => `${k}:${n(v)}`).join(" / ") : "-"}\n` +
+`局部塑形 ${formatLocalDriveModulationText(node.local_drive_modulation)}\n` +
         `疲劳（fatigue）${n(node.fatigue)} | 本 tick 增益 ${n(node.tick_gain_total)} | cooldown ${node.cooldown_ticks ?? 0}\n` +
         `last_attempt ${node.last_attempt_tick ?? "-"} | last_trigger ${node.last_trigger_tick ?? "-"} | last_update ${node.last_update_tick ?? "-"}\n` +
         `${(Number(node.stop_until_tick ?? -1) >= 0 || Number(node.last_stop_tick ?? -1) >= 0) ? `停止门控 stop_until_tick ${node.stop_until_tick ?? "-"} | last_stop ${node.last_stop_tick ?? "-"} | reason ${node.last_stop_reason || "-"}\n` : ""}` +
@@ -1766,7 +2153,8 @@ function renderActionRuntime() {
           title: `tick#${ex.tick_number ?? "-"} · ${ok ? "成功" : "失败"} · ${actionKindTitle(ex.action_kind || "")} · ${ex.action_id || "-"}`,
           desc:
             `${originText} | ${statusText} | 记录时间 ${ts}${fail}\n` +
-            `drive ${n(ex.drive_before)} -> ${n(ex.drive_after)} | 阈值 ${n(ex.effective_threshold)}（基准 ${n(ex.base_threshold)} * scale ${n(ex.threshold_scale)}） | fatigue ${n(ex.fatigue)}\n` +
+            `drive ${n(ex.drive_before)} -> ${n(ex.drive_after)} | 消耗 ${n(ex.consumed_drive ?? 0)} | 阈值 ${n(ex.effective_threshold)}（基准 ${n(ex.base_threshold)} * scale ${n(ex.threshold_scale)}） | fatigue ${n(ex.fatigue)}\n` +
+`目标 ${ex.target_display || ex.target_ref_object_id || ex.target_item_id || "-"} | 局部塑形 ${formatLocalDriveModulationText(ex.local_drive_modulation)}\n` +
             `本 tick 增益 ${n(ex.tick_gain_total)} | 来源增益 ${by}`,
         };
       }),
@@ -1857,6 +2245,7 @@ function enhanceMemoryAwareViews() {
 function renderOverviewMemorySummary() {
   if (!S.d || !E.overviewCards) return;
   const report = S.d.last_report || {};
+  const inputView = buildInputQueueViewModel(report);
   const snapshot = S.d.state_snapshot || {};
   const energy = S.d.state_energy_summary || {};
   const hdb = S.d.hdb_snapshot?.summary || {};
@@ -1881,16 +2270,17 @@ function renderOverviewMemorySummary() {
   const timing = report.timing || {};
   const totalMs = Number(timing.total_logic_ms ?? timing.total_ms ?? 0) || 0;
   const timeNote = totalMs ? ` | 耗时 ${Math.round(totalMs)}ms` : "";
+  const memoryUi = buildMemoryUiModel(report, S.d.hdb_snapshot || {});
   E.overviewCards.innerHTML = [
-    card("最近轮次 / Latest Cycle", S.d.meta?.last_cycle_id || "尚未运行", `输入 / Input: ${report.sensor?.input_text || "空 Tick"}${timeNote}`),
+    card("最近轮次 / Latest Cycle", S.d.meta?.last_cycle_id || "尚未运行", `${inputView.summaryText}${timeNote}`),
     card("状态池对象 / State Items", snapshot.summary?.active_item_count || 0, `高认知压 / High CP ${snapshot.summary?.high_cp_item_count || 0}`),
     card("总能量 / Total Energy", `ER ${n(energy.total_er)} / EV ${n(energy.total_ev)}`, `CP ${n(energy.total_cp)}`),
     card("记忆体 / Attention Memory", report.attention?.memory_item_count || 0, `抽取消耗 / Consumed ${n(report.attention?.consumed_total_energy)}`),
     card("HDB", `ST ${hdb.structure_count || 0} / SG ${hdb.group_count || 0}`, `EM ${hdb.episodic_count || 0}`),
     card(
-      "记忆赋能池 / MAP",
-      hdb.memory_activation_count || 0,
-      `ER ${n(hdb.memory_activation_total_er)} | EV ${n(hdb.memory_activation_total_ev)} | Total ${n(hdb.memory_activation_total_energy)}`,
+      memoryUi.summaryLabel,
+      memoryUi.count,
+      `ER ${n(memoryUi.totalEr)} | EV ${n(memoryUi.totalEv)} | Total ${n(memoryUi.totalEnergy)} | ${memoryUi.pathLabel}`,
     ),
     card("闲时巩固 / Idle Consolidation", idleWhen, idleDetail),
     card("历史轮次 / Recent Cycles", a(S.d.recent_cycles).length, `启动于 / Started ${tm(S.d.meta?.started_at)}`),
@@ -1899,21 +2289,23 @@ function renderOverviewMemorySummary() {
 
 function renderHdbMemorySummary() {
   if (!S.d) return;
+  const report = S.d.last_report || {};
   const hdb = S.d.hdb_snapshot || {};
   const summary = hdb.summary || {};
+  const memoryUi = buildMemoryUiModel(report, hdb);
   if (E.hdbMeta) {
     E.hdbMeta.textContent =
       `ST ${summary.structure_count || 0} | SG ${summary.group_count || 0} | ` +
-      `EM ${summary.episodic_count || 0} | MAP ${summary.memory_activation_count || 0} | ` +
-      `MAP Total ${n(summary.memory_activation_total_energy)}`;
+      `EM ${summary.episodic_count || 0} | ${memoryUi.shortLabel} ${memoryUi.count} | ` +
+      `${memoryUi.shortLabel} Total ${n(memoryUi.totalEnergy)}`;
   }
   if (E.hdbCards) {
     E.hdbCards.innerHTML = [
       card("结构 / 结构组", `${summary.structure_count || 0} / ${summary.group_count || 0}`, `EM ${summary.episodic_count || 0}`),
       card(
-        "记忆赋能池 / MAP",
-        summary.memory_activation_count || 0,
-        `ER ${n(summary.memory_activation_total_er)} | EV ${n(summary.memory_activation_total_ev)} | Total ${n(summary.memory_activation_total_energy)}`,
+        memoryUi.summaryLabel,
+        memoryUi.count,
+        `ER ${n(memoryUi.totalEr)} | EV ${n(memoryUi.totalEv)} | Total ${n(memoryUi.totalEnergy)} | ${memoryUi.pathLabel}`,
       ),
       card("局部数据库 / Structure DB", summary.structure_db_count || 0, `Issue ${summary.issue_count || 0}`),
       card("修复任务 / Repair", summary.active_repair_job_count || 0, "活动修复任务 / Active repair jobs"),
@@ -1925,17 +2317,29 @@ function renderHdbMemorySummary() {
 function renderRecentCyclesMemorySummary() {
   if (!E.recentCycles) return;
   E.recentCycles.innerHTML = rows(
-    a(S.d?.recent_cycles).map((cycle) => ({
-      title: `${cycle.trace_id || "-"} 路 ${cycle.input_text || "空 Tick"}`,
-      desc:
-        `记忆体 ${cycle.attention_memory_count || 0} | 记忆赋能 ${cycle.memory_activation_applied_count || 0} | 记忆反哺 ${cycle.memory_feedback_applied_count || 0}\n` +
-        `认知拼接（Cognitive Stitching，缩写 CS）候选 ${cycle.cs_candidate_count ?? "-"} | 动作 ${cycle.cs_action_count ?? "-"} | 退化 ${cycle.cs_degenerated_event_count ?? "-"}\n` +
-        `刺激级查存轮次 ${cycle.stimulus_rounds ?? "-"} | 结构级查存轮次 ${cycle.structure_rounds ?? "-"}\n` +
-        `命中结构 ${fmtRefs(cycle.matched_structure_refs)}\n` +
-        `新结构 ${fmtRefs(cycle.new_structure_refs)}\n` +
-        `memory_pool ER ${n(cycle.memory_activation_total_er)} | EV ${n(cycle.memory_activation_total_ev)}\n` +
-        `feedback ER ${n(cycle.memory_feedback_total_er)} | EV ${n(cycle.memory_feedback_total_ev)} | induction EV ${n(cycle.total_delta_ev)}`,
-    })),
+    a(S.d?.recent_cycles).map((cycle) => {
+      const runtimeOnly = String(cycle.memory_path_mode || "").trim() === "runtime_em_only";
+      const activationLabel = runtimeOnly ? "残差对象赋能" : "MAP兼容赋能";
+      const stockLabel = runtimeOnly ? "residual_runtime" : "map_compat_pool";
+      const feedbackLine = runtimeOnly
+        ? "MAP 兼容反馈主链已关闭"
+        : `compat_feedback ER ${n(cycle.memory_feedback_total_er)} | EV ${n(cycle.memory_feedback_total_ev)}`;
+      const processedText = String(cycle.tick_text || cycle.input_text || "").trim() || "空 Tick";
+      const submittedText = String(cycle.submitted_text || "").trim();
+      const queueNote = submittedText && submittedText !== processedText ? `提交 ${shortInputPreview(submittedText)} | ` : "";
+      return {
+        title: `${cycle.trace_id || "-"} · 处理 ${shortInputPreview(processedText)}`,
+        desc:
+          `${queueNote}队列余量 ${cycle.pending_queue_after_tick ?? 0}\n` +
+          `记忆体 ${cycle.attention_memory_count || 0} | ${activationLabel} ${cycle.memory_activation_applied_count || 0} | 路径 ${cycle.memory_path_mode || "-"}` + "\n" +
+          `认知拼接（Cognitive Stitching，缩写 CS）候选 ${cycle.cs_candidate_count ?? "-"} | 动作 ${cycle.cs_action_count ?? "-"} | 退化 ${cycle.cs_degenerated_event_count ?? "-"}\n` +
+          `刺激级查存轮次 ${cycle.stimulus_rounds ?? "-"} | 结构级查存轮次 ${cycle.structure_rounds ?? "-"}\n` +
+          `命中结构 ${fmtRefs(cycle.matched_structure_refs)}\n` +
+          `新结构 ${fmtRefs(cycle.new_structure_refs)}\n` +
+          `${stockLabel} ER ${n(cycle.memory_activation_total_er)} | EV ${n(cycle.memory_activation_total_ev)}\n` +
+          `${feedbackLine} | induction EV ${n(cycle.total_delta_ev)}`,
+      };
+    }),
     "当前没有最近轮次 / No recent cycles yet.",
   );
 }
@@ -1943,9 +2347,11 @@ function renderRecentCyclesMemorySummary() {
 function overview() {
   if (!S.d || !E.overviewCards) return;
   const report = S.d.last_report || {};
+  const inputView = buildInputQueueViewModel(report);
   const snapshot = S.d.state_snapshot || {};
   const energy = S.d.state_energy_summary || {};
   const hdb = S.d.hdb_snapshot?.summary || {};
+  const memoryUi = buildMemoryUiModel(report, S.d.hdb_snapshot || {});
   const maint = S.d.maintenance_runtime || {};
   const hdbIdle = maint.hdb_last_idle_consolidation || null;
   const csIdle = maint.cs_last_idle_consolidation || null;
@@ -1958,27 +2364,30 @@ function overview() {
   if (csIdle?.data) idleDetailParts.push(`CS depth ${n(csIdle.data.avg_parent_depth_before)}→${n(csIdle.data.avg_parent_depth_after)}`);
   const idleDetail = idleDetailParts.length ? idleDetailParts.join(" | ") : "点击按钮可触发";
   E.overviewCards.innerHTML = [
-    card("最近轮次", S.d.meta?.last_cycle_id || "尚未运行", `输入: ${report.sensor?.input_text || "空 Tick"}`),
+    card("最近轮次", S.d.meta?.last_cycle_id || "尚未运行", inputView.summaryText),
     card("状态池对象", snapshot.summary?.active_item_count || 0, `高认知压 ${snapshot.summary?.high_cp_item_count || 0}`),
     card("总能量", `ER ${n(energy.total_er)} / EV ${n(energy.total_ev)}`, `CP ${n(energy.total_cp)}`),
     card("记忆体", report.attention?.memory_item_count || 0, `抽取消耗 ${n(report.attention?.consumed_total_energy)}`),
     card("HDB", `ST ${hdb.structure_count || 0} / SG ${hdb.group_count || 0}`, `EM ${hdb.episodic_count || 0}`),
-    card("记忆赋能池", hdb.memory_activation_count || 0, `总EV ${n(hdb.memory_activation_total_ev)}`),
+    card(memoryUi.shortLabel, memoryUi.count, `ER ${n(memoryUi.totalEr)} | EV ${n(memoryUi.totalEv)} | ${memoryUi.pathLabel}`),
     card("闲时巩固", idleWhen, idleDetail),
     card("历史轮次", a(S.d.recent_cycles).length, `启动于 ${tm(S.d.meta?.started_at)}`),
   ].join("");
 }
 
 function sensor() {
-  const s = S.d?.last_report?.sensor || {};
+  const report = S.d?.last_report || {};
+  const s = report.sensor || {};
+  const inputView = buildInputQueueViewModel(report);
   const rt = S.d?.sensor_runtime?.config_summary || {};
   const rtTokenizer =
     String(rt.tokenizer_backend_effective || rt.tokenizer_backend || rt.tokenizer_backend_config || "-") || "-";
   const rtTokenizerAvail = rt.tokenizer_available;
-  if (E.sensorMeta) E.sensorMeta.textContent = `最近输入: ${s.input_text || "无"}`;
+  if (E.sensorMeta) E.sensorMeta.textContent = `本 tick 处理: ${inputView.processedLabel} | 本次提交: ${inputView.submittedLabel} | 队列余量 ${inputView.pendingAfter}`;
   if (E.sensorCards) {
     E.sensorCards.innerHTML = [
-      card("输入文本", s.input_text || "无", `归一化 ${s.normalized_text || "-"}`),
+      card("本 tick 处理片段", inputView.processedLabel, `归一化 ${s.normalized_text || "-"} | FIFO 队列顺序处理`),
+      card("本次提交文本", inputView.submittedLabel, `最近源文本 ${inputView.queueSourceLabel} | 新入队 ${inputView.queuedCount} 段 | 队列余量 ${inputView.pendingAfter}`),
       card("分词后端", s.tokenizer_backend || rtTokenizer || "-", `可用 ${y(s.tokenizer_available ?? rtTokenizerAvail)}`),
       card("模式", s.mode || rt.default_mode || "-", `fallback ${y(s.tokenizer_fallback)}`),
       card("SA / CSA", `${s.sa_count || 0} / ${s.csa_count || 0}`, `刺激组 ${a(s.groups).length} | bundles ${s.csa_bundle_count ?? 0}`),
@@ -2056,7 +2465,7 @@ function timeSensorView() {
                 `桶能量汇总（Top10）${bucketSummary}`,
             };
           }),
-          "本轮没有生成时间感受绑定（通常表示：本 tick 没有记忆反哺投影，或 MAP 为空）。",
+          "本轮没有生成时间感受绑定（通常表示：本 tick 没有可用的时间感受源，或延迟赋能未命中）。",
         ),
       ),
     );
@@ -2092,7 +2501,7 @@ function timeSensorView() {
                 desc: `${op} | ref_id ${ref || "-"}\n${[center, range].filter(Boolean).join(" | ") || "-"}`,
               };
             }),
-          "本轮没有时间桶被赋能（可能是 MAP 为空或阈值较高）。",
+          "本轮没有时间桶被赋能（可能是当前时间感受能量不足，或阈值较高）。",
         ),
       ),
     );
@@ -2116,7 +2525,7 @@ function timeSensorView() {
               desc: `${[center, range].filter(Boolean).join(" | ") || "-"}`,
             };
           }),
-          "本轮没有时间桶能量（可能是 MAP 为空或阈值较高）。",
+          "本轮没有时间桶能量（可能是当前时间感受能量不足，或阈值较高）。",
         ),
       ),
     );
@@ -2232,6 +2641,29 @@ function dCard(title, content, className = "") {
   return `<section class="detail-card ${className}"><h5>${esc(title)}</h5><div class="detail-card-body">${content}</div></section>`;
 }
 
+const NEUTRALIZATION_STATUS_LABELS = {
+  applied: "已应用",
+  shortfall: "有缺口",
+  skipped: "已剪枝",
+  below_effect_threshold: "能量过薄未生效",
+};
+
+const NEUTRALIZATION_REASON_LABELS = {
+  no_token_overlap: "没有 token 重合",
+  low_potential_structure_coverage: "潜在结构覆盖率过低",
+  packet_no_opposite_energy: "刺激包没有对向能量",
+  no_common_part: "没有形成有效共同部分",
+  low_structure_coverage: "实际结构覆盖率过低",
+  low_match_score: "软匹配分过低",
+  exact_signature_miss: "未达到旧版精确命中条件",
+  effective_budget_below_threshold: "本轮可用预算低于生效阈值",
+  matched_energy_too_thin: "命中能量过薄",
+  matched_energy_empty: "命中内容没有可消费能量",
+  no_runtime_sa_target: "匹配到了结构，但没有解析到可结算 SA",
+  matched_sa_no_opposite_energy: "命中的 SA 没有拿到对向能量",
+  matched_sa_balanced: "命中的 SA 当前已基本平衡",
+};
+
 function stText(stats) {
   if (!stats) return "无";
   return `W ${n(stats.base_weight)} | G ${n(stats.recent_gain)} | fatigue ${n(stats.fatigue)} | runtime_er ${n(stats.runtime_er)} | runtime_ev ${n(stats.runtime_ev)} | match ${stats.match_count_total || 0}`;
@@ -2246,10 +2678,14 @@ function flow() {
   }
 
   if (E.flowMeta) E.flowMeta.textContent = `trace ${report.trace_id || "-"} | 时间 ${tm(report.started_at)}`;
+  let flowStepCounter = 1;
+  const stepBlock = (title, desc, cards) => fBlock(`${flowStepCounter++}. ${title}`, desc, cards);
 
   // Build a small lookup from the final StatePool snapshot for better target display.
   // 用最终状态池快照构建索引：把 CFS/行动的“目标 id”补全成更可读的对象展示文本。
   const finalStateSnapshot = report.final_state?.state_snapshot || {};
+  const finalHdbSnapshot = report.final_state?.hdb_snapshot || {};
+  const finalHdbSummary = finalHdbSnapshot.summary || {};
   const finalPoolItems = a(finalStateSnapshot.top_items);
   const poolByItemId = new Map();
   const poolByRef = new Map();
@@ -2357,14 +2793,62 @@ function flow() {
   const poolApply = report.pool_apply || {};
   const induction = report.induction?.result || {};
   const inductionDebug = induction.debug || {};
+  const inductionSourceSelection = report.induction?.source_selection || induction.source_selection || {};
+  const inductionRoundSummaries = a(induction.energy_graph_round_summaries);
+  const inductionLayerHistogram = induction.energy_graph_layer_histogram || {};
+  const inductionLayerSummary = Object.entries(inductionLayerHistogram)
+    .sort((left, right) => (+left?.[0] || 0) - (+right?.[0] || 0))
+    .map(([depth, count]) => `L${depth}:${count}`)
+    .join(" | ");
   const memoryActivation = report.memory_activation || {};
+  const contextAuditPoolRows = buildContextAuditRows(finalPoolItems, 6);
+  const contextAuditStructureRows = buildStructureContextRows(finalHdbSnapshot.recent_structures, 6);
   const memoryActivationApply = memoryActivation.apply_result || {};
   const memoryActivationSnapshot = memoryActivation.snapshot || {};
+  const memoryUi = buildMemoryUiModel(report, finalHdbSnapshot);
+  const memoryPathMode = memoryUi.pathMode;
+  const memoryPathLabel = memoryUi.pathLabel;
+  const memoryRuntimeProjection = report.memory_runtime_projection || memoryActivation.runtime_projection || {};
+  const memoryRuntimeProjectionItems = a(memoryRuntimeProjection.items);
+  const memoryRuntimeProjectionSummary = memoryRuntimeProjection.summary || {};
+  const memoryRuntimeShadowMode = Boolean(memoryRuntimeProjection.shadow_mode);
   const memoryFeedback = report.memory_feedback || memoryActivation.feedback_result || {};
   const memoryFeedbackItems = a(memoryFeedback.items);
   const memoryFeedbackStimulusCount = memoryFeedbackItems.filter((item) => item?.memory_kind === "stimulus_packet").length;
   const memoryFeedbackStructureCount = memoryFeedbackItems.filter((item) => item?.memory_kind === "structure_group").length;
   const memoryFeedbackTargetCount = memoryFeedbackItems.reduce((sum, item) => sum + (+item?.target_count || 0), 0);
+  const memoryFeedbackVisible = memoryPathMode === "dedicated_map" && memoryFeedback.hidden_in_ui !== true && memoryFeedback.ui_visible !== false;
+  const showMemoryFeedbackBlock =
+    memoryFeedbackVisible &&
+    (
+      (+memoryFeedback.applied_count || 0) > 0 ||
+      memoryFeedbackTargetCount > 0 ||
+      (+memoryFeedback.record_result?.recorded_count || 0) > 0
+    );
+  const inductionSources = a(inductionDebug.source_details);
+  const inductionSourceHitCount = inductionSources.filter((source) => a(source?.candidate_entries).length > 0).length;
+  const inductionSourceMissCount = Math.max(0, inductionSources.length - inductionSourceHitCount);
+  const inductionErSourceCount =
+    +inductionSourceSelection.induction_source_selected_from_er_count ||
+    inductionSources.filter((source) => (+source?.source_er || 0) > 0).length;
+  const inductionEvSourceCount =
+    +inductionSourceSelection.induction_source_selected_from_ev_count ||
+    inductionSources.filter((source) => (+source?.source_ev || 0) > 0).length;
+  const energyGraphConfig = induction.energy_graph_config || {};
+  const energyGraphMaxRounds =
+    +induction.energy_graph_config_max_rounds ||
+    +energyGraphConfig.max_rounds ||
+    0;
+  const energyGraphRoundLimitLabel = energyGraphMaxRounds > 0 ? energyGraphMaxRounds : "剪枝停止";
+  const showEnergyGraphBlock =
+    Boolean(induction.energy_graph_v2_enabled) &&
+    (
+      (+induction.energy_graph_round_count_max || 0) > 0 ||
+      (+induction.energy_graph_frontier_generated_count || 0) > 0 ||
+      (+induction.energy_graph_root_reinduction_count || 0) > 0 ||
+      inductionRoundSummaries.length > 0 ||
+      a(inductionDebug.source_details).some((source) => a(source?.candidate_entries).length > 0)
+    );
   const cfs = report.cognitive_feeling || {};
   const cfsSignals = a(cfs.cfs_signals);
   const cfsWrites = cfs.writes || {};
@@ -2383,6 +2867,7 @@ function flow() {
   const actionTriggers = a(action.triggers);
   const actionExecutors = a(action.executors_registry);
   const thresholdMod = action.threshold_modulation || {};
+  const actionLearningSummary = action.action_learning_summary || {};
   const energyBalance = report.energy_balance || {};
 
   // Action kind label (Chinese-first, bilingual) / 行动类型中文名（中文优先 + 中英文双语）
@@ -2406,11 +2891,78 @@ function flow() {
     )
       .map(([key, value]) => `${key} ${n(value)}`)
       .join(" / ") || "无 / None";
+  const pickFiniteMetric = (row, keys) => {
+    for (const key of a(keys)) {
+      const num = Number(row?.[key]);
+      if (Number.isFinite(num)) return num;
+    }
+    return null;
+  };
+
+  const fmtRetrievalScoreAudit = (row, options = {}) => {
+    const legacyBase = pickFiniteMetric(row, options.legacyBaseKeys || ["match_score_legacy", "base_similarity_legacy", "match_score", "base_similarity"]);
+    const v2Base = pickFiniteMetric(row, options.v2BaseKeys || ["match_score_v2", "base_similarity_v2"]);
+    const blendedBase = pickFiniteMetric(row, options.blendedBaseKeys || ["match_score", "base_similarity"]);
+    const legacyCompetition = pickFiniteMetric(row, options.legacyCompetitionKeys || ["competition_score_legacy"]);
+    const v2Competition = pickFiniteMetric(row, options.v2CompetitionKeys || ["competition_score_v2"]);
+    const blendedCompetition = pickFiniteMetric(row, options.blendedCompetitionKeys || ["competition_score", "score", "similarity_score", "similarity"]);
+    const thresholdMargin = pickFiniteMetric(row, options.thresholdMarginKeys || ["v2_threshold_margin"]);
+    const availableComponentCount = pickFiniteMetric(row, options.availableComponentKeys || ["v2_available_component_count"]);
+    const lines = [];
+    if (legacyBase !== null || v2Base !== null || blendedBase !== null) {
+      lines.push(`并排基础分：Legacy ${n(legacyBase)} | V2 ${n(v2Base)} | blended ${n(blendedBase)}`);
+    }
+    if (legacyCompetition !== null || v2Competition !== null || blendedCompetition !== null) {
+      lines.push(`并排竞争分：Legacy ${n(legacyCompetition)} | V2 ${n(v2Competition)} | blended ${n(blendedCompetition)}`);
+    }
+    if (thresholdMargin !== null || availableComponentCount !== null) {
+      lines.push(`V2 阈值余量 ${n(thresholdMargin)} | 生效子项 ${availableComponentCount === null ? "-" : String(Math.round(availableComponentCount))}`);
+    }
+    return lines.join("\n");
+  };
+
+  const fmtRetrievalV2Breakdown = (row) => {
+    const componentKeys = [
+      "v2_base_score",
+      "v2_numeric_score",
+      "v2_order_alignment_score",
+      "v2_attribute_anchor_score",
+      "v2_context_support_score",
+      "v2_energy_profile_score",
+      "v2_structure_inclusion_score",
+    ];
+    if (!componentKeys.some((key) => Number.isFinite(Number(row?.[key])))) return "";
+    return [
+      `V2 组成：base ${n(row?.v2_base_score)} | 数值 ${n(row?.v2_numeric_score)} | 顺序 ${n(row?.v2_order_alignment_score)} | 属性锚点 ${n(row?.v2_attribute_anchor_score)}`,
+      `V2 支撑：上下文 ${n(row?.v2_context_support_score)} | 能量图景 ${n(row?.v2_energy_profile_score)} | 结构包含度 ${n(row?.v2_structure_inclusion_score)}`,
+    ].join("\n");
+  };
+
+  const structureScoreAuditOptions = {
+    legacyBaseKeys: ["base_similarity_legacy", "base_similarity"],
+    v2BaseKeys: ["base_similarity_v2"],
+    blendedBaseKeys: ["base_similarity"],
+    legacyCompetitionKeys: ["competition_score_legacy"],
+    v2CompetitionKeys: ["competition_score_v2"],
+    blendedCompetitionKeys: ["competition_score", "score", "similarity"],
+  };
+  const stimulusScoreAuditOptions = {};
+
   const structureRounds = a(structureDebug.round_details).length
     ? a(structureDebug.round_details)
         .map((round) => {
           const selected = round.selected_group;
-          return `<article class="detail-card nested"><h5>结构级 Round ${esc(round.round_index || 0)}</h5><div class="kv-list"><div class="kv-row"><div class="k">预算前 / Budget Before</div><div class="v">${fmtBudget(round.budget_before)}</div></div><div class="kv-row"><div class="k">预算后 / Budget After</div><div class="v">${fmtBudget(round.budget_after)}</div></div><div class="kv-row"><div class="k">选中结构组 / Selected Group</div><div class="v">${selected ? htmlLines([`${pickGroupedText(selected, selected.group_id || "-")} | ${selected.group_id || "-"} | score ${n(selected.score)}`, `必要结构 / Required: ${fmtRefs(selected.required_structures)}`, `偏置结构 / Bias: ${fmtRefs(selected.bias_structures)}`, `共同部分 / Common: ${fmtCommon(selected.common_part)}`]) : "本轮未命中结构组 / No group match"}</div></div><div class="kv-row"><div class="k">偏置结构 / Bias Structures</div><div class="v">${htmlLines([fmtRefs(round.bias_structures)])}</div></div><div class="kv-row"><div class="k">内源片段 / Internal Fragments</div><div class="v">${htmlLines(a(round.internal_fragments).map((fragment) => `${pickGroupedText(fragment, fragment.display_text || fragment.fragment_id || "-")} | ER ${n(fragment.er_hint)} | EV ${n(fragment.ev_hint)} | Total ${n(fragment.energy_hint)}${fragment.ext?.goal_b_has_string_group ? ` | GoalB字符串 ${listOr(fragment.ext?.goal_b_string_texts, "-", " + ")}` : ""}${fragment.ext?.display_fallback_char_split ? ` | fallback_split ${y(fragment.ext?.display_fallback_char_split)}` : ""}${fragment.ext?.sequence_group_count != null ? ` | seq_groups ${fragment.ext.sequence_group_count}` : ""}`))}</div></div><div class="kv-row"><div class="k">链式打开 / Chain</div><div class="v">${fmtChain(round.chain_steps, "structure")}</div></div><div class="kv-row"><div class="k">局部库动作 / Local DB Actions</div><div class="v">${fmtStorageSummary(round.storage_summary)}</div></div></div><div class="sub-section"><div class="sub-title">候选结构组 / Candidate Groups</div>${rows(a(round.candidate_groups).map((item) => ({ title: `${pickGroupedText(item, item.group_id || "-")} | ${item.group_id || "-"} | score ${n(item.score)}`, desc: `必要结构 / Required: ${fmtRefs(item.required_structures)}\n偏置结构 / Bias: ${fmtRefs(item.bias_structures)}\n共同部分 / Common: ${fmtCommon(item.common_part)}\n可用 / Eligible ${y(item.eligible)} | owner ${item.owner_kind || "-"} / ${item.owner_id || "-"} | depth ${item.chain_depth ?? 0}\nsimilarity ${n(item.similarity)} | base ${n(item.base_similarity)} | coverage ${n(item.coverage_ratio)} | structure ${n(item.structure_ratio)}\nwave ${n(item.wave_similarity)} | path ${n(item.path_strength)} | runtime ${n(item.runtime_weight)} | W ${n(item.base_weight)} | G ${n(item.recent_gain)} | fatigue ${n(item.fatigue)}` })), "本轮没有候选结构组 / No structure-group candidates.")}</div></article>`;
+          const selectedLines = selected
+            ? [
+                `${pickGroupedText(selected, selected.group_id || "-")} | ${selected.group_id || "-"} | score ${n(selected.score ?? selected.competition_score)}`,
+                `必要结构 / Required: ${fmtRefs(selected.required_structures || selected.required_ids)}`,
+                `偏置结构 / Bias: ${fmtRefs(selected.bias_structures)}`,
+                `共同部分 / Common: ${fmtCommon(selected.common_part)}`,
+                fmtRetrievalScoreAudit(selected, structureScoreAuditOptions),
+                fmtRetrievalV2Breakdown(selected),
+              ].filter(Boolean)
+            : null;
+          return `<article class="detail-card nested"><h5>结构级 Round ${esc(round.round_index || 0)}</h5><div class="kv-list"><div class="kv-row"><div class="k">预算前 / Budget Before</div><div class="v">${fmtBudget(round.budget_before)}</div></div><div class="kv-row"><div class="k">预算后 / Budget After</div><div class="v">${fmtBudget(round.budget_after)}</div></div><div class="kv-row"><div class="k">选中结构组 / Selected Group</div><div class="v">${selectedLines ? htmlLines(selectedLines) : "本轮未命中结构组 / No group match"}</div></div><div class="kv-row"><div class="k">偏置结构 / Bias Structures</div><div class="v">${htmlLines([fmtRefs(round.bias_structures)])}</div></div><div class="kv-row"><div class="k">内源片段 / Internal Fragments</div><div class="v">${htmlLines(a(round.internal_fragments).map((fragment) => `${pickGroupedText(fragment, fragment.display_text || fragment.fragment_id || "-")} | ER ${n(fragment.er_hint)} | EV ${n(fragment.ev_hint)} | Total ${n(fragment.energy_hint)}${fragment.ext?.goal_b_has_string_group ? ` | GoalB字符串 ${listOr(fragment.ext?.goal_b_string_texts, "-", " + ")}` : ""}${fragment.ext?.display_fallback_char_split ? ` | fallback_split ${y(fragment.ext?.display_fallback_char_split)}` : ""}${fragment.ext?.sequence_group_count != null ? ` | seq_groups ${fragment.ext.sequence_group_count}` : ""}`))}</div></div><div class="kv-row"><div class="k">链式打开 / Chain</div><div class="v">${fmtChain(round.chain_steps, "structure")}</div></div><div class="kv-row"><div class="k">局部库动作 / Local DB Actions</div><div class="v">${fmtStorageSummary(round.storage_summary)}</div></div></div><div class="sub-section"><div class="sub-title">候选结构组 / Candidate Groups</div>${rows(a(round.candidate_groups).map((item) => ({ title: `${pickGroupedText(item, item.group_id || "-")} | ${item.group_id || "-"} | score ${n(item.score ?? item.competition_score)}`, desc: [`必要结构 / Required: ${fmtRefs(item.required_structures || item.required_ids)}`, `偏置结构 / Bias: ${fmtRefs(item.bias_structures)}`, `共同部分 / Common: ${fmtCommon(item.common_part)}`, `可用 / Eligible ${y(item.eligible)} | owner ${item.owner_kind || "-"} / ${item.owner_id || "-"} | depth ${item.chain_depth ?? 0}`, `similarity ${n(item.similarity)} | base ${n(item.base_similarity)} | coverage ${n(item.coverage_ratio)} | structure ${n(item.structure_ratio)}`, `wave ${n(item.wave_similarity)} | path ${n(item.path_strength)} | runtime ${n(item.runtime_weight)} | W ${n(item.base_weight)} | G ${n(item.recent_gain)} | fatigue ${n(item.fatigue)}`, fmtRetrievalScoreAudit(item, structureScoreAuditOptions), fmtRetrievalV2Breakdown(item)].filter(Boolean).join("\n") })), "本轮没有候选结构组 / No structure-group candidates.")}</div></article>`;
         })
         .join("")
     : empty("本轮没有结构级轮次细节 / No structure rounds.");
@@ -2510,6 +3062,7 @@ function flow() {
   const csTop = a(cs.narrative_top_items);
   const csActions = a(cs.actions);
   const csCandidates = a(cs.candidate_preview);
+  const csCandidateAudit = cs.candidate_audit || {};
   const csEventGrasp = cs.event_grasp || {};
   const csDegeneration = cs.event_degeneration || {};
   const csDegenerationActions = a(csDegeneration.actions_preview);
@@ -2517,12 +3070,82 @@ function flow() {
   const csActionFamilyLabel = (family, actionName) => {
     const f = String(family || "").trim();
     const a0 = String(actionName || "").trim();
+    if (a0.startsWith("reinforce_concat_context_structure")) return "强化上下文拼接结构";
     if (a0.startsWith("reinforce_")) return "强化事件（Reinforce Event）";
+    if (f === "concat_context_structure") return "上下文拼接结构";
     if (f === "create_event") return "新建事件（Create Event）";
     if (f === "extend_event") return "扩展事件（Extend Event）";
     if (f === "merge_event") return "桥接合并事件（Bridge Merge Event）";
     return f || "-";
   };
+
+  const csRejectedReasonLabel = (reason) => {
+    const key = String(reason || "").trim();
+    if (key === "below_min_candidate_score") return "候选总分低于最低阈值";
+    if (key === "below_v2_min_match_score") return "候选 V2 分数低于最低匹配阈值";
+    if (key === "component_count_exceeded") return "拼接后的组分数量超过上限";
+    if (key === "non_positive_edge") return "扩展边权重无效或正边总量为 0";
+    return key || "-";
+  };
+
+  const csCompetitionLabel = (outcome) => {
+    const key = String(outcome || "").trim();
+    if (key === "stored_new") return "首次入榜";
+    if (key === "replaced_existing") return "同签名竞争中替换旧候选";
+    if (key === "kept_existing") return "同签名竞争中保留旧候选";
+    return key || "-";
+  };
+
+  const csScoreBreakdownLine = (row) =>
+    `基础分 ${n(row.base_score)} = 边权 ${n(row.edge_ratio_component)} + 匹配 ${n(row.match_strength_component)} + 上下文 ${n(row.context_support_component)} + 能量均衡 ${n(row.energy_balance_component)} + 运行均衡 ${n(row.runtime_balance_component)} + 跨度 ${n(row.bridge_span_component)}`;
+
+  const csScaleLine = (row) =>
+    `缩放项：锚点 ${n(row.anchor_scale)} × 疲劳 ${n(row.fatigue_scale)} => 最终分 ${n(row.score)} | 最低阈值 ${n(row.min_candidate_score)} | 阈值余量 ${n(row.threshold_margin)}`;
+
+  const csExecutionScoreSourceLabel = (row) => {
+    const source = String(row?.score_source || "").trim().toLowerCase();
+    if (source === "v2") return "V2 执行分";
+    if (source === "legacy") return "Legacy 执行分";
+    return source || "未标注";
+  };
+
+  const csExecutionModeLine = (row) =>
+    `执行口径（score_source）${csExecutionScoreSourceLabel(row)} | execution_uses_v2_score ${y(Boolean(row?.execution_uses_v2_score))}`;
+
+  const csParallelScoreLine = (row) => {
+    const parts = [];
+    if (Number.isFinite(Number(row?.legacy_score))) parts.push(`Legacy ${n(row.legacy_score)} | legacy_threshold_margin ${n(row.legacy_threshold_margin)}`);
+    if (Number.isFinite(Number(row?.v2_score))) parts.push(`V2 ${n(row.v2_score)} | v2_threshold_margin ${n(row.v2_threshold_margin)}`);
+    return parts.length ? `并排审计分数：${parts.join(" | ")}` : "";
+  };
+
+  const csV2SoftLine = (row) => {
+    const hasBase = Number.isFinite(Number(row?.v2_base_score_raw)) || Number.isFinite(Number(row?.v2_base_score_soft)) || Number.isFinite(Number(row?.v2_base_score));
+    const hasGate = Number.isFinite(Number(row?.v2_fatigue_gate_raw)) || Number.isFinite(Number(row?.v2_fatigue_gate_soft)) || Number.isFinite(Number(row?.v2_fatigue_gate));
+    const hasComponents =
+      Number.isFinite(Number(row?.v2_context_cover_score)) ||
+      Number.isFinite(Number(row?.v2_context_cover_soft_score)) ||
+      Number.isFinite(Number(row?.v2_order_alignment_score)) ||
+      Number.isFinite(Number(row?.v2_order_alignment_soft_score)) ||
+      Number.isFinite(Number(row?.v2_tail_match_score)) ||
+      Number.isFinite(Number(row?.v2_tail_match_soft_score));
+    const lines = [];
+    if (hasBase) lines.push(`V2 基础分：raw ${n(row?.v2_base_score_raw)} -> soft ${n(row?.v2_base_score_soft)} -> blended ${n(row?.v2_base_score)}`);
+    if (hasGate) lines.push(`V2 疲劳门控：raw ${n(row?.v2_fatigue_gate_raw)} -> soft ${n(row?.v2_fatigue_gate_soft)} -> applied ${n(row?.v2_fatigue_gate)}`);
+    if (hasComponents) {
+      lines.push(
+        `V2 子项柔化：context ${n(row?.v2_context_cover_score)} -> ${n(row?.v2_context_cover_soft_score)} | ` +
+        `order ${n(row?.v2_order_alignment_score)} -> ${n(row?.v2_order_alignment_soft_score)} | ` +
+        `tail ${n(row?.v2_tail_match_score)} -> ${n(row?.v2_tail_match_soft_score)}`
+      );
+    }
+    return lines.join("\n");
+  };
+
+  const csRejectedReasonSummary = Object.entries(csCandidateAudit.rejected_reason_counts || {})
+    .sort((l, r) => (+r?.[1] || 0) - (+l?.[1] || 0))
+    .map(([reason, count]) => `${csRejectedReasonLabel(reason)} ${count}`)
+    .join(" / ");
 
   const csNarrativeRows = csTop.map((item, idx) => {
     const title =
@@ -2538,27 +3161,62 @@ function flow() {
     return { title, desc };
   });
 
-  const csActionRows = csActions.slice(0, 16).map((action) => ({
-    title: `${csActionFamilyLabel(action.action_family, action.action)} · score ${n(action.score)} · absorb_ratio ${n(action.absorb_ratio)}`,
-    desc:
-      `事件 ${action.event_display || action.event_ref_id || "-"}\n` +
-      `事件引用签名（event_ref_id）${action.event_ref_id || "-"} | 事件结构ID（HDB structure_id）${action.event_structure_id || "-"}\n` +
-      `组分数量（component_count）${action.event_component_count || 0}\n` +
-      `来源（source）${action.source_kind || "-"}: ${action.source_display || action.source_ref_id || "-"}\n` +
-      `目标（target）${action.target_kind || "-"}: ${action.target_display || action.target_ref_id || "-"}\n` +
-      `匹配模式（match_mode）${action.match_mode || "-"} | 匹配跨度（matched_span）${action.matched_span ?? 0} | 前缀组分（prefix_components）${action.prefix_components ?? 0}\n` +
-      `上下文命中数量（context_k）${action.context_k ?? 0} | 最近距离（context_distance）${action.context_distance ?? 0} | 边权重占比（edge_weight_ratio）${n(action.edge_weight_ratio)}\n` +
-      `吸收能量（absorbed）ER ${n(action.absorbed_er)} / EV ${n(action.absorbed_ev)} | 总 ${n(action.absorbed_total)}\n` +
-      `疲劳（fatigue）${n(action.fatigue_before)} -> ${n(action.fatigue_after)}`,
-  }));
+  const csActionRows = csActions.slice(0, 16).map((action) => {
+    const isConcat = String(action.action_family || "") === "concat_context_structure";
+    return {
+      title: `${csActionFamilyLabel(action.action_family, action.action)} · score ${n(action.score)} · absorb_ratio ${n(action.absorb_ratio)}`,
+      desc:
+        (isConcat
+          ? `结构 ${action.structure_display || action.structure_id || "-"}\n` +
+            `结构ID（HDB structure_id）${action.structure_id || "-"} | 运行态 item ${action.structure_item_id || "-"}\n` +
+            `上下文 owner ${action.context_owner_id || "-"} | context_ref ${action.context_ref_object_id || "-"}\n`
+          : `事件 ${action.event_display || action.event_ref_id || "-"}\n` +
+            `事件引用签名（event_ref_id）${action.event_ref_id || "-"} | 事件结构ID（HDB structure_id）${action.event_structure_id || "-"}\n` +
+            `组分数量（component_count）${action.event_component_count || 0}\n`) +
+        `来源（source）${action.source_kind || "-"}: ${action.source_display || action.source_ref_id || "-"}\n` +
+        `目标（target）${action.target_kind || "-"}: ${action.target_display || action.target_ref_id || "-"}\n` +
+        `匹配模式（match_mode）${action.match_mode || "-"} | 匹配跨度（matched_span）${action.matched_span ?? 0} | 前缀组分（prefix_components）${action.prefix_components ?? 0}\n` +
+        `上下文命中数量（context_k）${action.context_k ?? 0} | 上下文命中比例（context_ratio）${n(action.context_ratio)} | 最近距离（context_distance）${action.context_distance ?? 0}\n` +
+        `边权重占比（edge_weight_ratio）${n(action.edge_weight_ratio)} | 匹配强度（match_strength）${n(action.match_strength)} | 能量均衡（energy_balance）${n(action.energy_balance)} | 运行均衡（runtime_balance）${n(action.runtime_balance)}\n` +
+        `${csScoreBreakdownLine(action)}\n` +
+        `${csScaleLine(action)}\n` +
+        `${csExecutionModeLine(action)}${csParallelScoreLine(action) ? `\n${csParallelScoreLine(action)}` : ""}${csV2SoftLine(action) ? `\n${csV2SoftLine(action)}` : ""}\n` +
+        `吸收能量（absorbed）ER ${n(action.absorbed_er)} / EV ${n(action.absorbed_ev)} | 总 ${n(action.absorbed_total)}\n` +
+        `疲劳（fatigue）${n(action.fatigue_before)} -> ${n(action.fatigue_after)}`,
+    };
+  });
 
   const csCandidateRows = csCandidates.slice(0, 12).map((cand, idx) => ({
     title: `候选 ${idx + 1} · ${csActionFamilyLabel(cand.action_type, "")} · score ${n(cand.score)}`,
     desc:
       `来源（source）${cand.source_kind || "-"}: ${cand.source_display || "-"}\n` +
       `目标（target）${cand.target_kind || "-"}: ${cand.target_display || "-"}\n` +
-      `匹配模式（match_mode）${cand.match_mode || "-"} | 上下文命中数量（context_k）${cand.context_k ?? 0} | 匹配跨度（matched_span）${cand.matched_span ?? 0}\n` +
-      `边权重占比（edge_weight_ratio）${n(cand.edge_weight_ratio)} | 匹配强度（match_strength）${n(cand.match_strength)} | 疲劳（fatigue_before）${n(cand.fatigue_before)}`,
+      `${cand.result_display ? `结果结构（result）${cand.result_display} | context_owner ${cand.context_owner_id || "-"}\n` : ""}` +
+      `匹配模式（match_mode）${cand.match_mode || "-"} | 上下文命中数量（context_k）${cand.context_k ?? 0} | 上下文命中比例（context_ratio）${n(cand.context_ratio)} | 匹配跨度（matched_span）${cand.matched_span ?? 0}\n` +
+      `边权重占比（edge_weight_ratio）${n(cand.edge_weight_ratio)} | 匹配强度（match_strength）${n(cand.match_strength)} | 路径支持 ${n(cand.path_support_score)} | 尾部命中 ${n(cand.last_token_score)} | 能量均衡（energy_balance）${n(cand.energy_balance)} | 运行均衡（runtime_balance）${n(cand.runtime_balance)}\n` +
+      `${csScoreBreakdownLine(cand)}\n` +
+      `${csScaleLine(cand)}\n` +
+      `${csExecutionModeLine(cand)}${csParallelScoreLine(cand) ? `\n${csParallelScoreLine(cand)}` : ""}${csV2SoftLine(cand) ? `\n${csV2SoftLine(cand)}` : ""}\n` +
+      `疲劳前值（fatigue_before）${n(cand.fatigue_before)} | 桥接跨度比例（bridge_span_ratio）${n(cand.bridge_span_ratio)}`,
+  }));
+
+  const csAuditRejectionRows = a(csCandidateAudit.rejection_preview).slice(0, 10).map((item, idx) => ({
+    title: `淘汰 ${idx + 1} · ${csRejectedReasonLabel(item.reason)}${item.action_type ? ` · ${csActionFamilyLabel(item.action_type, "")}` : ""}`,
+    desc:
+      `来源 ${item.source_display || "-"} -> 目标 ${item.target_display || "-"}\n` +
+      `匹配模式 ${item.match_mode || "-"} | 分数 ${n(item.score)} / 最低阈值 ${n(item.min_candidate_score)} | 阈值余量 ${n(item.threshold_margin)}\n` +
+      `基础分 ${n(item.base_score)} | 边权占比 ${n(item.edge_weight_ratio)} | 匹配强度 ${n(item.match_strength)} | 上下文比例 ${n(item.context_ratio)}\n` +
+      `${csExecutionModeLine(item)}${csParallelScoreLine(item) ? `\n${csParallelScoreLine(item)}` : ""}${csV2SoftLine(item) ? `\n${csV2SoftLine(item)}` : ""}\n` +
+      `能量均衡 ${n(item.energy_balance)} | 运行均衡 ${n(item.runtime_balance)} | 桥接跨度 ${n(item.bridge_span_ratio)} | 锚点缩放 ${n(item.anchor_scale)} | 疲劳缩放 ${n(item.fatigue_scale)}${item.max_component_count ? `\n组分数 ${item.new_component_count || 0} / 上限 ${item.max_component_count}` : ""}`,
+  }));
+
+  const csAuditCompetitionRows = a(csCandidateAudit.competition_preview).slice(0, 10).map((item, idx) => ({
+    title: `竞争 ${idx + 1} · ${csCompetitionLabel(item.outcome)} · incoming ${n(item.incoming_score)} / existing ${n(item.existing_score)}`,
+    desc:
+      `签名 ${item.candidate_signature || "-"}\n` +
+      `新候选 ${item.incoming_source_display || "-"} -> ${item.incoming_target_display || "-"}\n` +
+      `旧候选 ${item.existing_source_display || "-"} -> ${item.existing_target_display || "-"}\n` +
+      `动作 ${csActionFamilyLabel(item.action_type, "")} | 匹配模式 ${item.match_mode || "-"}`,
   }));
 
   const csDegenerationActionRows = csDegenerationActions.slice(0, 12).map((act, idx) => ({
@@ -2571,9 +3229,16 @@ function flow() {
       `移除组分（removed_component_refs）${listOr(act.removed_component_refs, "（无）", " / ")}\n` +
       `保留组分（kept_component_refs）${listOr(act.kept_component_refs, "（无）", " / ")}`,
   }));
+  const contextActiveCount = +(finalStateSnapshot.summary?.active_item_count || 0);
+  const contextItemRatio = contextActiveCount > 0 ? (+finalStateSnapshot.summary?.contextual_item_count || 0) / contextActiveCount : 0;
+  const residualItemRatio = contextActiveCount > 0 ? (+finalStateSnapshot.summary?.residual_origin_item_count || 0) / contextActiveCount : 0;
+  const hdbContextualCount = +(finalHdbSummary.contextual_structure_count || 0);
+  const hdbDiffCount = +(finalHdbSummary.diff_entry_count || 0);
+  const sameContentContextRatio = hdbContextualCount > 0 ? (+finalHdbSummary.same_content_multi_context_count || 0) / hdbContextualCount : 0;
+  const residualDiffRatio = hdbDiffCount > 0 ? (+finalHdbSummary.residual_diff_entry_count || 0) / hdbDiffCount : 0;
 
   E.flowTimeline.innerHTML = [
-    fBlock("0. 新手总览（类人感受与闭环）", "把“违和感/期待/压力/惊/正确感/把握感”等认知感受做成一眼可读的面板，便于你公开到 GitHub 后让新测试者快速理解系统在“感受什么”。", [
+    stepBlock("新手总览（类人感受与闭环）", "把“违和感/期待/压力/惊/正确感/把握感”等认知感受做成一眼可读的面板，便于新测试者快速理解系统此刻在‘感受什么’。", [
       dCard("关键认知感受（重点）", rows(importantFeelingRows, "本轮没有认知感受信号。")),
       dCard("认知感受按类型汇总（Top kinds）", rows(kindSummaryRows, "本轮没有认知感受信号。")),
       dCard("实能量与虚能量平衡控制器（Energy Balance Controller，缩写 EBC，可插拔）", rows([
@@ -2581,7 +3246,7 @@ function flow() {
       ], "本轮没有 EBC 数据。")),
     ]),
 
-    fBlock("1. 状态池维护", "先做衰减、中和、淘汰与合并。", [
+    stepBlock("状态池维护", "先做衰减、中和、淘汰与合并。", [
       dCard("维护账本", [
         card("维护前 / 后", `${maintenance.before_summary?.active_item_count || 0} / ${maintenance.after_summary?.active_item_count || 0}`, "状态池对象数量变化"),
         card("衰减 / 中和", `${maintenance.summary?.decayed_item_count || 0} / ${maintenance.summary?.neutralized_item_count || 0}`, "本轮维护触发次数"),
@@ -2598,15 +3263,28 @@ function flow() {
       })), "本轮维护没有记录额外事件。")),
     ]),
 
+    stepBlock("激活/旧上下文审计", "这一步不改变算法本身，只把旧 residual/context/provenance 元数据摊开。新版 growth 主链下，正式对象身份仍以完整特征解析为准；这里的 owner/ref/path 只用于激活来源和回滚诊断。", [
+      dCard("审计摘要", [
+        card("状态池旧上下文元数据", `${finalStateSnapshot.summary?.contextual_item_count || 0}`, `多级路径 ${finalStateSnapshot.summary?.multi_context_item_count || 0} | 平均深度 ${n(finalStateSnapshot.summary?.context_path_depth_mean)}`),
+        card("状态池残差来源审计", `${finalStateSnapshot.summary?.residual_origin_item_count || 0}`, "还能追溯到旧残差链；用于审计激活路径，不代表正式结构身份。"),
+        card("HDB 旧上下文结构", `${finalHdbSummary.contextual_structure_count || 0}`, `同内容多上下文 ${finalHdbSummary.same_content_multi_context_count || 0}`),
+        card("HDB 残差索引", `${finalHdbSummary.residual_diff_entry_count || 0}`, `diff 总数 ${finalHdbSummary.diff_entry_count || 0} | 带记忆引用 ${finalHdbSummary.diff_entry_with_memory_ref_count || 0}`),
+        card("旧上下文元数据占比", n(contextItemRatio), `残差来源占比 ${n(residualItemRatio)} | 只作兼容/审计，不作新版身份标准。`),
+        card("HDB 分流 / 局部性占比", `${n(sameContentContextRatio)} / ${n(residualDiffRatio)}`, "前者审计旧同内容多 context 残留，后者看数据库内部 diff 是否仍沿残差局部路径传播。"),
+      ].join(""), "detail-grid"),
+      dCard("状态池前排样本", rows(contextAuditPoolRows, "当前前排状态池对象还没有显式上下文/残差链样本。")),
+      dCard("HDB 最近结构样本", rows(contextAuditStructureRows, "当前最近结构里还没有显式上下文/残差链样本。")),
+    ]),
+
     showCognitiveStitchingPanel
-      ? fBlock("2. 认知拼接（Cognitive Stitching，缩写 CS）", "在状态池维护之后，把多个结构对象或事件对象拼接成更长的事件链，形成可叙事的“当前认知候选”。字段解释：实能量（Reality Energy，缩写 ER）、虚能量（Virtual Energy，缩写 EV）、认知压力（Cognitive Pressure，缩写 CP）。", [
+      ? stepBlock("认知拼接（Cognitive Stitching，缩写 CS）", "在状态池维护之后，把多个结构对象或事件对象拼接成更长的事件链，形成可叙事的‘当前认知候选’。字段解释：实能量（ER）、虚能量（EV）、认知压力（CP）。", [
           dCard("认知拼接账本（Summary）", [
             card("启用（enabled）", y(cs.enabled), `状态（reason）${cs.reason || "-"} | 返回码（code）${cs.code || "-"} | message ${cs.message || "-"}`),
             card("种子对象（seed）", cs.seed_structure_count || 0, `结构对象 ${cs.seed_plain_structure_count || 0} | 事件对象 ${cs.seed_event_count || 0}`),
             card(
               "候选/动作（candidates/actions）",
               `${cs.candidate_count || 0} / ${cs.action_count || 0}`,
-              `新建 ${cs.created_count || 0} | 扩展 ${cs.extended_count || 0} | 合并 ${cs.merged_count || 0} | 强化 ${cs.reinforced_count || 0}`,
+              `上下文拼接 ${cs.concat_count || 0} | 新建事件 ${cs.created_count || 0} | 扩展 ${cs.extended_count || 0} | 合并 ${cs.merged_count || 0} | 强化 ${cs.reinforced_count || 0}`,
             ),
             card(
               "事件结构数据库（Event Structure DataBase，缩写 ESDB）",
@@ -2617,7 +3295,7 @@ function flow() {
             card(
               "事件把握感（event_grasp）",
               csEventGrasp.emitted_count ?? "-",
-              `selected ${csEventGrasp.selected_event_count ?? "-"} | reason ${csEventGrasp.reason || "-"}`,
+              `selected ${csEventGrasp.selected_event_count ?? "-"} | CAM seed ${csEventGrasp.cam_seed_count ?? "-"} | post-CS seed ${csEventGrasp.post_action_seed_count ?? "-"} | mode ${csEventGrasp.focus_mode || "-"} | reason ${csEventGrasp.reason || "-"}`,
             ),
           ].join(""), "detail-grid"),
           dCard("事件退化账本（Event Degeneration Summary）", [
@@ -2629,13 +3307,23 @@ function flow() {
             ),
           ].join(""), "detail-grid"),
           dCard("事件退化动作预览（Actions Preview）", rows(csDegenerationActionRows, "本轮没有发生事件退化（可能是没有弱组分，或已低于最少保留组分数）。")),
+          dCard("候选评分审计（Candidate Audit）", [
+            card("通过硬门槛的原始候选", csCandidateAudit.raw_accepted_count || 0, "已经过组分上限、边权有效性与最低分阈值三道硬门槛。"),
+            card("去重后保留候选", csCandidateAudit.deduped_candidate_count || 0, `同签名裁剪 ${csCandidateAudit.deduped_pruned_count || 0} | 最终动作 ${cs.action_count || 0}`),
+            card("被淘汰候选", csCandidateAudit.rejected_count || 0, csRejectedReasonSummary || "当前没有记录淘汰原因。"),
+            card("同签名竞争", `${csCandidateAudit.replacement_count || 0} / ${csCandidateAudit.kept_existing_count || 0}`, "前者表示新候选顶掉旧候选；后者表示旧候选守住名额。"),
+            card("平均最终分 / 阈值余量", `${n(csCandidateAudit.score_means?.score)} / ${n(csCandidateAudit.score_means?.threshold_margin)}`, `基础分 ${n(csCandidateAudit.score_means?.base_score)} | 锚点缩放 ${n(csCandidateAudit.score_means?.anchor_scale)} | 疲劳缩放 ${n(csCandidateAudit.score_means?.fatigue_scale)}`),
+            card("平均匹配质量", `${n(csCandidateAudit.score_means?.match_strength)} / ${n(csCandidateAudit.score_means?.context_ratio)}`, `边权占比 ${n(csCandidateAudit.score_means?.edge_weight_ratio)} | 能量均衡 ${n(csCandidateAudit.score_means?.energy_balance)} | 运行均衡 ${n(csCandidateAudit.score_means?.runtime_balance)}`),
+          ].join(""), "detail-grid"),
           dCard("当前拼接事件能量 Top-N（叙事化视图）", rows(csNarrativeRows, "当前状态池里没有认知拼接事件对象（可能是能量不足或本轮没有拼接）。")),
           dCard("本轮拼接动作（最新动作）", rows(csActionRows, "本轮没有发生事件新建/扩展/合并动作。")),
-          dCard("候选预览（Candidate Preview）", rows(csCandidateRows, "本轮没有候选（可能是种子能量不足或阈值过高）。")),
+          dCard("候选预览（Candidate Preview）", rows(csCandidateRows, "本轮没有候选（可能是种子能量不足，或在最低分阈值前就被刷掉了）。")),
+          dCard("被阈值刷掉的候选（Top）", rows(csAuditRejectionRows, "本轮没有记录被淘汰的候选。若候选数长期为 0，请优先检查种子能量、扩展边权重与最低候选阈值。")),
+          dCard("同签名竞争记录（Top）", rows(csAuditCompetitionRows, "本轮没有发生同签名竞争；说明候选之间目前还不够拥挤，或大多属于不同拼接结果。")),
         ])
       : "",
 
-    fBlock("3. 注意力滤波（Attention Filter，缩写 AF）", "聚焦优先 + 动态阈值抑制 + 有代价抽取，形成当前注意记忆体（Current Attention Memory，缩写 CAM）。", [
+    stepBlock("注意力滤波（Attention Filter，缩写 AF）", "聚焦优先 + 动态阈值抑制 + 有代价抽取，形成当前注意记忆体（Current Attention Memory，缩写 CAM）。", [
       dCard("注意力账本", [
         card(
           "候选 / 入选",
@@ -2652,8 +3340,13 @@ function flow() {
           `focus ${attention.selected_by_counts?.focus_directive || 0} / cutoff ${attention.selected_by_counts?.cutoff || 0}`,
           `min_keep ${attention.selected_by_counts?.min_keep || 0}`,
         ),
-        card("抽取比例", n(attention.consume_ratio), y(attention.consume_enabled)),
-        card("抽取消耗", `ER ${n(attention.consumed_total_er)} / EV ${n(attention.consumed_total_ev)}`, `总消耗 ${n(attention.consumed_total_energy)}`),
+          card("抽取比例", n(attention.consume_ratio), y(attention.consume_enabled)),
+          card("抽取消耗", `ER ${n(attention.consumed_total_er)} / EV ${n(attention.consumed_total_ev)}`, `总消耗 ${n(attention.consumed_total_energy)}`),
+          card(
+            "CAM 中残差运行态对象",
+            a(attention.top_items).filter(isResidualMemoryRuntimeItem).length,
+            `运行态投影 ${memoryRuntimeProjectionSummary.inserted_count || 0} | shadow ${y(memoryRuntimeShadowMode)}`,
+          ),
         card(
           "进入结构级查存的结构对象（Structure，缩写 ST）",
           a(attention.structure_items).length,
@@ -2662,12 +3355,12 @@ function flow() {
       ].join(""), "detail-grid"),
       dCard("CAM 明细（入选对象）", rows(a(attention.top_items).slice(0, 12).map((item) => ({
         title: fmtStateTitle(item),
-        desc: `来源 ${item.selected_by || "-"} | focus_boost ${n(item.focus_boost)} | priority ${n(item.attention_priority)}\n对象 ${item.ref_object_id || item.structure_id || item.item_id || "-"} | ER ${n(item.er)} | EV ${n(item.ev)} | CP ${n(item.cp_abs)} | Total ${n(te(item))}\n结构模式 ${item.structure_sequence_mode || "-"} | GoalB 混合结构 ${y(item.goal_b_mixed_structure)}\nfatigue ${n(item.fatigue)} | recency ${n(item.recency_gain)} | 更新 ${item.update_count || 0} 次${item.memory_er !== undefined ? `\n抽取: 池前 ER ${n(item.pool_before_er)} / EV ${n(item.pool_before_ev)} -> 抽取 ER ${n(item.memory_er)} / EV ${n(item.memory_ev)} -> 池后 ER ${n(item.pool_after_er)} / EV ${n(item.pool_after_ev)}` : ""}`,
+        desc: `来源 ${item.selected_by || "-"} | focus_boost ${n(item.focus_boost)} | priority ${n(item.attention_priority)}${item.attention_priority_base !== undefined ? `（base ${n(item.attention_priority_base)} + RA ${n(item.reward_action_bonus ?? 0)}）` : ""}\n对象 ${item.ref_object_id || item.structure_id || item.item_id || "-"} | ER ${n(item.er)} | EV ${n(item.ev)} | CP ${n(item.cp_abs)} | Total ${n(te(item))}\n结构模式 ${item.structure_sequence_mode || "-"} | GoalB 混合结构 ${y(item.goal_b_mixed_structure)}\nfatigue ${n(item.fatigue)} | recency ${n(item.recency_gain)} | 更新 ${item.update_count || 0} 次${item.memory_er !== undefined ? `\n抽取: 池前 ER ${n(item.pool_before_er)} / EV ${n(item.pool_before_ev)} -> 抽取 ER ${n(item.memory_er)} / EV ${n(item.memory_ev)} -> 池后 ER ${n(item.pool_after_er)} / EV ${n(item.pool_after_ev)}` : ""}${item.reward_action_bonus_detail ? `\n奖惩/行动软增益 ${n(item.reward_action_bonus ?? 0)} | ${fmtScalarPlain(item.reward_action_bonus_detail)}` : ""}${hasContextMeta(item) ? `\n上下文 ${fmtContextSummary(item)}` : ""}${hasResidualMeta(item) ? `\n残差 ${fmtResidualSummary(item)}` : ""}`,
       })), "当前没有 CAM 入选对象。")),
     ]),
 
     showStructureLevelPanel
-      ? fBlock("4. 结构级查存一体（Structure-level Retrieval-Storage）", "结构级以结构对象（Structure，缩写 ST）粒度做链式查存、局部库存储和残差下沉。", [
+      ? stepBlock("结构级查存一体（Structure-level Retrieval-Storage）", "结构级以结构对象（Structure，缩写 ST）粒度做链式查存、局部库存储和残差下沉。", [
       dCard("命中与预算 / Matches & Budget", [
         card("CAM 结构数", structureLevel.cam_stub_count || 0, `轮次 ${structureLevel.round_count || 0}`),
         card("命中结构组", a(structureLevel.matched_group_ids).length, listOr(structureLevel.matched_group_ids, "无", ", ")),
@@ -2686,8 +3379,8 @@ function flow() {
       ])
       : "",
 
-    fBlock(
-      "5. 完整刺激合流",
+    stepBlock(
+      "完整刺激合流",
       "外源刺激与内源刺激在这里合流。内源刺激来源：若启用结构级查存一体，则使用结构级输出的内源片段；若关闭结构级查存一体，则把当前注意记忆体（Current Attention Memory，缩写 CAM）直接构造成内源共现刺激包（并通过内源分辨率预算 DARL+PARS 做成本约束）。",
       [
       dCard("完整刺激账本", [
@@ -2701,11 +3394,11 @@ function flow() {
         card("来源统计（source_type_counts）", fmtKvInline(mergedStimulus.source_type_counts || {}), "按 unit.source_type 统计，用于检查外源/内源混入与来源比例。"),
       ].join(""), "detail-grid"),
       dCard("刺激组明细", rows(a(mergedStimulus.groups).map(fmtStimulusGroup), "当前完整刺激为空。")),
-      dCard("刺激单元明细", rows(a(mergedStimulus.feature_units).map(fmtSensorUnit), "当前没有刺激单元。")),
+      dCard("刺激单元明细", `<div class="scroll-shell">${rows(a(mergedStimulus.feature_units).map(fmtSensorUnit), "当前没有刺激单元。")}</div>`),
     ],
     ),
 
-    fBlock("6. 缓存中和", "完整刺激在进入刺激级查存一体之前，会先做缓存中和（优先中和事件会消耗对向能量，避免把明显可中和的部分带入学习）。", [
+    stepBlock("缓存中和", "完整刺激在进入刺激级查存一体之前，会先做缓存中和。这里先用结构级软匹配找缓存锚点，再把真正的中和结算落到命中的 SA 上，用来降低认知压并减少后续无谓学习。", [
       dCard("中和指标 / Neutralization", [
         card("缓存中和", cache.priority_summary?.priority_neutralized_item_count || 0, `事件 ${a(cache.priority_events).length}`),
         card("包体差额", `ER ${n(cache.priority_summary?.consumed_er)} / EV ${n(cache.priority_summary?.consumed_ev)}`, `tokens ${cache.priority_summary?.input_flat_token_count || 0} -> ${cache.priority_summary?.residual_flat_token_count || 0}`),
@@ -2720,7 +3413,7 @@ function flow() {
           target_item_id: event.target_item_id,
           target_display: event.target_display,
         })} · ${event.event_type || "priority_stimulus_neutralization"}`,
-        desc: `匹配签名 ${event.matched_structure_signature || "-"}\nmatched_tokens ${listOr(event.extra_context?.matched_tokens, "-", " / ")}\n消耗 ${(event.extra_context?.consumed_energy_key || "energy")} ${n(event.extra_context?.consumed_amount)} | 原因 ${event.reason || "-"}`,
+        desc: `匹配签名 ${event.matched_structure_signature || "-"}\n匹配内容 ${listOr(event.extra_context?.matched_tokens, "-", " / ")}\n结算 SA ${event.extra_context?.sa_settled_count || 0}/${event.extra_context?.sa_target_count || 0} | ER ${n(event.extra_context?.consumed_er)} / EV ${n(event.extra_context?.consumed_ev)} | 原因 ${event.reason || "-"}`,
       })), "本轮没有缓存中和事件。")),
       dCard(
         "缓存中和诊断 / Diagnostics",
@@ -2734,11 +3427,18 @@ function flow() {
 
   const stimulusBlocksEnhanced = a(stimulusDebug.round_details).length ? a(stimulusDebug.round_details).map((round) => {
     const selected = round.selected_match;
-    return `<article class="detail-card nested"><h5>刺激级 Round ${esc(round.round_index || 0)}</h5><div class="kv-list"><div class="kv-row"><div class="k">锚点 / Anchor</div><div class="v">${round.anchor_unit ? htmlLines([`${round.anchor_unit.display || round.anchor_unit.token || "-"} | ${round.anchor_unit.role || round.anchor_unit.unit_kind || "-"} | source ${round.anchor_unit.source_type || "-"} | group ${round.anchor_unit.group_index ?? "-"} | seq ${round.anchor_unit.sequence_index ?? "-"} | ER ${n(round.anchor_unit.er)} | EV ${n(round.anchor_unit.ev)} | punct ${y(round.anchor_unit.is_punctuation)}`]) : "无 / None"}</div></div><div class="kv-row"><div class="k">局部工作组 / Focus Group</div><div class="v">${htmlLines([`${round.focus_group_text_before || "-"} | group ${round.focus_group_index ?? "-"} | source ${round.focus_group_source_type || "-"}`])}</div></div><div class="kv-row"><div class="k">轮前残余 / Remaining Before</div><div class="v">${htmlLines([`${round.remaining_grouped_text_before || listOr(round.remaining_tokens_before, "空 / Empty", " / ")} | ER ${n(round.remaining_total_er_before)} | EV ${n(round.remaining_total_ev_before)}`])}</div></div><div class="kv-row"><div class="k">候选来源 / Candidate Source</div><div class="v">${htmlLines([`${round.candidate_lookup_source || "-"} | ${a(round.candidate_signature_hits).map((hit) => `${hit.signature || "-"}:${hit.candidate_count || 0}`).join(" | ") || "无 / None"}`])}</div></div><div class="kv-row"><div class="k">链式打开 / Chain</div><div class="v">${fmtChain(round.chain_steps, "stimulus")}</div></div><div class="kv-row"><div class="k">命中结构 / Selected</div><div class="v">${selected ? htmlLines([`${pickGroupedText(selected, selected.structure_id || "-")} (${selected.structure_id || "-"}) | mode ${selected.match_mode || "-"} | exact ${y(selected.exact_match)} | full ${y(selected.full_structure_included)} | sigma ${n(selected.similarity_score)} | match ${n(selected.match_score)} | coverage ${n(selected.coverage_ratio)} | structure_ratio ${n(selected.structure_match_ratio)} | score ${n(selected.competition_score ?? selected.match_score)} | runtime ${n(selected.runtime_weight)}`]) : "本轮未命中结构 / No match"}</div></div><div class="kv-row"><div class="k">权重前后 / Weights</div><div class="v">${htmlLines([`${stText(round.structure_stats_before)} -> ${stText(round.structure_stats_after)}`])}</div></div><div class="kv-row"><div class="k">覆盖范围 / Coverage</div><div class="v">${htmlLines([`[${(round.covered_range || [])[0] ?? 0}, ${(round.covered_range || [])[1] ?? 0}) | tokens ${listOr(round.covered_tokens, "-", " / ")}`])}</div></div><div class="kv-row"><div class="k">能量转移 / Energy Transfer</div><div class="v">${htmlLines([`competition ${n(round.effective_transfer_fraction)} | sigma ${n(round.transfer_similarity)} | ER ${n(round.transferred_er)} | EV ${n(round.transferred_ev)}`])}</div></div><div class="kv-row"><div class="k">新建共同结构 / New Common</div><div class="v">${round.created_common_structure ? htmlLines([`${pickGroupedText(round.created_common_structure, round.created_common_structure.structure_id || "-")} (${round.created_common_structure.structure_id || "-"}) | ${stText(round.created_common_structure.stats)}`]) : "无 / None"}</div></div><div class="kv-row"><div class="k">新建残差信息 / New Residual</div><div class="v">${round.created_residual_structure ? fmtResidualMemory(round.created_residual_structure) : "无 / None"}</div></div><div class="kv-row"><div class="k">扩展结构路径 / Fresh Path</div><div class="v">${round.created_fresh_structure ? htmlLines([`${pickGroupedText(round.created_fresh_structure, round.created_fresh_structure.structure_id || "-")} (${round.created_fresh_structure.structure_id || "-"}) | ${stText(round.created_fresh_structure.stats)}`]) : "无 / None"}</div></div><div class="kv-row"><div class="k">轮后残余 / Remaining After</div><div class="v">${htmlLines([`${round.remaining_grouped_text_after || listOr(round.remaining_tokens_after, "空 / Empty", " / ")} | ER ${n(round.remaining_total_er_after)} | EV ${n(round.remaining_total_ev_after)}`])}</div></div></div><div class="sub-section"><div class="sub-title">候选结构 / Candidate Structures</div>${rows(a(round.candidate_details).slice(0, 8).map((item) => ({ title: `${pickGroupedText(item, item.structure_id || "-")} | score ${n(item.competition_score ?? item.match_score)}`, desc: `${item.structure_id || "-"} | mode ${item.match_mode || "-"} | exact ${y(item.exact_match)} | full ${y(item.full_structure_included)}\nsigma ${n(item.similarity_score)} | match ${n(item.match_score)} | coverage ${n(item.coverage_ratio)} | structure_ratio ${n(item.structure_match_ratio)}\nruntime ${n(item.runtime_weight)} | entry_runtime ${n(item.entry_runtime_weight)} | depth ${item.chain_depth ?? 0} | anchor ${y(item.contains_anchor)} | eligible ${y(item.eligible)} | owner ${item.owner_structure_id || item.parent_structure_id || "-"}\ncommon ${fmtCommon(item.common_part)}\n${stText(item.stats)}` })), "本轮没有候选结构 / No candidates.")}</div></article>`;
+    const selectedLines = selected
+      ? [
+          `${pickGroupedText(selected, selected.structure_id || "-")} (${selected.structure_id || "-"}) | mode ${selected.match_mode || "-"} | exact ${y(selected.exact_match)} | full ${y(selected.full_structure_included)} | sigma ${n(selected.similarity_score)} | match ${n(selected.match_score)} | coverage ${n(selected.coverage_ratio)} | structure_ratio ${n(selected.structure_match_ratio)} | score ${n(selected.competition_score ?? selected.match_score)} | runtime ${n(selected.runtime_weight)}`,
+          fmtRetrievalScoreAudit(selected, stimulusScoreAuditOptions),
+          fmtRetrievalV2Breakdown(selected),
+        ].filter(Boolean)
+      : null;
+    return `<article class="detail-card nested"><h5>刺激级 Round ${esc(round.round_index || 0)}</h5><div class="kv-list"><div class="kv-row"><div class="k">锚点 / Anchor</div><div class="v">${round.anchor_unit ? htmlLines([`${round.anchor_unit.display || round.anchor_unit.token || "-"} | ${round.anchor_unit.role || round.anchor_unit.unit_kind || "-"} | source ${round.anchor_unit.source_type || "-"} | group ${round.anchor_unit.group_index ?? "-"} | seq ${round.anchor_unit.sequence_index ?? "-"} | ER ${n(round.anchor_unit.er)} | EV ${n(round.anchor_unit.ev)} | punct ${y(round.anchor_unit.is_punctuation)}`]) : "无 / None"}</div></div><div class="kv-row"><div class="k">局部工作组 / Focus Group</div><div class="v">${htmlLines([`${round.focus_group_text_before || "-"} | group ${round.focus_group_index ?? "-"} | source ${round.focus_group_source_type || "-"}`])}</div></div><div class="kv-row"><div class="k">轮前残余 / Remaining Before</div><div class="v">${htmlLines([`${round.remaining_grouped_text_before || listOr(round.remaining_tokens_before, "空 / Empty", " / ")} | ER ${n(round.remaining_total_er_before)} | EV ${n(round.remaining_total_ev_before)}`])}</div></div><div class="kv-row"><div class="k">候选来源 / Candidate Source</div><div class="v">${htmlLines([`${round.candidate_lookup_source || "-"} | ${a(round.candidate_signature_hits).map((hit) => `${hit.signature || "-"}:${hit.candidate_count || 0}`).join(" | ") || "无 / None"}`])}</div></div><div class="kv-row"><div class="k">链式打开 / Chain</div><div class="v">${fmtChain(round.chain_steps, "stimulus")}</div></div><div class="kv-row"><div class="k">命中结构 / Selected</div><div class="v">${selectedLines ? htmlLines(selectedLines) : "本轮未命中结构 / No match"}</div></div><div class="kv-row"><div class="k">权重前后 / Weights</div><div class="v">${htmlLines([`${stText(round.structure_stats_before)} -> ${stText(round.structure_stats_after)}`])}</div></div><div class="kv-row"><div class="k">覆盖范围 / Coverage</div><div class="v">${htmlLines([`[${(round.covered_range || [])[0] ?? 0}, ${(round.covered_range || [])[1] ?? 0}) | tokens ${listOr(round.covered_tokens, "-", " / ")}`])}</div></div><div class="kv-row"><div class="k">能量转移 / Energy Transfer</div><div class="v">${htmlLines([`competition ${n(round.effective_transfer_fraction)} | sigma ${n(round.transfer_similarity)} | ER ${n(round.transferred_er)} | EV ${n(round.transferred_ev)}`])}</div></div><div class="kv-row"><div class="k">新建共同结构 / New Common</div><div class="v">${round.created_common_structure ? htmlLines([`${pickGroupedText(round.created_common_structure, round.created_common_structure.structure_id || "-")} (${round.created_common_structure.structure_id || "-"}) | ${stText(round.created_common_structure.stats)}`]) : "无 / None"}</div></div><div class="kv-row"><div class="k">新建残差信息 / New Residual</div><div class="v">${round.created_residual_structure ? fmtResidualMemory(round.created_residual_structure) : "无 / None"}</div></div><div class="kv-row"><div class="k">扩展结构路径 / Fresh Path</div><div class="v">${round.created_fresh_structure ? htmlLines([`${pickGroupedText(round.created_fresh_structure, round.created_fresh_structure.structure_id || "-")} (${round.created_fresh_structure.structure_id || "-"}) | ${stText(round.created_fresh_structure.stats)}`]) : "无 / None"}</div></div><div class="kv-row"><div class="k">轮后残余 / Remaining After</div><div class="v">${htmlLines([`${round.remaining_grouped_text_after || listOr(round.remaining_tokens_after, "空 / Empty", " / ")} | ER ${n(round.remaining_total_er_after)} | EV ${n(round.remaining_total_ev_after)}`])}</div></div></div><div class="sub-section"><div class="sub-title">候选结构 / Candidate Structures</div>${rows(a(round.candidate_details).slice(0, 8).map((item) => ({ title: `${pickGroupedText(item, item.structure_id || "-")} | score ${n(item.competition_score ?? item.match_score)}`, desc: [`${item.structure_id || "-"} | mode ${item.match_mode || "-"} | exact ${y(item.exact_match)} | full ${y(item.full_structure_included)}`, `sigma ${n(item.similarity_score)} | match ${n(item.match_score)} | coverage ${n(item.coverage_ratio)} | structure_ratio ${n(item.structure_match_ratio)}`, `runtime ${n(item.runtime_weight)} | entry_runtime ${n(item.entry_runtime_weight)} | depth ${item.chain_depth ?? 0} | anchor ${y(item.contains_anchor)} | eligible ${y(item.eligible)} | owner ${item.owner_structure_id || item.parent_structure_id || "-"}`, `common ${fmtCommon(item.common_part)}`, fmtRetrievalScoreAudit(item, stimulusScoreAuditOptions), fmtRetrievalV2Breakdown(item), stText(item.stats)].filter(Boolean).join("\n") })), "本轮没有候选结构 / No candidates.")}</div></article>`;
   }).join("") : empty("本轮没有刺激级轮次细节 / No stimulus rounds.");
 
   E.flowTimeline.innerHTML += [
-    fBlock("7. 刺激级查存一体", "刺激级按 anchor 局部组做贪婪链式匹配。", [
+    stepBlock("刺激级查存一体", "刺激级按 anchor 局部组做贪婪链式匹配。", [
       dCard("匹配与切割", [
         card("轮次", stimulusLevel.round_count || 0, `剩余 SA ${stimulusLevel.remaining_stimulus_sa_count || 0}`),
         card("命中结构", a(stimulusLevel.matched_structure_ids).length, listOr(stimulusLevel.matched_structure_ids, "无", ", ")),
@@ -2751,7 +3451,35 @@ function flow() {
   ].join("");
 
   E.flowTimeline.innerHTML += [
-    fBlock("8. 状态池回写与结构投影", "刺激级结束后再统一回写剩余刺激与结构投影。", [
+    showEnergyGraphBlock ? stepBlock("能量图景二代", "默认每个 tick 只推进一轮：同一源做一次 ER 诱发，并让当前 EV 前沿只下传一层。只有把最大轮数调大时，这里才会出现同 tick 的后续重复诱发。", [
+      dCard("图景摘要", [
+        card("启用", y(induction.energy_graph_v2_enabled), `传播预算 EV ${n(induction.propagated_budget_total_ev)}`),
+        card("实际轮次 / 深度", `${induction.energy_graph_round_count_max || 0} / ${induction.energy_graph_depth_max || 0}`, `配置上限 ${energyGraphRoundLimitLabel} | 目标 ${a(induction.induction_targets).length}`),
+        card("前沿 / 剪枝", `${induction.energy_graph_frontier_generated_count || 0} / ${induction.energy_graph_frontier_pruned_count || 0}`, `终止于记忆残差 ${induction.energy_graph_terminal_memory_count || 0}`),
+        card("根源重复诱发", induction.energy_graph_root_reinduction_count || 0, `总 deltaEV ${n(induction.total_delta_ev)}`),
+      ].join(""), "detail-grid"),
+      dCard("层级直方图", rows(inductionLayerSummary ? [{ title: "层级分布", desc: inductionLayerSummary }] : [], "本轮没有层级直方图数据。")),
+      dCard("逐轮摘要", rows(inductionRoundSummaries.map((row) => ({
+        title: `第 ${row.round_index || "-"} 轮`,
+        desc:
+          `前沿 ${row.frontier_in_count || 0} -> ${row.frontier_out_count || 0} | ` +
+          `剪枝 ${row.frontier_pruned_count || 0} | 终止 ${row.frontier_memory_terminal_count || 0} | 根源重诱发 ${row.root_reinduction_count || 0}\n` +
+          `frontierEV ${n(row.frontier_budget_ev)} | rootInductionEV ${n(row.root_induction_budget_ev)} | deltaEV ${n(row.round_delta_ev)}`,
+      })), "本轮没有逐轮摘要。")),
+      dCard("源图详情", rows(a(inductionDebug.source_details).map((source) => ({
+        title: `${source.display_text || source.source_structure_id || "-"} | ${source.source_structure_id || "-"}`,
+        desc:
+          `ER ${n(source.source_er)} | EV ${n(source.source_ev)} | db ${source.pointer_info?.resolved_db_id || "-"} | fallback ${y(source.pointer_info?.used_fallback)}\n` +
+          `round ${source.energy_graph_summary?.round_count || 0} | depth ${source.energy_graph_summary?.depth_max || 0} | reinduction ${source.energy_graph_summary?.root_reinduction_count || 0}\n` +
+          (a(source.candidate_entries).map((entry) =>
+            `${entry.target_display_text || entry.target_structure_id || "-"} | ${entry.mode || "-"} | ${entry.projection_kind || "structure"} | id ${projectionTargetId(entry)} | round ${entry.energy_graph_round || "-"} | depth ${entry.energy_graph_depth || "-"} | from ${entry.frontier_source_kind || "-"} | deltaEV ${n(entry.delta_ev)} | runtime ${n(entry.runtime_weight)}`
+          ).join("\n") || "本轮没有候选条目。"),
+      })), "本轮没有感应赋能源图详情。")),
+    ]) : "",
+  ].join("");
+
+  E.flowTimeline.innerHTML += [
+    stepBlock("状态池回写与结构投影", "刺激级结束后再统一回写剩余刺激与结构投影。", [
       dCard("回写指标", [
         card("新建 / 更新", `${poolApply.apply_result?.new_item_count || 0} / ${poolApply.apply_result?.updated_item_count || 0}`, `合并 ${poolApply.apply_result?.merged_item_count || 0}`),
         card("状态增量", `ΔER ${n(poolApply.apply_result?.state_delta_summary?.total_delta_er)}`, `ΔEV ${n(poolApply.apply_result?.state_delta_summary?.total_delta_ev)}`),
@@ -2766,45 +3494,48 @@ function flow() {
       dCard("运行态结构/记忆投影", rows(a(poolApply.runtime_projection).map(fmtProjectionCard), "本轮没有刺激级运行态投影。")),
     ]),
 
-    fBlock("9. 感应赋能", "EV 传播消耗源 EV，ER 诱发不消耗源 ER。", [
+    stepBlock("感应赋能", "默认对状态池内全部有能量对象执行感应赋能；这里只对能量过低、无法形成有效落池的候选目标做剪枝。EV 传播消耗源 EV，ER 诱发不消耗源 ER。", [
       dCard("传播与诱发", [
-        card("源结构数", induction.source_item_count || 0, `权重更新 ${induction.updated_weight_count || 0}`),
+        card("可用源 / 实际参与", `${inductionSourceSelection.induction_source_available_runtime_count || induction.source_item_count || 0} / ${induction.source_item_count || 0}`, `ST ${inductionSourceSelection.induction_source_selected_st_count || 0} | 非ST ${inductionSourceSelection.induction_source_selected_non_st_count || 0}`),
+        card("ER 源 / EV 源", `${inductionErSourceCount} / ${inductionEvSourceCount}`, `ER+EV ${inductionSourceSelection.induction_source_selected_from_er_ev_count || 0} | cap_hit ${y(inductionSourceSelection.induction_source_selection_cap_hit)}`),
+        card("命中源 / 无候选", `${inductionSourceHitCount} / ${inductionSourceMissCount}`, `局部目标提示 ${inductionSourceSelection.induction_source_selected_with_local_target_hint_count || 0}`),
         card("EV 传播 / ER 诱发", `${induction.propagated_target_count || 0} / ${induction.induced_target_count || 0}`, `fallback ${y(induction.fallback_used)}`),
         card("总 delta_ev", n(induction.total_delta_ev), `总 ev 消耗 ${n(induction.total_ev_consumed)}`),
-        card("结构回写", a(report.induction?.applied_targets).length, "投影回状态池的结构数 / Structure projections"),
-        card("记忆赋能", memoryActivationApply.applied_count || 0, `记忆池总EV ${n(memoryActivationSnapshot.summary?.total_ev)}`),
+        card("结构回写 / 残差对象赋能", `${a(report.induction?.applied_targets).length} / ${memoryActivationApply.applied_count || 0}`, memoryUi.applyNote),
       ].join(""), "detail-grid"),
-      dCard("源结构与候选目标", rows(a(inductionDebug.source_details).map((source) => ({
-        title: `${source.display_text || source.source_structure_id || "-"} · ${source.source_structure_id || "-"}`,
-        desc: `源能量 ER ${n(source.source_er)} | EV ${n(source.source_ev)}\n局部数据库 ${source.pointer_info?.resolved_db_id || "-"} | fallback ${y(source.pointer_info?.used_fallback)}\n${a(source.candidate_entries).map((entry) => `${entry.target_display_text || entry.target_structure_id || "-"} | ${entry.mode || "-"} | kind ${entry.projection_kind || "structure"} | id ${projectionTargetId(entry)} | ΔEV ${n(entry.delta_ev)} | runtime ${n(entry.runtime_weight)} | share ${n(entry.normalized_share)} | entries ${entry.entry_count || 0} | W ${n(entry.base_weight)} | G ${n(entry.recent_gain)} | fatigue ${n(entry.fatigue)}`).join("\n") || "该源结构本轮没有命中可赋能目标。"}`,
-      })), "本轮没有感应赋能源结构。")),
+      dCard("源对象与候选目标", rows(inductionSources.map((source) => ({
+        title: `${source.display_text || source.source_structure_id || "-"} · ${source.source_item_id || source.source_structure_id || "-"}`,
+        desc: `源类型 ${source.source_ref_object_type || "-"} | 源能量 ER ${n(source.source_er)} | EV ${n(source.source_ev)}\n支持结构 ${a(source.resolved_support_structure_ids || source.support_structure_ids).join(" / ") || "-"}\n局部数据库 ${source.pointer_info?.resolved_db_id || "-"} | fallback ${y(source.pointer_info?.used_fallback)}\n${a(source.candidate_entries).map((entry) => `${entry.target_display_text || entry.target_structure_id || "-"} | ${inductionModeLabel(entry.mode)} | 目标类 ${projectionKindLabel(entry.projection_kind, memoryPathMode)} | id ${projectionTargetId(entry)} | ΔEV ${n(entry.delta_ev)} | runtime ${n(entry.runtime_weight)} | share ${n(entry.normalized_share)} | entries ${entry.entry_count || 0} | W ${n(entry.base_weight)} | G ${n(entry.recent_gain)} | fatigue ${n(entry.fatigue)}`).join("\n") || (source.skipped_reason ? `本轮未执行有效赋能：${source.skipped_reason}` : "该源对象本轮没有命中可赋能目标。")}`,
+      })), "本轮没有实际参与的感应源对象。")),
       dCard("赋能回写", rows(a(report.induction?.applied_targets).map(fmtProjectionCard), "本轮没有感应赋能回写目标。")),
-      dCard("记忆赋能池 / Memory Activation Pool", rows(sortMemoryActivations(memoryActivationSnapshot.items, currentMemorySort()).map(fmtMemoryActivationCard), "本轮没有记忆赋能条目。")),
+      dCard(memoryUi.listTitle, rows(sortMemoryActivations(memoryUi.items, currentMemorySort()).map(fmtMemoryActivationCard), memoryUi.runtimeOnly ? "当前走状态池残差对象主链；这里展示状态池内活跃残差对象视图。" : "本轮没有 MAP 兼容条目。")),
     ]),
   ].join("");
 
   E.flowTimeline.innerHTML += [
-    fBlock("10. 记忆反哺（Memory Feedback）", "记忆赋能池（MAP）条目会把本轮新增 ER/EV 按记忆内部能量分布拆解回流到状态池；情景记忆（EM）本身不会进入运行态。", [
-      dCard("反哺概览（Feedback Summary）", [
-        card("本轮反哺（Applied）", memoryFeedback.applied_count || 0, `刺激流 ${memoryFeedbackStimulusCount} | 结构 ${memoryFeedbackStructureCount}`),
-        card("回流能量（Returned Energy）", `ER ${n(memoryFeedback.total_feedback_er)} / EV ${n(memoryFeedback.total_feedback_ev)}`, `总 ${n(memoryFeedback.total_feedback_energy)}`),
-        card("回流目标（Targets）", memoryFeedbackTargetCount, "仅回流 SA/ST 颗粒，不把 EM 放回状态池"),
-        card("记忆池记录（MAP）", memoryFeedback.record_result?.recorded_count || 0, `ER ${n(memoryFeedback.record_result?.total_feedback_er)} | EV ${n(memoryFeedback.record_result?.total_feedback_ev)}`),
-      ].join(""), "detail-grid"),
-      dCard("反哺条目（Feedback Items）", rows(memoryFeedbackItems.map(fmtMemoryFeedbackResult), "本轮没有记忆反哺条目。")),
-      dCard("记忆池回写记录（MAP Records）", rows(a(memoryFeedback.record_result?.items).map((item) => ({
+    showMemoryFeedbackBlock ? stepBlock("MAP 兼容反馈（Compat Feedback）", `当前记忆路径：${memoryPathLabel}。这里只有在旧 MAP 兼容支路真实产生回流时才显示；默认的新口径主路径并不依赖这条链路。${memoryRuntimeProjection.enabled ? (memoryRuntimeShadowMode ? "（当前是 shadow 观测态）" : "（当前是主路径，可进入 CAM）") : "（当前未启用运行态投影）"}。`, [
+      dCard("兼容反馈概览", [
+          card("本轮回流（Applied）", memoryFeedback.applied_count || 0, `刺激流 ${memoryFeedbackStimulusCount} | 结构 ${memoryFeedbackStructureCount}`),
+          card("回流能量（Returned Energy）", `ER ${n(memoryFeedback.total_feedback_er)} / EV ${n(memoryFeedback.total_feedback_ev)}`, `总 ${n(memoryFeedback.total_feedback_energy)}`),
+          card("回流目标（Targets）", memoryFeedbackTargetCount, "反馈主粒度仍以 SA/ST 为主；EM 是否进入状态池取决于残差记忆对象化开关"),
+          card("残差运行态对象投影", memoryRuntimeProjectionSummary.inserted_count || 0, `attempt ${memoryRuntimeProjectionSummary.attempted_count || 0} | shadow ${y(memoryRuntimeShadowMode)}`),
+          card("MAP 兼容记录", memoryFeedback.record_result?.recorded_count || 0, `ER ${n(memoryFeedback.record_result?.total_feedback_er)} | EV ${n(memoryFeedback.record_result?.total_feedback_ev)}`),
+        ].join(""), "detail-grid"),
+        dCard("残差运行态对象投影（Residual Memory Runtime Projection）", rows(memoryRuntimeProjectionItems.map(fmtProjectionCard), "本轮没有残差运行态对象投影记录。")),
+        dCard("兼容反馈条目（Compat Feedback Items）", rows(memoryFeedbackItems.map(fmtMemoryFeedbackResult), "本轮没有 MAP 兼容反馈条目。")),
+      dCard("MAP 兼容回写记录（MAP Records）", rows(a(memoryFeedback.record_result?.items).map((item) => ({
         title: `${item.display_text || item.memory_id || "-"} | ${item.memory_id || "-"}`,
         desc:
           `当前能量 ER ${n(item.er)} | EV ${n(item.ev)} | 总 ${n(te(item))}\n` +
-          `最近反哺 ER ${n(item.last_feedback_er)} | EV ${n(item.last_feedback_ev)}\n` +
-          `累计反哺 ER ${n(item.total_feedback_er)} | EV ${n(item.total_feedback_ev)}\n` +
+          `最近兼容回流 ER ${n(item.last_feedback_er)} | EV ${n(item.last_feedback_ev)}\n` +
+          `累计兼容回流 ER ${n(item.total_feedback_er)} | EV ${n(item.total_feedback_ev)}\n` +
           `来源记忆（EM）${item.event_summary || item.display_text || "-"}`,
-      })), "本轮没有新的记忆池反哺记录。")),
-    ]),
+      })), "本轮没有新的 MAP 兼容回写记录。")),
+    ]) : "",
   ].join("");
 
   E.flowTimeline.innerHTML += [
-    fBlock("11. 认知感受系统（CFS 认知感受信号）", "从状态池与注意力记忆体中生成元认知信号（违和感/正确感/期待/压力/置信度等），并写回运行态供下一 tick（节拍）消费。", [
+    stepBlock("认知感受系统（CFS 认知感受信号）", "从状态池与注意力记忆体中生成元认知信号（违和感/正确感/期待/压力/置信度等），并写回运行态供下一 tick（节拍）消费。", [
       dCard("认知感受概览（CFS）", [
         card("信号数", cfsSignals.length, `tick（节拍） ${cfs.meta?.tick_number ?? "-"}`),
         card("写回节点", cfsRuntimeNodes.length, `属性绑定 ${cfsAttrBindings.length}`),
@@ -2837,7 +3568,7 @@ function flow() {
       })), "本轮没有属性绑定写回。")),
     ]),
 
-    fBlock("12. 先天编码脚本管理器（IESM）", "基于状态窗口与认知感受（CFS）生成“先天触发源”，并可输出情绪增量（emotion_update）与行动触发（action_trigger）。情绪增量会在下一步 EMgr（情绪管理器）同 tick 生效。", [
+    stepBlock("先天编码脚本管理器（IESM）", "基于状态窗口与认知感受（CFS）生成‘先天触发源’，并可输出情绪增量（emotion_update）与行动触发（action_trigger）。情绪增量会在下一步 EMgr（情绪管理器）同 tick 生效。", [
       dCard("脚本概览", [
         card("脚本版本", innateScript.active_scripts?.script_version || "-", `启用脚本 ${a(innateScript.active_scripts?.scripts).length}`),
         card("状态窗口检查", a(innateScript.state_window_checks).length, `聚焦触发源 ${focusDirectivesNew.length}`),
@@ -2891,10 +3622,10 @@ function flow() {
       dCard("审计（IESM）", renderIesmAuditHtml(focusData.audit || {})),
     ]),
 
-    fBlock("13. 情绪管理器（EMgr）与递质通道（NT）", "维护 NT（递质通道）慢变量并输出调制包；输入来自 CFS + IESM 的 emotion_update（脚本增量）。调制会在下一 tick（节拍）影响注意力/学习/行动风格。", [
+    stepBlock("情绪管理器（EMgr）与递质通道（NT）", "维护 NT（递质通道）慢变量并输出调制包；输入来自 CFS + IESM 的 emotion_update（脚本增量）。调制会在下一 tick（节拍）影响注意力/学习/行动风格。", [
       dCard("递质概览（NT）", [
         card("奖励/惩罚（rwd/pun）", `${n(emotion.rwd_pun_snapshot?.rwd)} / ${n(emotion.rwd_pun_snapshot?.pun)}`, `全局衰减（global_decay）${n(emotion.decay?.global_decay_ratio)}`),
-        card("通道数", Object.keys(emotion.nt_state_after || {}).length, `tick（节拍）${emotion.audit?.tick_id || report.trace_id || "-"}`),
+        card("通道数", emotionChannelKeys(emotion).length, `tick（节拍）${emotion.audit?.tick_id || report.trace_id || "-"}`),
       ].join(""), "detail-grid"),
       dCard("递质通道（NT，更新后）", renderEmotionNtStateHtml(emotion)),
       dCard("通道说明（NT 通道含义）", rows(Object.entries(emotion.nt_channel_meta || {}).map(([ch, meta]) => ({
@@ -2905,7 +3636,7 @@ function flow() {
       dCard("调制输出（modulation）", renderEmotionModulationHtml(emotion.modulation || {}, emotion.nt_channel_labels || {})),
     ]),
 
-    fBlock("14. 行动管理模块（Drive 驱动力）", "对候选行动节点更新 Drive（驱动力）并竞争执行；执行时按阈值消耗 Drive（消耗而非清零）。注意：本模块会区分“先天触发（IESM）”与“内驱触发（非 IESM）”，便于审计。", [
+    stepBlock("行动管理模块（Drive 驱动力）", "对候选行动节点更新 Drive（驱动力）并竞争执行；执行时按阈值消耗 Drive（消耗而非清零）。注意：本模块会区分“先天触发（IESM）”与“内驱触发（非 IESM）”，便于审计。", [
       dCard("行动概览", [
         card("触发源", actionTriggers.length, "来自 CFS/IESM/复杂度等"),
         card("执行动作", executedActions.length, executedActions.length ? "已发生 Drive 消耗" : "本轮无执行"),
@@ -2917,11 +3648,14 @@ function flow() {
         desc: `${ex.desc_zh || "-"}\n参数口径（params_schema）${fmtKvInline(ex.params_schema || {})}\n常见触发来源 ${a(ex.sources_zh).join("，") || "-"}`,
       })), "当前没有行动器注册信息。")),
       dCard("阈值调制（threshold_modulation）", renderThresholdModulationHtml(thresholdMod || {}, emotion.nt_channel_labels || {})),
+      dCard("行动学习摘要（action_learning_summary）", renderActionLearningSummaryHtml(actionLearningSummary || {})),
       dCard("执行记录", rows(executedActions.slice(0, 16).map((item) => ({
         title: `${actionKindTitle(item.action_kind || "")} · ${item.action_id || "-"}`,
         desc:
-          `drive ${n(item.drive_before)} -> ${n(item.drive_after)} | 基准阈值 ${n(item.base_threshold)} | 实时阈值 ${n(item.effective_threshold)}（scale ${n(item.threshold_scale)}）\n` +
+          `drive ${n(item.drive_before)} -> ${n(item.drive_after)} | 消耗 ${n(item.consumed_drive ?? 0)} | 基准阈值 ${n(item.base_threshold)} | 实时阈值 ${n(item.effective_threshold)}（scale ${n(item.threshold_scale)}）\n` +
           `疲劳（fatigue）${n(item.fatigue)} | 本 tick 增益 ${n(item.tick_gain_total)}\n` +
+          `目标 ${item.target_display || item.target_ref_object_id || item.target_item_id || "-"}\n` +
+`局部塑形 ${formatLocalDriveModulationText(item.local_drive_modulation)}\n` +
           `来源：${item.origin?.passive_iesm ? "被动（先天脚本 IESM）" : ""}${item.origin?.passive_iesm && item.origin?.active_internal ? " + " : ""}${item.origin?.active_internal ? "主动（内驱/非 IESM）" : ""}\n` +
           `触发源（最近）${a(item.trigger_sources).map((s) => fmtActionSourceBrief(s)).join(" / ") || "-"}\n` +
           `本 tick 增益分解 ${fmtKvInline(item.tick_gain_by_source_kind || {})}\n` +
@@ -2937,79 +3671,154 @@ function flow() {
       dCard("输出调制（modulation_out）", kvListHtml(actionModulationOut || {}, { emptyText: "本轮没有输出调制。" })),
       dCard("节点快照（Drive）", rows(actionNodes.slice(0, 24).map((node) => ({
         title: `${actionKindTitle(node.action_kind || "")} · ${node.action_id || "-"}`,
-        desc: `drive ${n(node.drive)} | 基准阈值 ${n(node.base_threshold)} | 实时阈值 ${n(node.effective_threshold)}（scale ${n(node.threshold_scale)}）\n疲劳（fatigue）${n(node.fatigue)} | 本 tick 增益 ${n(node.tick_gain_total)} | cooldown ${node.cooldown_ticks ?? 0}\nlast_trigger ${node.last_trigger_tick ?? "-"} | last_update ${node.last_update_tick ?? "-"}`,
+        desc:
+          `drive ${n(node.drive)} | 本轮消耗 ${n(node.tick_consumed_drive_total ?? node.last_consumed_drive ?? 0)} | 基准阈值 ${n(node.base_threshold)} | 实时阈值 ${n(node.effective_threshold)}（scale ${n(node.threshold_scale)}）\n` +
+          `目标 ${node.target_display || node.target_ref_object_id || node.target_item_id || "-"}\n` +
+`局部塑形 ${formatLocalDriveModulationText(node.local_drive_modulation)}\n` +
+          `疲劳（fatigue）${n(node.fatigue)} | 本 tick 增益 ${n(node.tick_gain_total)} | cooldown ${node.cooldown_ticks ?? 0}\n` +
+          `last_trigger ${node.last_trigger_tick ?? "-"} | last_update ${node.last_update_tick ?? "-"}`,
       })), "当前没有行动节点。")),
     ]),
   ].join("");
 
   if (E.recentCycles) {
-    E.recentCycles.innerHTML = rows(a(S.d.recent_cycles).map((cycle) => ({
-      title: `${cycle.trace_id || "-"} · ${cycle.input_text || "空 Tick"}`,
-      desc:
-        `记忆体 ${cycle.attention_memory_count || 0} | 记忆赋能 ${cycle.memory_activation_applied_count || 0}\n` +
-        `认知拼接（Cognitive Stitching，缩写 CS）候选 ${cycle.cs_candidate_count ?? "-"} | 动作 ${cycle.cs_action_count ?? "-"} | 退化 ${cycle.cs_degenerated_event_count ?? "-"}\n` +
-        `刺激级查存轮次 ${cycle.stimulus_rounds ?? "-"} | 结构级查存轮次 ${cycle.structure_rounds ?? "-"}\n` +
-        `命中结构 ${fmtRefs(cycle.matched_structure_refs)}\n` +
-        `新结构 ${fmtRefs(cycle.new_structure_refs)}\n` +
-        `delta_ev ${n(cycle.total_delta_ev)} | memory_pool_ev ${n(cycle.memory_activation_total_ev)}`,
-    })), "当前没有最近轮次。");
+    E.recentCycles.innerHTML = rows(a(S.d.recent_cycles).map((cycle) => {
+      const runtimeOnly = String(cycle.memory_path_mode || "").trim() === "runtime_em_only";
+      const processedText = String(cycle.tick_text || cycle.input_text || "").trim() || "空 Tick";
+      const submittedText = String(cycle.submitted_text || "").trim();
+      return {
+        title: `${cycle.trace_id || "-"} · 处理 ${shortInputPreview(processedText)}`,
+        desc:
+          `${submittedText && submittedText !== processedText ? `提交 ${shortInputPreview(submittedText)} | ` : ""}队列余量 ${cycle.pending_queue_after_tick ?? 0}\n` +
+      `记忆体 ${cycle.attention_memory_count || 0} | ${runtimeOnly ? "残差对象赋能" : "MAP兼容赋能"} ${cycle.memory_activation_applied_count || 0} | 路径 ${cycle.memory_path_mode || "-"}\n` +
+          `认知拼接（Cognitive Stitching，缩写 CS）候选 ${cycle.cs_candidate_count ?? "-"} | 动作 ${cycle.cs_action_count ?? "-"} | 退化 ${cycle.cs_degenerated_event_count ?? "-"}\n` +
+          `刺激级查存轮次 ${cycle.stimulus_rounds ?? "-"} | 结构级查存轮次 ${cycle.structure_rounds ?? "-"}\n` +
+          `命中结构 ${fmtRefs(cycle.matched_structure_refs)}\n` +
+          `新结构 ${fmtRefs(cycle.new_structure_refs)}\n` +
+          `delta_ev ${n(cycle.total_delta_ev)} | ${runtimeOnly ? "residual_runtime_ev" : "memory_pool_ev"} ${n(cycle.memory_activation_total_ev)}`,
+      };
+    }), "当前没有最近轮次。");
   }
 }
 
 function stateView() {
   const snapshot = S.d?.state_snapshot || {};
   const energy = S.d?.state_energy_summary || {};
+  const summary = snapshot.summary || {};
+  const poolEvToErRatio = Number(energy.total_er || 0) > 0 ? Number(energy.total_ev || 0) / Number(energy.total_er || 1) : 0;
   if (E.stateMeta) {
     E.stateMeta.textContent =
-      `对象 ${snapshot.summary?.active_item_count || 0} | ` +
-      `实能量（ER）${n(energy.total_er)} | 虚能量（EV）${n(energy.total_ev)}`;
+      `对象 ${summary.active_item_count || 0} | ` +
+      `实能量（ER）${n(energy.total_er)} | 虚能量（EV）${n(energy.total_ev)} | ` +
+      `上下文化对象 ${summary.contextual_item_count || 0} | 残差来源 ${summary.residual_origin_item_count || 0}`;
   }
   if (E.stateCards) {
     E.stateCards.innerHTML = [
-      card("活跃对象", snapshot.summary?.active_item_count || 0, `高 ER ${snapshot.summary?.high_er_item_count || 0}`),
-      card("高虚能量（EV）", snapshot.summary?.high_ev_item_count || 0, `高认知压（CP）${snapshot.summary?.high_cp_item_count || 0}`),
-      card("对象类型", Object.entries(snapshot.summary?.object_type_counts || {}).map(([key, value]) => `${refTypeLabel(key)}:${value}`).join(" | ") || "-", "类型分布"),
-      card("总能量", `实ER ${n(energy.total_er)} | 虚EV ${n(energy.total_ev)}`, `认知压 CP ${n(energy.total_cp)}`),
+      card("活跃对象", summary.active_item_count || 0, `高 ER ${summary.high_er_item_count || 0}`),
+      card("高虚能量（EV）", summary.high_ev_item_count || 0, `高认知压（CP）${summary.high_cp_item_count || 0}`),
+      card("对象类型", Object.entries(summary.object_type_counts || {}).map(([key, value]) => `${refTypeLabel(key)}:${value}`).join(" | ") || "-", "类型分布"),
+      card("总能量", `实ER ${n(energy.total_er)} | 虚EV ${n(energy.total_ev)}`, `认知压 CP ${n(energy.total_cp)} | EV/ER ${n(poolEvToErRatio)}`),
+      card("上下文化对象", summary.contextual_item_count || 0, `多级路径 ${summary.multi_context_item_count || 0} | 平均深度 ${n(summary.context_path_depth_mean)}`),
+      card("残差来源对象", summary.residual_origin_item_count || 0, "还能追溯到残差链，适合判断当前对象是不是从残差递归长出来的。"),
     ].join("");
   }
   if (E.stateEnergyByType) {
-    E.stateEnergyByType.innerHTML = rows(Object.entries(energy.energy_by_type || {}).map(([key, value]) => ({
-      title: refTypeLabel(key),
-      desc: `数量 ${value.count || 0} | 实ER ${n(value.total_er)} | 虚EV ${n(value.total_ev)} | CP ${n(value.total_cp)}`,
-    })), "当前没有按类型汇总的能量。");
+    const auditRows = [
+      {
+        title: "这些数字怎么读",
+        desc:
+          "上下文化对象：至少带有一个可追溯的 owner / ref / path。\n" +
+          "多级路径对象：路径深度大于 1，通常说明对象已经沿残差链继续下沉或继续展开。",
+      },
+      {
+        title: "当前状态池分布",
+        desc:
+          `上下文化对象 ${summary.contextual_item_count || 0} / ${summary.active_item_count || 0}\n` +
+          `多级路径对象 ${summary.multi_context_item_count || 0} | 平均路径深度 ${n(summary.context_path_depth_mean)}\n` +
+          `残差来源对象 ${summary.residual_origin_item_count || 0}`,
+      },
+      {
+        title: "解释建议",
+        desc:
+          "如果活跃对象很多，但上下文化对象很少，说明系统更多停留在叶子级对象。\n" +
+          "如果多级路径对象开始上升，通常表示残差结构正在逐层打开，而不是只停在表层命中。",
+      },
+    ];
+    E.stateEnergyByType.innerHTML = [
+      dCard("上下文与残差审计（状态池）", rows(auditRows), "detail-card"),
+      dCard("当前显著样本（状态池 Top）", rows(buildContextAuditRows(snapshot.top_items, 8), "当前前排状态池对象里还没有显式上下文/残差链样本。")),
+      dCard("按类型能量分布", rows(Object.entries(energy.energy_by_type || {}).map(([key, value]) => ({
+        title: refTypeLabel(key),
+        desc: `数量 ${value.count || 0} | 实ER ${n(value.total_er)} | 虚EV ${n(value.total_ev)} | CP ${n(value.total_cp)}`,
+      })), "当前没有按类型汇总的能量。")),
+    ].join("");
   }
   if (E.stateItems) {
     E.stateItems.innerHTML = rows(a(snapshot.top_items).slice(0, 24).map((item) => ({
       title: fmtStateTitle(item),
-      desc: `对象 ${item.ref_object_id || item.structure_id || item.item_id || "-"} | 实ER ${n(item.er)} | 虚EV ${n(item.ev)} | CP ${n(item.cp_abs)} | 总 ${n(te(item))}\n结构模式 ${item.structure_sequence_mode || "-"} | GoalB 混合结构 ${y(item.goal_b_mixed_structure)}\n疲劳（fatigue）${n(item.fatigue)} | 近因增益（recency）${n(item.recency_gain)} | 更新 ${item.update_count || 0} 次`,
+      desc:
+        `对象 ${item.ref_object_id || item.structure_id || item.item_id || "-"} | 实ER ${n(item.er)} | 虚EV ${n(item.ev)} | CP ${n(item.cp_abs)} | 总 ${n(te(item))}\n` +
+        `上下文 ${fmtContextSummary(item)}\n` +
+        `残差 ${fmtResidualSummary(item)}\n` +
+        `结构模式 ${item.structure_sequence_mode || "-"} | GoalB 混合结构 ${y(item.goal_b_mixed_structure)}\n` +
+        `疲劳（fatigue）${n(item.fatigue)} | 近因增益（recency）${n(item.recency_gain)} | 更新 ${item.update_count || 0} 次`,
     })), "当前状态池为空。");
   }
 }
 
 function hdbView() {
+  const report = S.d?.last_report || {};
   const hdb = S.d?.hdb_snapshot || {};
   const summary = hdb.summary || {};
+  const memoryUi = buildMemoryUiModel(report, hdb);
   if (E.hdbMeta) {
     E.hdbMeta.textContent =
       `结构（ST）${summary.structure_count || 0} | ` +
       `结构组（SG）${summary.group_count || 0} | ` +
       `情景记忆（EM）${summary.episodic_count || 0} | ` +
-      `记忆赋能池（MAP）${summary.memory_activation_count || 0}`;
+      `${memoryUi.summaryLabel}${memoryUi.count} | ` +
+      `上下文化结构 ${summary.contextual_structure_count || 0}`;
   }
   if (E.hdbCards) {
     E.hdbCards.innerHTML = [
       card("结构 / 结构组", `${summary.structure_count || 0} / ${summary.group_count || 0}`, `EM ${summary.episodic_count || 0}`),
-      card("记忆赋能池 / MAP", summary.memory_activation_count || 0, `总EV ${n(summary.memory_activation_total_ev)}`),
+      card(memoryUi.summaryLabel, memoryUi.count, `ER ${n(memoryUi.totalEr)} | EV ${n(memoryUi.totalEv)} | ${memoryUi.pathLabel}`),
       card("局部数据库", summary.structure_db_count || 0, `问题（Issue）${summary.issue_count || 0}`),
       card("修复（Repair）", summary.active_repair_job_count || 0, "活动修复任务"),
+      card("上下文化结构", summary.contextual_structure_count || 0, `多级路径 ${summary.multi_context_structure_count || 0} | 平均深度 ${n(summary.structure_context_path_depth_mean)}`),
+      card("同内容多上下文", summary.same_content_multi_context_count || 0, "同一签名在多个上下文 owner 下并存，更贴近“同内容不等于同对象”的理论约束。"),
+      card("残差索引", summary.residual_diff_entry_count || 0, `diff 总数 ${summary.diff_entry_count || 0} | 带记忆引用 ${summary.diff_entry_with_memory_ref_count || 0}`),
       card("指针索引", Object.entries(hdb.stats?.pointer_index || {}).map(([key, value]) => `${key}:${value}`).join(" | ") || "-", "指针摘要"),
     ].join("");
   }
   if (E.recentStructures) {
-    E.recentStructures.innerHTML = rows(a(hdb.recent_structures).map((item) => ({
-      title: `${item.display_text || item.structure_id || "-"} · ${item.structure_id || "-"}`,
-      desc: `签名（signature）${item.signature || "-"}\n权重（W）${n(item.base_weight)} | 近因增益（G）${n(item.recent_gain)} | 疲劳（fatigue）${n(item.fatigue)}`,
-    })), "当前没有最近结构。");
+    const structureAuditRows = [
+      {
+        title: "这些数字怎么读",
+        desc:
+          "上下文化结构：结构对象携带了 owner / ref / path 这类可追溯语义。\n" +
+          "同内容多上下文：同样的签名在多个上下文 owner 下共存，说明系统没有把“同内容但不同语境”的对象粗暴压成一个。",
+      },
+      {
+        title: "当前 HDB 分布",
+        desc:
+          `上下文化结构 ${summary.contextual_structure_count || 0} / ${summary.structure_count || 0}\n` +
+          `多级路径结构 ${summary.multi_context_structure_count || 0} | 平均路径深度 ${n(summary.structure_context_path_depth_mean)}\n` +
+          `残差 diff 条目 ${summary.residual_diff_entry_count || 0} / 全部 diff ${summary.diff_entry_count || 0}`,
+      },
+    ];
+    E.recentStructures.innerHTML = [
+      dCard("结构上下文审计", rows(structureAuditRows), "detail-card"),
+      dCard("最近结构（带上下文说明）", rows(a(hdb.recent_structures).map((item) => ({
+        title: `${item.display_text || item.structure_id || "-"} · ${item.structure_id || "-"}`,
+        desc:
+          `签名（signature）${item.signature || "-"}\n` +
+          `上下文 ${fmtContextSummary(item)}\n` +
+          `残差 ${fmtResidualSummary(item)}\n` +
+          `权重（W）${n(item.base_weight)} | 近因增益（G）${n(item.recent_gain)} | 疲劳（fatigue）${n(item.fatigue)}`,
+      })), "当前没有最近结构。")),
+      dCard("上下文样本（最近结构 Top）", rows(buildStructureContextRows(hdb.recent_structures, 8), "当前最近结构里还没有显式上下文/残差链样本。")),
+    ].join("");
   }
   if (E.recentGroups) {
     E.recentGroups.innerHTML = rows(a(hdb.recent_groups).map((item) => ({
@@ -3025,8 +3834,8 @@ function hdbView() {
   }
   if (E.memoryActivationList) {
     E.memoryActivationList.innerHTML = rows(
-      sortMemoryActivations(hdb.recent_memory_activations, currentMemorySort()).map(fmtMemoryActivationCard),
-      "当前没有记忆赋能条目。",
+      sortMemoryActivations(memoryUi.items, currentMemorySort()).map(fmtMemoryActivationCard),
+      memoryUi.listEmptyText,
     );
   }
   if (E.repairJobs) {
@@ -3053,11 +3862,6 @@ function miscLegacyReadOnly() {
   if (E.settingsPanel) {
     E.settingsPanel.innerHTML = `<section class="detail-card"><h5>配置快照</h5>${kvListHtml(S.d?.module_configs || {}, { emptyText: "无配置快照。" })}</section>`;
   }
-  if (E.placeholderCards) {
-    E.placeholderCards.innerHTML = a(S.d?.placeholder_modules).length
-      ? a(S.d.placeholder_modules).map((item) => card(item.title || "placeholder", item.status || "planned", item.description || "-")).join("")
-      : empty("当前没有预留模块信息。");
-  }
 }
 
 function misc() {
@@ -3078,11 +3882,6 @@ function misc() {
       : empty("当前没有配置内容。");
   }
   if (activeModule) bindSettingsUi(activeModule);
-  if (E.placeholderCards) {
-    E.placeholderCards.innerHTML = a(S.d?.placeholder_modules).length
-      ? a(S.d.placeholder_modules).map((item) => card(item.title || "placeholder", item.status || "planned", item.description || "-")).join("")
-      : empty("当前没有预留模块信息。");
-  }
 }
 
 async function runCycle() {

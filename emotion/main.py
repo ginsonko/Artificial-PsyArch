@@ -37,6 +37,8 @@ _NT_CHANNEL_LABELS: dict[str, str] = {
     "SER": "血清素（SER）",
     "END": "内啡肽（END）",
     "COR": "皮质醇（COR）",
+    "NOV": "新颖探索（NOV）",
+    "FOC": "专注锁定（FOC）",
 }
 
 # NT 通道说明（中文优先，便于前端展示与验收）
@@ -52,19 +54,27 @@ _NT_CHANNEL_META: dict[str, dict[str, str]] = {
     },
     "OXY": {
         "name_zh": "催产素（OXY）",
-        "desc_zh": "亲和连接：正确事件、社交正反馈、信任建立。常用于更温和的倾向与更顺畅的能量转移（原型先做占位）。",
+        "desc_zh": "亲和连接：正确事件、社交正反馈、信任建立。常用于降低结构间能量转移损耗、提升相关召回与更温和的表达倾向。",
     },
     "SER": {
         "name_zh": "血清素（SER）",
-        "desc_zh": "稳定满足：长期低冲突、总体平稳。常用于降低情绪放大系数、提高耐心与一致性（原型先做占位）。",
+        "desc_zh": "稳定满足：长期低冲突、总体平稳。常用于降低情绪放大系数、提高耐心与一致性，并抑制无谓探索。",
     },
     "END": {
         "name_zh": "内啡肽（END）",
-        "desc_zh": "止痛舒缓：压力解除/痛苦缓解后的恢复通道（原型先做占位）。",
+        "desc_zh": "止痛舒缓：痛苦缓冲与恢复通道。常用于削弱惩罚尖峰的冲击、减少过度核对，并推动恢复/整理倾向。",
     },
     "COR": {
         "name_zh": "皮质醇（COR）",
         "desc_zh": "长期警戒：违和长期偏高、未知环境高频。常用于提高保守性与压力通道敏感度。",
+    },
+    "NOV": {
+        "name_zh": "新颖探索（NOV）",
+        "desc_zh": "新颖探索：用于表示系统当前对新线索、意外变化与未证实预测的探索倾向。主要影响新信息优先级、近因偏置与发散扩展强度。",
+    },
+    "FOC": {
+        "name_zh": "专注锁定（FOC）",
+        "desc_zh": "专注锁定：用于表示系统当前对单一目标或局部路径的持续聚焦倾向。主要影响注意力收窄、聚焦增益、传播收束与执行果断性。",
     },
 }
 
@@ -96,27 +106,40 @@ _DEFAULT_CONFIG: dict[str, Any] = {
         "SER": {"min": 0.0, "max": 1.0, "decay_ratio": 0.94, "base": 0.18, "soft_cap_k": 0.35},
         "END": {"min": 0.0, "max": 1.0, "decay_ratio": 0.91, "base": 0.10, "soft_cap_k": 0.35},
         "COR": {"min": 0.0, "max": 1.0, "decay_ratio": 0.86, "base": 0.06, "soft_cap_k": 0.35},
+        "NOV": {"min": 0.0, "max": 1.0, "decay_ratio": 0.89, "base": 0.08, "soft_cap_k": 0.33},
+        "FOC": {"min": 0.0, "max": 1.0, "decay_ratio": 0.92, "base": 0.10, "soft_cap_k": 0.34},
     },
     "global_decay_ratio": 0.92,
+    # cfs_to_nt_source_mode / CFS -> NT 来源模式
+    # - builtin: 仅使用本配置里的 cfs_to_nt_gains（旧口径/回退）
+    # - iesm_rules: 默认使用 IESM emotion_update 外显驱动（新口径）
+    # - hybrid: 两者同时启用（调试/过渡）
+    "cfs_to_nt_source_mode": "iesm_rules",
     "cfs_to_nt_gains": {
-        "dissonance": {"COR": 0.08, "ADR": 0.02},
-        "correct_event": {"DA": 0.12, "OXY": 0.07, "SER": 0.03},
-        "surprise": {"ADR": 0.06},
-        "expectation": {"DA": 0.05},
-        "pressure": {"COR": 0.10, "END": 0.05, "ADR": 0.03},
+        "dissonance": {"COR": 0.09, "ADR": 0.03, "FOC": 0.02},
+        "correct_event": {"DA": 0.12, "OXY": 0.08, "SER": 0.05, "FOC": 0.03},
+        "surprise": {"ADR": 0.07, "NOV": 0.10, "COR": 0.015, "FOC": -0.02},
+        "expectation": {"DA": 0.06, "NOV": 0.025},
+        "pressure": {"COR": 0.11, "END": 0.04, "ADR": 0.04, "FOC": 0.06, "NOV": -0.02},
         # Verification states (continuous, non-binary) / 验证态（连续渐变，非二极管）
-        "expectation_verified": {"DA": 0.08, "SER": 0.03},
-        "expectation_unverified": {"COR": 0.03, "ADR": 0.015},
-        "pressure_verified": {"COR": 0.07, "ADR": 0.04, "END": 0.02},
-        "pressure_unverified": {"END": 0.04, "COR": -0.02, "SER": 0.01},
-        "complexity": {"ADR": 0.015},
-        "repetition": {"COR": 0.015},
-        "grasp": {"SER": 0.03},
+        "expectation_verified": {"DA": 0.09, "SER": 0.04, "OXY": 0.03, "FOC": 0.03},
+        "expectation_unverified": {"COR": 0.04, "ADR": 0.02, "NOV": 0.05, "SER": -0.015},
+        "pressure_verified": {"COR": 0.07, "ADR": 0.04, "END": 0.03, "FOC": 0.04},
+        "pressure_unverified": {"END": 0.05, "COR": -0.02, "SER": 0.02, "NOV": 0.03, "FOC": -0.015},
+        "complexity": {"ADR": 0.015, "FOC": 0.04, "COR": 0.015, "NOV": 0.02},
+        "repetition": {"COR": 0.02, "SER": -0.015, "NOV": -0.05, "END": 0.025},
+        "grasp": {"SER": 0.05, "FOC": 0.08, "COR": -0.02, "NOV": -0.015},
+        "simplicity": {"SER": 0.04, "END": 0.035, "DA": 0.02, "COR": -0.02, "ADR": -0.015},
+        "relief": {"END": 0.07, "SER": 0.045, "OXY": 0.025, "COR": -0.04, "ADR": -0.025, "FOC": -0.01},
+        "reassurance": {"SER": 0.06, "OXY": 0.05, "END": 0.03, "DA": 0.025, "FOC": 0.02, "COR": -0.035, "ADR": -0.02},
     },
     "cfs_to_rwd_pun": {
         "correct_event": {"rwd": 1.0, "pun": 0.0},
         "pressure": {"rwd": 0.0, "pun": 0.8},
         "dissonance": {"rwd": 0.0, "pun": 0.3},
+        "simplicity": {"rwd": 0.15, "pun": 0.0},
+        "relief": {"rwd": 0.08, "pun": 0.0},
+        "reassurance": {"rwd": 0.12, "pun": 0.0},
     },
     # rwd_pun_source_mode / 奖励-惩罚信号（Rwd/Pun）来源模式
     # 说明：
@@ -130,6 +153,10 @@ _DEFAULT_CONFIG: dict[str, Any] = {
         "reward_attr_name": "reward_signal",
         "punish_attr_name": "punish_signal",
         "ev_min": 0.0,
+        # When runtime-bound reward/punish attributes carry a numeric value,
+        # use that value as the per-row weighting factor instead of presence=1.
+        "attribute_value_weight_enabled": True,
+        "attribute_value_fallback": 1.0,
         # softcap parameters / 软饱和参数
         "k_pred": 1.0,
         "k_got": 0.5,
@@ -140,9 +167,14 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     # rwd_pun_to_nt_gains / Rwd/Pun -> NT gains
     # 对齐理论 3.9.3：reward_signal 获得 ER（现实验证）应推动 DA 等通道变化；
     # pun 同理推动 COR/ADR 等“警戒/唤醒”通道变化。
+    # rwd_pun_to_nt_source_mode / Rwd/Pun -> NT 来源模式
+    # - builtin: 仅使用本配置里的 rwd_pun_to_nt_gains（旧口径/回退）
+    # - iesm_rules: 默认使用 IESM emotion_post 规则外显驱动（新口径）
+    # - hybrid: 两者同时启用（调试/过渡）
+    "rwd_pun_to_nt_source_mode": "iesm_rules",
     "rwd_pun_to_nt_gains": {
-        "rwd": {"DA": 0.08, "OXY": 0.03, "SER": 0.015},
-        "pun": {"COR": 0.06, "ADR": 0.03, "END": 0.02},
+        "rwd": {"DA": 0.09, "OXY": 0.04, "SER": 0.03, "FOC": 0.02, "NOV": 0.01},
+        "pun": {"COR": 0.08, "ADR": 0.04, "END": 0.05, "FOC": 0.02, "NOV": -0.02, "OXY": -0.01},
     },
     "modulation": {
         "attention": {
@@ -155,6 +187,143 @@ _DEFAULT_CONFIG: dict[str, Any] = {
             "base_priority_weight_fatigue": 0.00,
             "cor_fatigue_weight_gain": 0.25,
             "base_min_total_energy": 0.0,
+            "field_specs": {
+                "top_n": {
+                    "base": 16,
+                    "min": 4,
+                    "max": 64,
+                    "round_to_int": True,
+                    "adr_gain": 5.5,
+                    "nov_gain": 4.0,
+                    "da_gain": 1.0,
+                    "cor_suppress": 3.0,
+                    "ser_suppress": 1.2,
+                    "foc_suppress": 4.0,
+                },
+                "min_cam_items": {
+                    "base": 2,
+                    "min": 1,
+                    "max": 12,
+                    "round_to_int": True,
+                    "adr_gain": 1.0,
+                    "nov_gain": 1.0,
+                    "foc_suppress": 1.0,
+                },
+                "priority_weight_total_energy": {
+                    "base": 1.25,
+                    "min": 0.0,
+                    "max": 4.0,
+                    "foc_gain": 0.55,
+                    "oxy_gain": 0.25,
+                    "cor_gain": 0.18,
+                    "da_gain": 0.10,
+                    "nov_suppress": 0.18,
+                },
+                "priority_weight_cp_abs": {
+                    "base": 0.35,
+                    "min": 0.0,
+                    "max": 2.0,
+                    "cor_gain": 0.28,
+                    "adr_gain": 0.10,
+                    "foc_gain": 0.08,
+                    "ser_suppress": 0.12,
+                    "end_suppress": 0.08,
+                    "oxy_suppress": 0.04,
+                },
+                "priority_weight_salience": {
+                    "base": 0.15,
+                    "min": 0.0,
+                    "max": 2.0,
+                    "adr_gain": 0.32,
+                    "nov_gain": 0.24,
+                    "cor_gain": 0.06,
+                    "ser_suppress": 0.05,
+                },
+                "priority_weight_fatigue": {
+                    "base": 0.0,
+                    "min": 0.0,
+                    "max": 2.0,
+                    "cor_gain": 0.25,
+                    "ser_gain": 0.06,
+                    "end_suppress": 0.16,
+                    "da_suppress": 0.05,
+                },
+                "priority_weight_recency_gain": {
+                    "base": 0.0,
+                    "min": 0.0,
+                    "max": 2.0,
+                    "nov_gain": 0.40,
+                    "da_gain": 0.14,
+                    "adr_gain": 0.08,
+                    "ser_suppress": 0.10,
+                    "foc_suppress": 0.12,
+                    "cor_suppress": 0.08,
+                },
+                "focus_boost_weight": {
+                    "base": 1.0,
+                    "min": 0.0,
+                    "max": 4.0,
+                    "foc_gain": 0.65,
+                    "adr_gain": 0.22,
+                    "oxy_gain": 0.18,
+                    "ser_suppress": 0.06,
+                },
+                "attention_energy_budget": {
+                    "base": 8.0,
+                    "min": 0.0,
+                    "max": 26.0,
+                    "adr_gain": 6.5,
+                    "foc_gain": 3.0,
+                    "nov_gain": 3.0,
+                    "da_gain": 2.2,
+                    "oxy_gain": 1.4,
+                    "cor_suppress": 2.4,
+                    "ser_suppress": 2.0,
+                    "end_suppress": 1.25,
+                },
+                "min_total_energy": {
+                    "base": 0.0,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "cor_gain": 0.18,
+                    "foc_gain": 0.08,
+                    "end_suppress": 0.08,
+                    "oxy_suppress": 0.05,
+                },
+                "keep_score_ratio_base": {
+                    "base": 0.28,
+                    "min": 0.12,
+                    "max": 0.85,
+                    "foc_gain": 0.14,
+                    "cor_gain": 0.10,
+                    "ser_gain": 0.08,
+                    "nov_suppress": 0.10,
+                    "adr_suppress": 0.04,
+                },
+                "keep_score_ratio_concentration_gain": {
+                    "base": 0.22,
+                    "min": 0.0,
+                    "max": 0.6,
+                    "foc_gain": 0.08,
+                    "cor_gain": 0.05,
+                    "nov_suppress": 0.05,
+                },
+                "keep_score_ratio_min": {
+                    "base": 0.18,
+                    "min": 0.05,
+                    "max": 0.6,
+                    "foc_gain": 0.04,
+                    "nov_suppress": 0.03,
+                },
+                "keep_score_ratio_max": {
+                    "base": 0.72,
+                    "min": 0.3,
+                    "max": 0.95,
+                    "foc_gain": 0.08,
+                    "ser_gain": 0.05,
+                    "nov_suppress": 0.05,
+                },
+            },
         },
         # HDB modulation output (scales) / HDB 调制输出（缩放系数）
         # 上层（Observatory）会在下一 tick 把 scale 应用到 HDB 配置：
@@ -163,11 +332,51 @@ _DEFAULT_CONFIG: dict[str, Any] = {
             "clamp_min": 0.40,
             "clamp_max": 2.50,
             "scales": {
-                "base_weight_er_gain": {"base": 1.00, "da_gain": 0.90, "cor_suppress": 0.35, "ser_suppress": 0.20},
-                "base_weight_ev_wear": {"base": 1.00, "cor_gain": 0.80, "da_suppress": 0.20},
-                "ev_propagation_ratio": {"base": 1.00, "da_gain": 0.60, "adr_gain": 0.35, "cor_suppress": 0.35, "ser_suppress": 0.20},
-                "ev_propagation_threshold": {"base": 1.00, "cor_gain": 0.55, "da_suppress": 0.25, "ser_gain": 0.20},
-                "er_induction_ratio": {"base": 1.00, "adr_gain": 0.45, "da_gain": 0.20, "cor_suppress": 0.15},
+                "base_weight_er_gain": {
+                    "base": 1.00,
+                    "da_gain": 0.85,
+                    "oxy_gain": 0.35,
+                    "foc_gain": 0.18,
+                    "cor_suppress": 0.35,
+                    "ser_suppress": 0.18,
+                    "end_suppress": 0.08,
+                },
+                "base_weight_ev_wear": {
+                    "base": 1.00,
+                    "cor_gain": 0.75,
+                    "foc_gain": 0.18,
+                    "ser_gain": 0.12,
+                    "da_suppress": 0.18,
+                    "oxy_suppress": 0.12,
+                    "nov_suppress": 0.08,
+                },
+                "ev_propagation_ratio": {
+                    "base": 1.00,
+                    "da_gain": 0.45,
+                    "adr_gain": 0.30,
+                    "oxy_gain": 0.40,
+                    "nov_gain": 0.45,
+                    "cor_suppress": 0.35,
+                    "ser_suppress": 0.20,
+                    "foc_suppress": 0.35,
+                },
+                "ev_propagation_threshold": {
+                    "base": 1.00,
+                    "cor_gain": 0.55,
+                    "foc_gain": 0.45,
+                    "ser_gain": 0.18,
+                    "da_suppress": 0.25,
+                    "oxy_suppress": 0.22,
+                    "nov_suppress": 0.30,
+                },
+                "er_induction_ratio": {
+                    "base": 1.00,
+                    "adr_gain": 0.40,
+                    "da_gain": 0.18,
+                    "oxy_gain": 0.28,
+                    "foc_gain": 0.22,
+                    "cor_suppress": 0.15,
+                },
             },
         },
     },
@@ -271,10 +480,21 @@ class EmotionManager:
             rwd_pun_detail = {}
 
         # 3) 基于 CFS 的增量
-        nt_deltas_from_cfs = self._compute_deltas_from_cfs(cfs_signals)
+        cfs_to_nt_source_mode = str(self._config.get("cfs_to_nt_source_mode", "iesm_rules") or "iesm_rules").strip().lower() or "iesm_rules"
+        if cfs_to_nt_source_mode in {"builtin", "config", "legacy", "hybrid", "both"}:
+            nt_deltas_from_cfs = self._compute_deltas_from_cfs(cfs_signals)
+        else:
+            nt_deltas_from_cfs = {}
 
         # 4) 基于 Rwd/Pun 的增量（对齐理论 3.9.3：reward/pun 应真实影响递质通道）
-        nt_deltas_from_rwd_pun = self._compute_deltas_from_rwd_pun(rwd_pun)
+        rwd_pun_to_nt_source_mode = (
+            str(self._config.get("rwd_pun_to_nt_source_mode", "iesm_rules") or "iesm_rules").strip().lower()
+            or "iesm_rules"
+        )
+        if rwd_pun_to_nt_source_mode in {"builtin", "config", "legacy", "hybrid", "both"}:
+            nt_deltas_from_rwd_pun = self._compute_deltas_from_rwd_pun(rwd_pun)
+        else:
+            nt_deltas_from_rwd_pun = {}
 
         # 5) 额外脚本更新（可选）
         nt_deltas_from_script = self._coerce_channel_delta_dict(script_updates)
@@ -334,6 +554,8 @@ class EmotionManager:
                 "audit": {
                     "tick_id": tick_id,
                     "channel_count": len(after),
+                    "cfs_to_nt_source_mode": cfs_to_nt_source_mode,
+                    "rwd_pun_to_nt_source_mode": rwd_pun_to_nt_source_mode,
                 },
             },
             trace_id=trace_id or tick_id,
@@ -582,36 +804,72 @@ class EmotionManager:
 
         hdb = mod.get("hdb", {}) or {}
 
-        da = float(self._nt_state.get("DA", 0.0))
-        adr = float(self._nt_state.get("ADR", 0.0))
-        oxy = float(self._nt_state.get("OXY", 0.0))
-        ser = float(self._nt_state.get("SER", 0.0))
-        end = float(self._nt_state.get("END", 0.0))
-        cor = float(self._nt_state.get("COR", 0.0))
+        nt_state = {str(ch): float(val) for ch, val in self._nt_state.items()}
+        da = float(nt_state.get("DA", 0.0))
+        adr = float(nt_state.get("ADR", 0.0))
+        oxy = float(nt_state.get("OXY", 0.0))
+        ser = float(nt_state.get("SER", 0.0))
+        end = float(nt_state.get("END", 0.0))
+        cor = float(nt_state.get("COR", 0.0))
 
-        base_top_n = int(att.get("base_top_n", 16))
-        top_n = base_top_n + int(round(adr * float(att.get("adr_topn_gain", 0.0))))
-        top_n -= int(round(cor * float(att.get("cor_topn_suppress", 0.0))))
-        top_n = max(4, min(64, top_n))
+        def build_linear_value(spec: dict[str, Any]) -> float:
+            base = float(spec.get("base", 0.0) or 0.0)
+            value = base
+            for ch, channel_value in nt_state.items():
+                key = str(ch).strip().lower()
+                if not key or not (channel_value > 0.0):
+                    continue
+                value += float(channel_value) * float(spec.get(f"{key}_gain", 0.0) or 0.0)
+                value -= float(channel_value) * float(spec.get(f"{key}_suppress", 0.0) or 0.0)
+            if "min" in spec:
+                value = max(float(spec.get("min", value) or value), value)
+            if "max" in spec:
+                value = min(float(spec.get("max", value) or value), value)
+            return float(value)
 
-        base_cp_w = float(att.get("base_priority_weight_cp_abs", 0.35))
-        cp_w = base_cp_w + cor * float(att.get("cor_cp_weight_gain", 0.0)) - ser * float(att.get("ser_cp_weight_suppress", 0.0))
-        cp_w = round(max(0.0, cp_w), 8)
+        attention_field_specs = att.get("field_specs", {}) if isinstance(att.get("field_specs", {}), dict) else {}
+        if attention_field_specs:
+            attention_out: dict[str, Any] = {}
+            for field_name, spec in attention_field_specs.items():
+                if not isinstance(spec, dict):
+                    continue
+                raw_value = build_linear_value(spec)
+                if bool(spec.get("round_to_int", False)):
+                    attention_out[str(field_name)] = int(round(raw_value))
+                else:
+                    attention_out[str(field_name)] = round(float(raw_value), 8)
 
-        base_fatigue_w = float(att.get("base_priority_weight_fatigue", 0.0))
-        fatigue_w = round(max(0.0, base_fatigue_w + cor * float(att.get("cor_fatigue_weight_gain", 0.0))), 8)
+            top_n = int(attention_out.get("top_n", 16) or 16)
+            top_n = max(1, min(64, top_n))
+            attention_out["top_n"] = top_n
+            if "min_cam_items" in attention_out:
+                attention_out["min_cam_items"] = max(1, min(top_n, int(attention_out.get("min_cam_items", 1) or 1)))
+            attention_out["nt_snapshot"] = dict(nt_state)
+            out = {"attention": attention_out}
+        else:
+            base_top_n = int(att.get("base_top_n", 16))
+            top_n = base_top_n + int(round(adr * float(att.get("adr_topn_gain", 0.0))))
+            top_n -= int(round(cor * float(att.get("cor_topn_suppress", 0.0))))
+            top_n = max(4, min(64, top_n))
 
-        base_min_energy = float(att.get("base_min_total_energy", 0.0))
+            base_cp_w = float(att.get("base_priority_weight_cp_abs", 0.35))
+            cp_w = base_cp_w + cor * float(att.get("cor_cp_weight_gain", 0.0)) - ser * float(att.get("ser_cp_weight_suppress", 0.0))
+            cp_w = round(max(0.0, cp_w), 8)
 
-        out = {
-            "attention": {
-                "top_n": int(top_n),
-                "priority_weight_cp_abs": float(cp_w),
-                "priority_weight_fatigue": float(fatigue_w),
-                "min_total_energy": float(base_min_energy),
-                "nt_snapshot": {"DA": da, "ADR": adr, "SER": ser, "COR": cor},
+            base_fatigue_w = float(att.get("base_priority_weight_fatigue", 0.0))
+            fatigue_w = round(max(0.0, base_fatigue_w + cor * float(att.get("cor_fatigue_weight_gain", 0.0))), 8)
+
+            base_min_energy = float(att.get("base_min_total_energy", 0.0))
+
+            out = {
+                "attention": {
+                    "top_n": int(top_n),
+                    "priority_weight_cp_abs": float(cp_w),
+                    "priority_weight_fatigue": float(fatigue_w),
+                    "min_total_energy": float(base_min_energy),
+                    "nt_snapshot": dict(nt_state),
+                }
             }
-        }
 
         # HDB modulation (scales) / HDB 调制（缩放系数）
         # ------------------------------------------------
@@ -632,20 +890,12 @@ class EmotionManager:
             def build_scale(spec: dict[str, Any]) -> float:
                 base = float(spec.get("base", 1.0) or 1.0)
                 s = base
-                # Gains / 增益
-                s += da * float(spec.get("da_gain", 0.0) or 0.0)
-                s += adr * float(spec.get("adr_gain", 0.0) or 0.0)
-                s += oxy * float(spec.get("oxy_gain", 0.0) or 0.0)
-                s += ser * float(spec.get("ser_gain", 0.0) or 0.0)
-                s += end * float(spec.get("end_gain", 0.0) or 0.0)
-                s += cor * float(spec.get("cor_gain", 0.0) or 0.0)
-                # Suppress / 抑制
-                s -= da * float(spec.get("da_suppress", 0.0) or 0.0)
-                s -= adr * float(spec.get("adr_suppress", 0.0) or 0.0)
-                s -= oxy * float(spec.get("oxy_suppress", 0.0) or 0.0)
-                s -= ser * float(spec.get("ser_suppress", 0.0) or 0.0)
-                s -= end * float(spec.get("end_suppress", 0.0) or 0.0)
-                s -= cor * float(spec.get("cor_suppress", 0.0) or 0.0)
+                for ch, channel_value in nt_state.items():
+                    key = str(ch).strip().lower()
+                    if not key or not (channel_value > 0.0):
+                        continue
+                    s += float(channel_value) * float(spec.get(f"{key}_gain", 0.0) or 0.0)
+                    s -= float(channel_value) * float(spec.get(f"{key}_suppress", 0.0) or 0.0)
                 # Clamp / 限制
                 if s < clamp_min:
                     s = clamp_min
@@ -666,7 +916,7 @@ class EmotionManager:
                     **out_scales,
                     "clamp_min": float(clamp_min),
                     "clamp_max": float(clamp_max),
-                    "nt_snapshot": {"DA": da, "ADR": adr, "OXY": oxy, "SER": ser, "END": end, "COR": cor},
+                    "nt_snapshot": dict(nt_state),
                 }
 
         return out

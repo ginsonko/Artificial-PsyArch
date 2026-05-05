@@ -496,6 +496,7 @@ class InnateScriptManager:
         state_windows: list[dict[str, Any]] | None = None,
         context: dict[str, Any] | None = None,
         dry_run: bool = False,
+        allowed_phases: list[str] | tuple[str, ...] | set[str] | None = None,
     ) -> dict:
         """
         对完整 tick 上下文执行 IESM 规则（推荐使用）。
@@ -506,6 +507,7 @@ class InnateScriptManager:
           - state_windows: [{"stage": "...", "packet": <script_check_packet>}, ...]
           - context: 规则上下文（指标/状态池/情绪/查存过程等运行态数据），用于 metric 条件与脚本变量
           - dry_run: True 时不修改冷却/记账状态（用于前端模拟）
+          - allowed_phases: 只执行指定 phase（如 ["cfs", "directives"] / ["emotion_post"]）
         """
         start_time = time.time()
         self._total_calls += 1
@@ -541,6 +543,7 @@ class InnateScriptManager:
                 context=context if isinstance(context, dict) else {},
                 now_ms=None,
                 runtime_state=runtime_state,
+                allowed_phases=allowed_phases,
             )
             return self._make_response(
                 success=True,

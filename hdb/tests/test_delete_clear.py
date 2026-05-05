@@ -143,6 +143,49 @@ class TestHDBDeleteClear(unittest.TestCase):
         self.assertIn('我', packet_tokens)
         self.assertIn('好', packet_tokens)
 
+    def test_cam_display_fallback_preserves_standalone_attribute_sa_as_attribute_unit(self):
+        item = {
+            'id': 'spi_attr_reward_signal',
+            'item_id': 'spi_attr_reward_signal',
+            'ref_object_id': 'sa_attr_reward_signal_runtime',
+            'ref_object_type': 'sa',
+            'display': '奖励信号:0.8',
+            'er': 0.0,
+            'ev': 0.8,
+            'ref_snapshot': {
+                'content_display': '奖励信号:0.8',
+                'role': 'attribute',
+                'attribute_name': 'reward_signal',
+                'attribute_value': 0.8,
+                'value_type': 'numerical',
+            },
+        }
+
+        result = self.hdb._structure_retrieval._run_cam_internal_stimulus_only(
+            items=[item],
+            trace_id='dc_attr_fallback',
+            tick_id='tick_dc_attr_fallback',
+            cut_engine=self.hdb._cut,
+        )
+
+        self.assertTrue(result['internal_stimulus_fragments'])
+        fragment = result['internal_stimulus_fragments'][0]
+        self.assertFalse(fragment.get('ext', {}).get('display_fallback_char_split'))
+        self.assertIn('reward_signal:0.8', [str(token) for token in (fragment.get('flat_tokens', []) or [])])
+
+        packet = self.hdb._cut.build_internal_stimulus_packet(
+            result['internal_stimulus_fragments'],
+            trace_id='dc_attr_fallback_packet',
+            tick_id='tick_dc_attr_fallback',
+        )
+        attribute_items = [
+            row
+            for row in packet.get('sa_items', [])
+            if (row.get('stimulus', {}) or {}).get('role') == 'attribute'
+        ]
+        self.assertTrue(attribute_items)
+        self.assertEqual(attribute_items[0].get('content', {}).get('attribute_name'), 'reward_signal')
+
     def test_internal_packet_only_skips_display_joiners_for_marked_fallback_fragments(self):
         base_fragment = {
             'fragment_id': 'frag_plus',

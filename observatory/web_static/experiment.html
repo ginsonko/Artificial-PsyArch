@@ -16,6 +16,7 @@
       </div>
       <nav class="sidebar-nav">
         <a href="/">返回观测台主页</a>
+        <a href="/next/#experiment">新版研究仪表盘（实验页）</a>
         <a href="#exp_standard">数据集标准</a>
         <a href="#exp_dataset">数据集</a>
         <a href="#exp_run">当前状态</a>
@@ -145,10 +146,12 @@
                   <option value="clear_runtime">清空运行态</option>
                   <option value="clear_all">清空全部</option>
                 </select>
+                <label class="toggle-row"><input id="expCleanRunChk" type="checkbox" /><span>纯净运行：启动前清空全部</span></label>
               </article>
               <article class="setting-item">
                 <label>最大 Tick（可选）</label>
                 <input id="expMaxTicks" type="number" min="1" step="1" placeholder="留空表示跑完整数据集" />
+                <label class="toggle-row"><input id="expRunAllTicksChk" type="checkbox" /><span>跑完整数据集（忽略最大 Tick）</span></label>
               </article>
               <article class="setting-item">
                 <label>时间基准覆盖（可选）</label>
@@ -260,6 +263,15 @@
           <span class="meta">长期指标、规则、参数目录、审计与回滚</span>
         </div>
         <div id="expAutoTunerOverviewCards" class="card-grid compact"></div>
+
+        <div class="subpanel exp-spaced-top">
+          <div class="section-head">
+            <h4>感应生长、运行态分辨率与回滚诊断专项快照</h4>
+            <span class="meta">主链优先看 A+B 生长、完整身份汇聚、组件 ER/EV 与运行态分辨率；旧上下文/CS 只作折叠诊断</span>
+          </div>
+          <div id="expAtMetricInsightCards" class="card-grid compact"></div>
+          <div id="expAtMetricInsightNarrative" class="stack exp-spaced-top"></div>
+        </div>
 
         <div class="subpanel exp-spaced-top">
           <div class="section-head">

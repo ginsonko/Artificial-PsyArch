@@ -15,6 +15,7 @@ It is shared by:
 
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import dataclass
 from typing import Any, Iterable
@@ -43,6 +44,7 @@ DATASET_PROTOCOL_DOC: dict[str, Any] = {
     "core_rules": [
         "YAML 根节点必须是对象，至少包含 dataset_id、seed、time_basis、episodes。",
         "当 time_basis=tick 时，必须显式给出 tick_dt_ms。",
+        "如需专项实验开关，可在 YAML 顶层写 app_config_override；它只在本次 run 内临时生效，结束后恢复。",
         "episodes[*].ticks[*] 必须是 text 或 empty=true 二选一，不能同时出现。",
         "JSONL 每一行都代表一个真实 tick，对象至少要能推导出 input_text 或 input_is_empty。",
         "labels 用于教师反馈、评测标签、工具期望等可审计信息，建议使用中文键名或补充中文注释字段。",
@@ -62,6 +64,7 @@ DATASET_PROTOCOL_DOC: dict[str, Any] = {
         {"field": "experiment_goal", "meaning": "实验目标，例如“测试长期学习后是否仍有惊讶感”。"},
         {"field": "evaluation_dimensions", "meaning": "评估维度列表，例如“记忆召回准确率、文本可读性、情绪稳定性”。"},
         {"field": "notes", "meaning": "设计备注或人工审计说明。"},
+        {"field": "app_config_override", "meaning": "单次运行时临时覆写观测台 app 配置，例如打开某个专项实验开关。"},
     ],
     "jsonl_fields": [
         {"field": "input_text", "meaning": "当前 tick 的文本输入。空字符串表示空 tick。", "required": False},
@@ -86,6 +89,8 @@ evaluation_dimensions:
 notes:
   - 规模统计只按真实文本 tick 计数
   - 空 tick 只允许用于专门的时间/遗忘实验
+app_config_override:
+  stimulus_residual_memory_promotion_enabled: true
 seed: 20260419
 time_basis: tick
 tick_dt_ms: 100
@@ -142,6 +147,14 @@ def _normalize_labels(v: Any, *, where: str) -> dict[str, Any]:
         out["expectation_contracts"] = contracts
         out.pop("expectation_contract", None)
     return out
+
+
+def _normalize_override_mapping(v: Any, *, where: str) -> dict[str, Any]:
+    if v is None:
+        return {}
+    if not isinstance(v, dict):
+        raise DatasetValidationError(f"{where} must be a mapping (dict).")
+    return copy.deepcopy(v)
 
 
 def validate_meta(raw: dict[str, Any]) -> DatasetMeta:
@@ -250,6 +263,17 @@ def validate_and_normalize_dataset(raw: dict[str, Any]) -> dict[str, Any]:
     for i, ep in enumerate(episodes_list):
         episodes_norm.append(normalize_episode(ep, index=i))
 
+    legacy_runtime_override = _normalize_override_mapping(
+        raw.get("runtime_config_override", None),
+        where="runtime_config_override",
+    )
+    app_config_override = _normalize_override_mapping(
+        raw.get("app_config_override", None),
+        where="app_config_override",
+    )
+    merged_app_config_override = dict(legacy_runtime_override)
+    merged_app_config_override.update(app_config_override)
+
     out = dict(raw)
     out["_meta"] = {
         "dataset_id": meta.dataset_id,
@@ -263,6 +287,11 @@ def validate_and_normalize_dataset(raw: dict[str, Any]) -> dict[str, Any]:
     if meta.time_basis == "tick":
         out["tick_dt_ms"] = meta.tick_dt_ms
     out["episodes"] = episodes_norm
+    out.pop("runtime_config_override", None)
+    if merged_app_config_override:
+        out["app_config_override"] = merged_app_config_override
+    else:
+        out.pop("app_config_override", None)
     return out
 
 
@@ -339,6 +368,12 @@ def dataset_overview(dataset: dict[str, Any]) -> dict[str, Any]:
     notes_raw = dataset.get("notes", [])
     evaluation_dimensions = [str(x).strip() for x in dims_raw if str(x).strip()] if isinstance(dims_raw, list) else []
     notes = [str(x).strip() for x in notes_raw if str(x).strip()] if isinstance(notes_raw, list) else []
+    app_config_override = (
+        copy.deepcopy(dataset.get("app_config_override", {}))
+        if isinstance(dataset.get("app_config_override"), dict)
+        else {}
+    )
+    app_config_override_keys = sorted(str(key).strip() for key in app_config_override.keys() if str(key).strip())
     return {
         "dataset_id": str(dataset.get("dataset_id", "") or ""),
         "title": str(dataset.get("title", "") or ""),
@@ -352,6 +387,8 @@ def dataset_overview(dataset: dict[str, Any]) -> dict[str, Any]:
         "labeled_ticks": counts.get("labeled_ticks", 0),
         "evaluation_dimensions": evaluation_dimensions,
         "notes": notes,
+        "app_config_override": app_config_override,
+        "app_config_override_keys": app_config_override_keys,
     }
 
 

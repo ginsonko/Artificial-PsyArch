@@ -1,0 +1,177 @@
+modulation:
+  attention:
+    base_top_n: 16
+    adr_topn_gain: 6
+    cor_topn_suppress: 2
+    base_priority_weight_cp_abs: 0.35
+    cor_cp_weight_gain: 0.2
+    ser_cp_weight_suppress: 0.1
+    base_priority_weight_fatigue: 0.0
+    cor_fatigue_weight_gain: 0.25
+    base_min_total_energy: 0.0
+    field_specs:
+      top_n:
+        base: 16
+        min: 4
+        max: 64
+        round_to_int: true
+        adr_gain: 5.5
+        nov_gain: 4.0
+        da_gain: 1.0
+        cor_suppress: 3.0
+        ser_suppress: 1.2
+        foc_suppress: 4.0
+      min_cam_items:
+        base: 2
+        min: 1
+        max: 12
+        round_to_int: true
+        adr_gain: 1.0
+        nov_gain: 1.0
+        foc_suppress: 1.0
+      priority_weight_total_energy:
+        base: 1.25
+        min: 0.0
+        max: 4.0
+        foc_gain: 0.55
+        oxy_gain: 0.25
+        cor_gain: 0.18
+        da_gain: 0.1
+        nov_suppress: 0.18
+      priority_weight_cp_abs:
+        base: 0.35
+        min: 0.0
+        max: 2.0
+        cor_gain: 0.28
+        adr_gain: 0.1
+        foc_gain: 0.08
+        ser_suppress: 0.12
+        end_suppress: 0.08
+        oxy_suppress: 0.04
+      priority_weight_salience:
+        base: 0.15
+        min: 0.0
+        max: 2.0
+        adr_gain: 0.32
+        nov_gain: 0.24
+        cor_gain: 0.06
+        ser_suppress: 0.05
+      priority_weight_fatigue:
+        base: 0.0
+        min: 0.0
+        max: 2.0
+        cor_gain: 0.25
+        ser_gain: 0.06
+        end_suppress: 0.16
+        da_suppress: 0.05
+      priority_weight_recency_gain:
+        base: 0.0
+        min: 0.0
+        max: 2.0
+        nov_gain: 0.4
+        da_gain: 0.14
+        adr_gain: 0.08
+        ser_suppress: 0.1
+        foc_suppress: 0.12
+        cor_suppress: 0.08
+      focus_boost_weight:
+        base: 1.0
+        min: 0.0
+        max: 4.0
+        foc_gain: 0.65
+        adr_gain: 0.22
+        oxy_gain: 0.18
+        ser_suppress: 0.06
+      attention_energy_budget:
+        base: 8.0
+        min: 0.0
+        max: 26.0
+        adr_gain: 6.5
+        foc_gain: 3.0
+        nov_gain: 3.0
+        da_gain: 2.2
+        oxy_gain: 1.4
+        cor_suppress: 2.4
+        ser_suppress: 2.0
+        end_suppress: 1.25
+      min_total_energy:
+        base: 0.0
+        min: 0.0
+        max: 1.0
+        cor_gain: 0.18
+        foc_gain: 0.08
+        end_suppress: 0.08
+        oxy_suppress: 0.05
+      keep_score_ratio_base:
+        base: 0.28
+        min: 0.12
+        max: 0.85
+        foc_gain: 0.14
+        cor_gain: 0.1
+        ser_gain: 0.08
+        nov_suppress: 0.1
+        adr_suppress: 0.04
+      keep_score_ratio_concentration_gain:
+        base: 0.22
+        min: 0.0
+        max: 0.6
+        foc_gain: 0.08
+        cor_gain: 0.05
+        nov_suppress: 0.05
+      keep_score_ratio_min:
+        base: 0.18
+        min: 0.05
+        max: 0.6
+        foc_gain: 0.04
+        nov_suppress: 0.03
+      keep_score_ratio_max:
+        base: 0.72
+        min: 0.3
+        max: 0.95
+        foc_gain: 0.08
+        ser_gain: 0.05
+        nov_suppress: 0.05
+  hdb:
+    clamp_min: 0.4
+    clamp_max: 2.5
+    scales:
+      base_weight_er_gain:
+        base: 1.0
+        da_gain: 0.85
+        oxy_gain: 0.35
+        foc_gain: 0.18
+        cor_suppress: 0.35
+        ser_suppress: 0.18
+        end_suppress: 0.08
+      base_weight_ev_wear:
+        base: 1.0
+        cor_gain: 0.75
+        foc_gain: 0.18
+        ser_gain: 0.12
+        da_suppress: 0.18
+        oxy_suppress: 0.12
+        nov_suppress: 0.08
+      ev_propagation_ratio:
+        base: 1.07
+        da_gain: 0.49
+        adr_gain: 0.42
+        oxy_gain: 0.52
+        nov_gain: 0.59
+        cor_suppress: 0.43
+        ser_suppress: 0.23
+        foc_suppress: 0.36
+      ev_propagation_threshold:
+        base: 1.0
+        cor_gain: 0.56
+        foc_gain: 0.45
+        ser_gain: 0.18
+        da_suppress: 0.25
+        oxy_suppress: 0.22
+        nov_suppress: 0.3
+      er_induction_ratio:
+        base: 1.0
+        adr_gain: 0.4
+        da_gain: 0.18
+        oxy_gain: 0.28
+        foc_gain: 0.22
+        cor_suppress: 0.15

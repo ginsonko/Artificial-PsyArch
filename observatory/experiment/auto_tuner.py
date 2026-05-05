@@ -146,7 +146,7 @@ def _append_rollback_point(point: dict[str, Any]) -> None:
 
 def _default_state_payload() -> dict[str, Any]:
     return {
-        "schema_version": "v3",
+        "schema_version": "v4",
         "persisted_params": {},
         "rule_health": {},
         "active_trials": [],
@@ -156,7 +156,16 @@ def _default_state_payload() -> dict[str, Any]:
         "observation_history": [],
         "observation_review_history": [],
         "last_observation_review": {},
+        "last_short_term_snapshots": {},
+        "last_long_term_snapshots": {},
     }
+
+
+LEGACY_PARAM_ID_ALIASES: dict[str, str] = {
+    "emotion.subjective_modulators.ev_propagation_ratio.base": "emotion.modulation.hdb.scales.ev_propagation_ratio.base",
+    "emotion.subjective_modulators.er_induction_ratio.base": "emotion.modulation.hdb.scales.er_induction_ratio.base",
+    "emotion.subjective_modulators.ev_propagation_threshold.base": "emotion.modulation.hdb.scales.ev_propagation_threshold.base",
+}
 
 
 # ------------------------------
@@ -198,6 +207,8 @@ class AutoTunerConfig:
     enabled: bool = False
     enable_short_term: bool = True
     enable_long_term: bool = True
+    enable_ev_er_ratio_tuning: bool = False
+    enable_memory_feedback_tuning: bool = False
     short_window_ticks: int = 10
     long_window_ticks: int = 40
     decision_cooldown_ticks: int = 2
@@ -228,6 +239,8 @@ class AutoTunerConfig:
             "enabled": bool(self.enabled),
             "enable_short_term": bool(self.enable_short_term),
             "enable_long_term": bool(self.enable_long_term),
+            "enable_ev_er_ratio_tuning": bool(self.enable_ev_er_ratio_tuning),
+            "enable_memory_feedback_tuning": bool(self.enable_memory_feedback_tuning),
             "short_window_ticks": int(self.short_window_ticks),
             "long_window_ticks": int(self.long_window_ticks),
             "decision_cooldown_ticks": int(self.decision_cooldown_ticks),
@@ -275,6 +288,8 @@ def load_auto_tuner_config() -> AutoTunerConfig:
         enabled=_b("enabled", cfg.enabled),
         enable_short_term=_b("enable_short_term", cfg.enable_short_term),
         enable_long_term=_b("enable_long_term", cfg.enable_long_term),
+        enable_ev_er_ratio_tuning=_b("enable_ev_er_ratio_tuning", cfg.enable_ev_er_ratio_tuning),
+        enable_memory_feedback_tuning=_b("enable_memory_feedback_tuning", cfg.enable_memory_feedback_tuning),
         short_window_ticks=max(3, _i("short_window_ticks", cfg.short_window_ticks)),
         long_window_ticks=max(10, _i("long_window_ticks", cfg.long_window_ticks)),
         decision_cooldown_ticks=max(0, _i("decision_cooldown_ticks", cfg.decision_cooldown_ticks)),
@@ -335,6 +350,8 @@ def save_auto_tuner_config(updates: dict[str, Any]) -> AutoTunerConfig:
         enabled=_pick_bool("enabled", current.enabled),
         enable_short_term=_pick_bool("enable_short_term", current.enable_short_term),
         enable_long_term=_pick_bool("enable_long_term", current.enable_long_term),
+        enable_ev_er_ratio_tuning=_pick_bool("enable_ev_er_ratio_tuning", current.enable_ev_er_ratio_tuning),
+        enable_memory_feedback_tuning=_pick_bool("enable_memory_feedback_tuning", current.enable_memory_feedback_tuning),
         short_window_ticks=max(3, _pick_int("short_window_ticks", current.short_window_ticks)),
         long_window_ticks=max(10, _pick_int("long_window_ticks", current.long_window_ticks)),
         decision_cooldown_ticks=max(0, _pick_int("decision_cooldown_ticks", current.decision_cooldown_ticks)),
@@ -414,8 +431,43 @@ def _normalize_param_bound_item(value: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
 
+def _metric_target_to_public_dict(target: MetricTarget) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "key": str(target.key),
+        "expected_min": float(target.expected_min),
+        "expected_max": float(target.expected_max),
+        "ideal": float(target.ideal),
+        "min_std": float(target.min_std),
+        "weight": float(target.weight),
+    }
+    if target.high_band_threshold is not None:
+        out["high_band_threshold"] = float(target.high_band_threshold)
+    if target.high_band_max_ratio is not None:
+        out["high_band_max_ratio"] = float(target.high_band_max_ratio)
+    if target.high_band_soft_p95 is not None:
+        out["high_band_soft_p95"] = float(target.high_band_soft_p95)
+    if target.high_band_max_run is not None:
+        out["high_band_max_run"] = int(target.high_band_max_run)
+    return out
+
+
+def _default_metric_target_defs() -> list[dict[str, Any]]:
+    meta_by_key = {str(item.get("key", "")): dict(item) for item in _base_metric_target_definitions()}
+    for target in _default_metric_targets():
+        merged = dict(meta_by_key.get(str(target.key), {}))
+        merged.update(_metric_target_to_public_dict(target))
+        meta_by_key[str(target.key)] = merged
+    out = list(meta_by_key.values())
+    out.sort(key=lambda item: (str(item.get("group", "")), str(item.get("key", ""))))
+    return out
+
+
 def _merge_metric_target_defs() -> list[dict[str, Any]]:
-    meta_by_key = {str(item.get("key", "")): dict(item) for item in param_catalog.list_metric_definitions()}
+    meta_by_key = {str(item.get("key", "")): dict(item) for item in _base_metric_target_definitions()}
+    for target in _default_metric_targets():
+        merged = dict(meta_by_key.get(str(target.key), {}))
+        merged.update(_metric_target_to_public_dict(target))
+        meta_by_key[str(target.key)] = merged
     raw_cfg = _load_raw_config_dict()
     overrides = raw_cfg.get("metric_targets")
     if isinstance(overrides, list):
@@ -434,12 +486,18 @@ def _merge_metric_target_defs() -> list[dict[str, Any]]:
 def load_auto_tuner_public_config() -> dict[str, Any]:
     raw_cfg = _load_raw_config_dict()
     metric_targets = _merge_metric_target_defs()
+    metric_target_defaults = _default_metric_target_defs()
+    metric_target_overrides = raw_cfg.get("metric_targets")
+    if not isinstance(metric_target_overrides, list):
+        metric_target_overrides = []
     param_bounds = raw_cfg.get("param_bounds")
     if not isinstance(param_bounds, dict):
         param_bounds = {}
     return {
         "config": load_auto_tuner_config().to_public_dict(),
         "metric_targets": metric_targets,
+        "metric_target_defaults": metric_target_defaults,
+        "metric_target_overrides": list(metric_target_overrides),
         "param_bounds": dict(param_bounds),
         "config_path": str(_config_path()),
         "rules_path": str(_rules_path()),
@@ -472,6 +530,11 @@ def save_auto_tuner_public_config(updates: dict[str, Any]) -> dict[str, Any]:
         enabled=_pick_bool("enabled", current.enabled),
         enable_short_term=_pick_bool("enable_short_term", current.enable_short_term),
         enable_long_term=_pick_bool("enable_long_term", current.enable_long_term),
+        enable_ev_er_ratio_tuning=_pick_bool("enable_ev_er_ratio_tuning", current.enable_ev_er_ratio_tuning),
+        enable_memory_feedback_tuning=_pick_bool(
+            "enable_memory_feedback_tuning",
+            current.enable_memory_feedback_tuning,
+        ),
         short_window_ticks=max(3, _pick_int("short_window_ticks", current.short_window_ticks)),
         long_window_ticks=max(10, _pick_int("long_window_ticks", current.long_window_ticks)),
         decision_cooldown_ticks=max(0, _pick_int("decision_cooldown_ticks", current.decision_cooldown_ticks)),
@@ -659,7 +722,7 @@ def save_auto_tuner_rules(updates: dict[str, Any]) -> dict[str, Any]:
     return load_auto_tuner_rules()
 
 
-def _default_metric_targets() -> list[MetricTarget]:
+def _legacy_default_metric_targets() -> list[MetricTarget]:
     """
     Defaults are intentionally conservative; users can refine expected ranges per environment.
 
@@ -671,9 +734,16 @@ def _default_metric_targets() -> list[MetricTarget]:
     return [
         # Performance / resource
         MetricTarget(key="timing_total_logic_ms", expected_min=0.0, expected_max=8000.0, ideal=4500.0, min_std=200.0, weight=1.0),
+        MetricTarget(key="timing_structure_level_ms", expected_min=0.0, expected_max=1400.0, ideal=450.0, min_std=60.0, weight=0.55),
+        MetricTarget(key="timing_stimulus_level_ms", expected_min=0.0, expected_max=4200.0, ideal=2200.0, min_std=120.0, weight=0.65),
+        MetricTarget(key="timing_cache_neutralization_ms", expected_min=0.0, expected_max=2400.0, ideal=1200.0, min_std=80.0, weight=0.55),
+        MetricTarget(key="timing_maintenance_ms", expected_min=0.0, expected_max=900.0, ideal=260.0, min_std=25.0, weight=0.45),
+        MetricTarget(key="timing_attention_ms", expected_min=0.0, expected_max=240.0, ideal=60.0, min_std=12.0, weight=0.35),
+        MetricTarget(key="timing_sensor_ms", expected_min=0.0, expected_max=120.0, ideal=30.0, min_std=8.0, weight=0.25),
+        MetricTarget(key="timing_time_sensor_ms", expected_min=0.0, expected_max=80.0, ideal=18.0, min_std=6.0, weight=0.2),
         MetricTarget(key="internal_resolution_raw_unit_count", expected_min=0.0, expected_max=350.0, ideal=160.0, min_std=10.0, weight=1.0),
         MetricTarget(key="internal_sa_count", expected_min=64.0, expected_max=260.0, ideal=140.0, min_std=8.0, weight=1.0),
-        MetricTarget(key="internal_to_external_sa_ratio", expected_min=1.25, expected_max=6.0, ideal=2.2, min_std=0.08, weight=1.0),
+        MetricTarget(key="internal_to_external_sa_ratio", expected_min=1.25, expected_max=12.0, ideal=4.0, min_std=0.08, weight=0.35),
         MetricTarget(
             key="internal_resolution_structure_count_selected",
             expected_min=3.0,
@@ -685,9 +755,24 @@ def _default_metric_targets() -> list[MetricTarget]:
         MetricTarget(key="merged_flat_token_count", expected_min=0.0, expected_max=240.0, ideal=140.0, min_std=0.0, weight=0.9),
         MetricTarget(key="sensor_echo_pool_size", expected_min=0.0, expected_max=24.0, ideal=6.0, min_std=0.0, weight=0.35),
         MetricTarget(key="pool_active_item_count", expected_min=40.0, expected_max=260.0, ideal=150.0, min_std=0.0, weight=0.75),
+        MetricTarget(key="pool_contextual_item_ratio", expected_min=0.12, expected_max=0.78, ideal=0.34, min_std=0.03, weight=0.45),
+        MetricTarget(key="pool_residual_origin_item_ratio", expected_min=0.06, expected_max=0.60, ideal=0.20, min_std=0.02, weight=0.5),
         MetricTarget(key="cam_item_count", expected_min=3.0, expected_max=18.0, ideal=8.0, min_std=0.0, weight=0.7),
         MetricTarget(key="pool_total_er", expected_min=60.0, expected_max=260.0, ideal=130.0, min_std=3.0, weight=0.7),
         MetricTarget(key="pool_total_ev", expected_min=60.0, expected_max=320.0, ideal=150.0, min_std=3.0, weight=0.95),
+        MetricTarget(key="pool_energy_injection_throttle_ratio_total", expected_min=0.0, expected_max=0.45, ideal=0.12, min_std=0.01, weight=0.45),
+        MetricTarget(key="pool_energy_injection_side_hit_count", expected_min=0.0, expected_max=80.0, ideal=8.0, min_std=0.0, weight=0.25),
+        MetricTarget(key="pool_energy_injection_min_scale", expected_min=0.18, expected_max=1.0, ideal=0.72, min_std=0.02, weight=0.20),
+        MetricTarget(key="attention_energy_budget", expected_min=3.0, expected_max=18.0, ideal=8.0, min_std=1.4, weight=0.45),
+        MetricTarget(key="attention_net_delta_energy", expected_min=0.0, expected_max=11.0, ideal=6.5, min_std=1.2, weight=0.65),
+        MetricTarget(key="attention_suppressed_total_energy", expected_min=0.0, expected_max=80.0, ideal=8.0, min_std=0.5, weight=0.25),
+        # Diagnostic-only legacy ratio target:
+        # - kept for optional closed-loop EV/ER experiments
+        # - default weight stays 0.0 so the new default line does not directly tune toward a fixed EV/ER ratio
+        MetricTarget(key="pool_ev_to_er_ratio", expected_min=1.02, expected_max=1.30, ideal=1.10, min_std=0.04, weight=0.0),
+        MetricTarget(key="memory_feedback_packet_total_ev", expected_min=0.0, expected_max=8.0, ideal=2.4, min_std=0.25, weight=0.0),
+        MetricTarget(key="memory_feedback_structure_projection_total_ev", expected_min=0.0, expected_max=9.0, ideal=3.0, min_std=0.25, weight=0.0),
+        MetricTarget(key="memory_feedback_structure_projection_count", expected_min=0.0, expected_max=16.0, ideal=4.0, min_std=0.3, weight=0.0),
         MetricTarget(key="pool_total_cp", expected_min=40.0, expected_max=260.0, ideal=120.0, min_std=3.0, weight=0.7),
         # CFS dynamics
         # Philosophy note:
@@ -825,19 +910,129 @@ def _default_metric_targets() -> list[MetricTarget]:
             high_band_soft_p95=0.76,
             high_band_max_run=4,
         ),
+        MetricTarget(
+            key="nt_NOV",
+            expected_min=0.0,
+            expected_max=0.65,
+            ideal=0.20,
+            min_std=0.03,
+            weight=0.35,
+            high_band_threshold=0.50,
+            high_band_max_ratio=0.22,
+            high_band_soft_p95=0.76,
+            high_band_max_run=4,
+        ),
+        MetricTarget(
+            key="nt_FOC",
+            expected_min=0.0,
+            expected_max=0.70,
+            ideal=0.24,
+            min_std=0.03,
+            weight=0.38,
+            high_band_threshold=0.50,
+            high_band_max_ratio=0.28,
+            high_band_soft_p95=0.80,
+            high_band_max_run=5,
+        ),
         MetricTarget(key="time_sensor_bucket_energy_sum", expected_min=2.0, expected_max=40.0, ideal=16.0, min_std=1.5, weight=0.45),
         MetricTarget(key="time_sensor_attribute_binding_count", expected_min=0.0, expected_max=12.0, ideal=4.0, min_std=1.0, weight=0.4),
+        MetricTarget(key="hdb_same_content_multi_context_ratio", expected_min=0.02, expected_max=0.36, ideal=0.10, min_std=0.01, weight=0.35),
+        MetricTarget(key="hdb_residual_diff_entry_ratio", expected_min=0.18, expected_max=0.92, ideal=0.48, min_std=0.02, weight=0.45),
         # Action rates (we derive window rates from these per-tick counts)
         MetricTarget(key="action_executed_recall", expected_min=0.0, expected_max=0.25, ideal=0.06, min_std=0.015, weight=0.8),
         MetricTarget(key="action_executed_attention_focus", expected_min=0.05, expected_max=0.65, ideal=0.28, min_std=0.03, weight=0.45),
         MetricTarget(key="action_drive_max", expected_min=0.10, expected_max=1.40, ideal=0.72, min_std=0.05, weight=0.55),
         MetricTarget(key="action_drive_active_count", expected_min=1.0, expected_max=16.0, ideal=6.0, min_std=1.0, weight=0.45),
+        MetricTarget(key="attention_structure_carrier_selected_count", expected_min=0.4, expected_max=8.0, ideal=2.0, min_std=0.20, weight=0.45),
+        MetricTarget(key="attention_standalone_special_selected_count", expected_min=0.0, expected_max=1.2, ideal=0.25, min_std=0.10, weight=0.45),
+        MetricTarget(key="attention_repeat_penalty_total", expected_min=0.0, expected_max=6.0, ideal=1.4, min_std=0.20, weight=0.20),
         # Cognitive stitching / string-mode structure output
         MetricTarget(key="cs_candidate_count", expected_min=0.8, expected_max=10.0, ideal=3.5, min_std=0.2, weight=0.65),
-        MetricTarget(key="cs_action_count", expected_min=0.12, expected_max=4.0, ideal=0.8, min_std=0.08, weight=0.75),
+        MetricTarget(key="cs_candidate_rejected_low_score_count", expected_min=0.0, expected_max=6.0, ideal=1.8, min_std=0.15, weight=0.35),
+        MetricTarget(key="cs_candidate_threshold_margin_mean", expected_min=0.02, expected_max=0.40, ideal=0.16, min_std=0.02, weight=0.4),
+        MetricTarget(key="cs_action_count", expected_min=1.0, expected_max=240.0, ideal=48.0, min_std=0.18, weight=0.25),
         MetricTarget(key="stimulus_new_structure_count", expected_min=0.12, expected_max=6.0, ideal=1.0, min_std=0.05, weight=0.6),
         MetricTarget(key="timing_cognitive_stitching_ms", expected_min=0.0, expected_max=1200.0, ideal=180.0, min_std=25.0, weight=0.4),
     ]
+
+
+def _metric_target_from_definition(item: dict[str, Any], *, fallback: MetricTarget | None = None) -> MetricTarget:
+    key = str(item.get("key", "") or "").strip()
+    if not key:
+        raise ValueError("metric target definition missing key")
+    base = fallback
+    return MetricTarget(
+        key=key,
+        expected_min=float(item.get("expected_min", getattr(base, "expected_min", 0.0))),
+        expected_max=float(item.get("expected_max", getattr(base, "expected_max", 0.0))),
+        ideal=float(item.get("ideal", getattr(base, "ideal", 0.0))),
+        min_std=float(item.get("min_std", getattr(base, "min_std", 0.0))),
+        weight=float(item.get("weight", getattr(base, "weight", 1.0))),
+        high_band_threshold=(
+            _safe_float_or_none(item.get("high_band_threshold"))
+            if "high_band_threshold" in item
+            else getattr(base, "high_band_threshold", None)
+        ),
+        high_band_max_ratio=(
+            _safe_float_or_none(item.get("high_band_max_ratio"))
+            if "high_band_max_ratio" in item
+            else getattr(base, "high_band_max_ratio", None)
+        ),
+        high_band_soft_p95=(
+            _safe_float_or_none(item.get("high_band_soft_p95"))
+            if "high_band_soft_p95" in item
+            else getattr(base, "high_band_soft_p95", None)
+        ),
+        high_band_max_run=(
+            _safe_int_or_none(item.get("high_band_max_run"))
+            if "high_band_max_run" in item
+            else getattr(base, "high_band_max_run", None)
+        ),
+    )
+
+
+def _base_metric_target_definitions() -> list[dict[str, Any]]:
+    out = [dict(item) for item in param_catalog.list_metric_definitions() if isinstance(item, dict)]
+    out.sort(key=lambda item: (str(item.get("group", "")), str(item.get("key", ""))))
+    return out
+
+
+def _default_metric_targets() -> list[MetricTarget]:
+    """
+    Runtime default metric targets.
+
+    Source of truth:
+    - expected ranges / ideals / descriptions primarily follow param_catalog
+    - weight / optional high-band fields fall back to the older in-code defaults
+      when the catalog has not annotated them yet
+    """
+
+    base_defs = _base_metric_target_definitions()
+    diagnostic_keys = {
+        str(item.get("key", "") or "").strip()
+        for item in base_defs
+        if bool(item.get("diagnostic_only")) and str(item.get("key", "") or "").strip()
+    }
+    legacy_by_key = {
+        target.key: target
+        for target in _legacy_default_metric_targets()
+        if str(target.key) not in diagnostic_keys
+    }
+    merged: list[MetricTarget] = []
+    seen: set[str] = set()
+    for item in base_defs:
+        if bool(item.get("diagnostic_only")):
+            continue
+        key = str(item.get("key", "") or "").strip()
+        if not key:
+            continue
+        merged.append(_metric_target_from_definition(item, fallback=legacy_by_key.get(key)))
+        seen.add(key)
+    for key, target in legacy_by_key.items():
+        if key not in seen:
+            merged.append(target)
+    merged.sort(key=lambda item: str(item.key))
+    return merged
 
 
 def _default_param_bounds() -> dict[str, ParamBound]:
@@ -865,6 +1060,15 @@ def _default_param_bounds() -> dict[str, ParamBound]:
         "state_pool.soft_capacity_start_items": ParamBound(80.0, 1200.0, 10.0, quantum=1.0),
         "state_pool.soft_capacity_full_items": ParamBound(160.0, 2400.0, 10.0, quantum=1.0),
         "state_pool.soft_capacity_decay_power_max": ParamBound(4.0, 60.0, 2.0, quantum=0.1),
+        "state_pool.energy_injection_fatigue_same_side_knee_er": ParamBound(1.0, 12.0, 0.50, quantum=0.05),
+        "state_pool.energy_injection_fatigue_same_side_knee_ev": ParamBound(0.8, 10.0, 0.50, quantum=0.05),
+        "state_pool.energy_injection_fatigue_total_knee": ParamBound(2.0, 24.0, 0.80, quantum=0.05),
+        "state_pool.energy_injection_fatigue_saturation_power": ParamBound(0.60, 2.80, 0.10, quantum=0.01),
+        "state_pool.energy_injection_fatigue_total_weight": ParamBound(0.0, 0.80, 0.05, quantum=0.01),
+        "state_pool.energy_injection_fatigue_min_scale": ParamBound(0.05, 0.55, 0.04, quantum=0.01),
+        "state_pool.energy_injection_repeat_fatigue_step": ParamBound(0.05, 1.20, 0.06, quantum=0.01),
+        "state_pool.energy_injection_repeat_fatigue_decay_per_tick": ParamBound(0.70, 0.98, 0.02, quantum=0.001),
+        "state_pool.energy_injection_repeat_fatigue_floor_scale": ParamBound(0.10, 0.80, 0.04, quantum=0.01),
         # Hard capacity (avoid infinite growth in short-term tuning).
         "state_pool.pool_max_items": ParamBound(400.0, 12000.0, 250.0, quantum=1.0),
         # Snapshot payload fuse (avoid thrash in UI/metrics).
@@ -872,18 +1076,61 @@ def _default_param_bounds() -> dict[str, ParamBound]:
         # Attention capacity fuses (avoid explosion; keep within UX envelope).
         "attention.max_cam_items": ParamBound(4.0, 32.0, 2.0, quantum=1.0),
         "attention.min_cam_items": ParamBound(0.0, 8.0, 1.0, quantum=1.0),
+        "attention.attention_energy_budget_base": ParamBound(0.0, 8.0, 1.0, quantum=1.0),
+        "attention.attention_filter_suppression_floor": ParamBound(0.15, 0.70, 0.03, quantum=0.01),
+        "attention.attention_filter_suppression_min_ratio": ParamBound(0.05, 0.70, 0.04, quantum=0.01),
+        "attention.attention_filter_gain_floor": ParamBound(0.25, 0.80, 0.03, quantum=0.01),
+        "attention.attention_filter_gain_exponent": ParamBound(0.60, 2.20, 0.08, quantum=0.01),
+        "attention.reward_action_special_standalone_penalty": ParamBound(0.40, 1.40, 0.08, quantum=0.01),
+        "attention.reward_action_special_standalone_energy_gain": ParamBound(0.05, 0.40, 0.03, quantum=0.01),
+        "attention.reward_action_structure_carrier_bonus": ParamBound(0.20, 1.10, 0.06, quantum=0.01),
+        "attention.reward_action_structure_carrier_value_gain": ParamBound(0.05, 0.45, 0.03, quantum=0.01),
+        "attention.reward_action_structure_carrier_context_gain": ParamBound(0.05, 0.55, 0.03, quantum=0.01),
+        "attention.attention_repeat_fatigue_special_multiplier": ParamBound(1.00, 3.20, 0.12, quantum=0.01),
+        "attention.attention_repeat_fatigue_penalty_gain": ParamBound(0.10, 1.20, 0.06, quantum=0.01),
+        "attention.attention_repeat_fatigue_selected_gain": ParamBound(0.40, 2.20, 0.10, quantum=0.01),
+        "attention.attention_repeat_fatigue_max_penalty": ParamBound(0.40, 3.20, 0.12, quantum=0.01),
+        "attention.attention_repeat_fatigue_recovery_per_call": ParamBound(0.30, 0.85, 0.03, quantum=0.01),
         # Cognitive stitching: keep threshold tuning bounded and conservative.
-        "cognitive_stitching.min_candidate_score": ParamBound(0.05, 0.60, 0.03, quantum=0.005),
-        "cognitive_stitching.min_seed_total_energy": ParamBound(0.10, 0.90, 0.04, quantum=0.005),
-        "cognitive_stitching.min_event_total_energy": ParamBound(0.03, 0.40, 0.02, quantum=0.005),
-        "cognitive_stitching.event_grasp_min_total_energy": ParamBound(0.05, 0.60, 0.03, quantum=0.005),
+        "cognitive_stitching.min_candidate_score": ParamBound(0.02, 0.40, 0.02, quantum=0.005),
+        "cognitive_stitching.min_seed_total_energy": ParamBound(0.0, 0.70, 0.03, quantum=0.005),
+        "cognitive_stitching.min_event_total_energy": ParamBound(0.0, 0.25, 0.015, quantum=0.005),
+        "cognitive_stitching.max_event_component_count": ParamBound(4.0, 16.0, 1.0, quantum=1.0),
+        "cognitive_stitching.snapshot_top_k": ParamBound(0.0, 2048.0, 16.0, quantum=1.0),
+        "cognitive_stitching.max_seed_items": ParamBound(0.0, 2048.0, 16.0, quantum=1.0),
+        "cognitive_stitching.max_events_per_tick": ParamBound(0.0, 2048.0, 16.0, quantum=1.0),
+        "cognitive_stitching.context_concat_max_targets_per_seed": ParamBound(0.0, 2048.0, 8.0, quantum=1.0),
+        "cognitive_stitching.event_grasp_min_total_energy": ParamBound(0.08, 0.40, 0.02, quantum=0.005),
         "cognitive_stitching.edge_ratio_weight": ParamBound(0.05, 1.20, 0.06, quantum=0.01),
         "cognitive_stitching.match_strength_weight": ParamBound(0.05, 1.20, 0.06, quantum=0.01),
         "cognitive_stitching.context_support_weight": ParamBound(0.00, 0.90, 0.04, quantum=0.01),
         "cognitive_stitching.anchor_distance_penalty": ParamBound(0.00, 0.80, 0.04, quantum=0.01),
-        # Emotion / EV shaping: keep within [0, 1]-style normalized envelope.
-        "emotion.subjective_modulators.ev_propagation_ratio.base": ParamBound(0.20, 1.00, 0.05, quantum=0.01),
-        "emotion.subjective_modulators.er_induction_ratio.base": ParamBound(0.20, 1.00, 0.05, quantum=0.01),
+        # Emotion / EV shaping: the growth-era baseline expects first-layer
+        # ER-induced EV and EV propagation to start from a full 1:1 budget.
+        # Autotuning may raise exploratory/emotional modulation, but it should
+        # not quietly weaken these two main HDB coefficients as a performance hack.
+        "emotion.modulation.hdb.scales.ev_propagation_ratio.base": ParamBound(0.55, 1.45, 0.04, quantum=0.01),
+        "emotion.modulation.hdb.scales.er_induction_ratio.base": ParamBound(0.55, 1.45, 0.04, quantum=0.01),
+        "hdb.ev_propagation_ratio": ParamBound(1.00, 1.10, 0.04, quantum=0.01),
+        "hdb.er_induction_ratio": ParamBound(1.00, 1.00, 0.03, quantum=0.01),
+        "hdb.ev_propagation_threshold": ParamBound(0.04, 0.24, 0.02, quantum=0.005),
+        "hdb.induction_raw_residual_structure_share": ParamBound(0.85, 1.00, 0.03, quantum=0.01),
+        "hdb.induction_raw_residual_structure_target_top_k": ParamBound(1.0, 3.0, 1.0, quantum=1.0),
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": ParamBound(0.15, 0.90, 0.05, quantum=0.01),
+        "observatory.memory_feedback_structure_projection_max_targets": ParamBound(2.0, 12.0, 2.0, quantum=1.0),
+        "observatory.induction_source_max_items": ParamBound(4.0, 24.0, 2.0, quantum=1.0),
+        "observatory.induction_source_candidate_top_k": ParamBound(8.0, 48.0, 4.0, quantum=1.0),
+        "observatory.induction_source_ev_quota_ratio": ParamBound(0.20, 0.80, 0.10, quantum=0.01),
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": ParamBound(0.55, 1.45, 0.04, quantum=0.01),
+        "time_sensor.memory_top_k": ParamBound(4.0, 24.0, 2.0, quantum=1.0),
+        "time_sensor.max_total_bindings": ParamBound(4.0, 24.0, 2.0, quantum=1.0),
+        "time_sensor.delayed_task_capacity": ParamBound(12.0, 96.0, 8.0, quantum=1.0),
+        "time_sensor.max_projection_bind_targets_per_memory": ParamBound(1.0, 4.0, 1.0, quantum=1.0),
+        "time_sensor.projection_target_keep_ratio": ParamBound(0.45, 0.90, 0.04, quantum=0.01),
+        "time_sensor.delayed_task_register_min_delta_energy": ParamBound(0.08, 0.80, 0.04, quantum=0.01),
+        "time_sensor.delayed_task_energy_ratio": ParamBound(0.35, 0.85, 0.03, quantum=0.01),
+        "time_sensor.delayed_task_energy_min": ParamBound(0.02, 0.20, 0.01, quantum=0.005),
+        "time_sensor.delayed_task_energy_max": ParamBound(0.20, 1.20, 0.04, quantum=0.01),
         "state_pool.default_ev_decay_ratio": ParamBound(0.94, 0.995, 0.005, quantum=0.001),
     }
 
@@ -1230,6 +1477,21 @@ class AutoTuner:
             if isinstance(self.state.get("last_observation_review"), dict)
             else {}
         )
+        self.last_short_term_snapshots: dict[str, Any] = (
+            dict(self.state.get("last_short_term_snapshots", {}))
+            if isinstance(self.state.get("last_short_term_snapshots"), dict)
+            else {}
+        )
+        self.last_long_term_snapshots: dict[str, Any] = (
+            dict(self.state.get("last_long_term_snapshots", {}))
+            if isinstance(self.state.get("last_long_term_snapshots"), dict)
+            else {}
+        )
+        if self._migrate_state_record_param_aliases_inplace():
+            try:
+                self._save_state()
+            except Exception:
+                pass
         self.rules_cfg = load_auto_tuner_rules()
         self.disabled_rule_ids: set[str] = set(self.rules_cfg.get("disabled_rule_ids", []))
         self.protected_rule_ids: set[str] = set(self.rules_cfg.get("protected_rule_ids", []))
@@ -1258,6 +1520,7 @@ class AutoTuner:
             "observatory": self.run_dir / "auto_tuner.observatory_config.runtime.yaml",
             "action": self.run_dir / "auto_tuner.action_config.runtime.yaml",
             "attention": self.run_dir / "auto_tuner.attention_config.runtime.yaml",
+            "cognitive_stitching": self.run_dir / "auto_tuner.cognitive_stitching_config.runtime.yaml",
             "cognitive_feeling": self.run_dir / "auto_tuner.cognitive_feeling_config.runtime.yaml",
             "emotion": self.run_dir / "auto_tuner.emotion_config.runtime.yaml",
             "energy_balance": self.run_dir / "auto_tuner.energy_balance_config.runtime.yaml",
@@ -1271,6 +1534,7 @@ class AutoTuner:
             "observatory": _overrides_dir() / "observatory_config.persisted.yaml",
             "action": _overrides_dir() / "action_config.persisted.yaml",
             "attention": _overrides_dir() / "attention_config.persisted.yaml",
+            "cognitive_stitching": _overrides_dir() / "cognitive_stitching_config.persisted.yaml",
             "cognitive_feeling": _overrides_dir() / "cognitive_feeling_config.persisted.yaml",
             "emotion": _overrides_dir() / "emotion_config.persisted.yaml",
             "energy_balance": _overrides_dir() / "energy_balance_config.persisted.yaml",
@@ -1299,11 +1563,11 @@ class AutoTuner:
             return _default_state_payload()
 
         schema = str(raw.get("schema_version", "") or "").strip() or "v0"
-        if schema in {"v1", "v2", "v3"}:
+        if schema in {"v1", "v2", "v3", "v4"}:
             persisted_params = raw.get("persisted_params", {})
             rule_health = raw.get("rule_health", {})
             return {
-                "schema_version": "v3",
+                "schema_version": "v4",
                 "persisted_params": dict(persisted_params) if isinstance(persisted_params, dict) else {},
                 "rule_health": dict(rule_health) if isinstance(rule_health, dict) else {},
                 "active_trials": list(raw.get("active_trials", [])) if isinstance(raw.get("active_trials"), list) else [],
@@ -1316,6 +1580,12 @@ class AutoTuner:
                 else [],
                 "last_observation_review": dict(raw.get("last_observation_review", {}))
                 if isinstance(raw.get("last_observation_review"), dict)
+                else {},
+                "last_short_term_snapshots": dict(raw.get("last_short_term_snapshots", {}))
+                if isinstance(raw.get("last_short_term_snapshots"), dict)
+                else {},
+                "last_long_term_snapshots": dict(raw.get("last_long_term_snapshots", {}))
+                if isinstance(raw.get("last_long_term_snapshots"), dict)
                 else {},
             }
 
@@ -1356,7 +1626,7 @@ class AutoTuner:
         p = _state_path()
         p.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "schema_version": "v3",
+            "schema_version": "v4",
             "updated_at_ms": _now_ms(),
             "persisted_params": self.persisted_params,
             "rule_health": self.rule_health,
@@ -1367,6 +1637,8 @@ class AutoTuner:
             "observation_history": self.observation_history[-400:],
             "observation_review_history": self.observation_review_history[-200:],
             "last_observation_review": self.last_observation_review,
+            "last_short_term_snapshots": self.last_short_term_snapshots,
+            "last_long_term_snapshots": self.last_long_term_snapshots,
         }
         p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -1415,10 +1687,13 @@ class AutoTuner:
         # outputs/auto_tuner/overrides/innate_rules.persisted.yaml as a frozen full copy, then
         # newer baseline rules (e.g. action stubs / CFS bind-energy templates) can silently vanish
         # from long-run runs, causing systematic mis-evaluation and "all zeros" live totals.
-        try:
-            baseline_rules_path = Path(str(getattr(getattr(self.app, "iesm", None), "_rules_path", "") or "")).resolve()
-        except Exception:
-            baseline_rules_path = Path(storage.repo_root() / "innate_script" / "config" / "innate_rules.yaml").resolve()
+        # Always rebuild persisted/runtime rule copies from the tracked repo baseline.
+        #
+        # Why:
+        # - `app.iesm._rules_path` may already point at a prior runtime override file.
+        # - If we reuse that path here, stale runtime content can feed back into the
+        #   next persisted/runtime copy and silently mask fresh baseline fixes.
+        baseline_rules_path = Path(storage.repo_root() / "innate_script" / "config" / "innate_rules.yaml").resolve()
 
         baseline_text = ""
         baseline_doc: dict[str, Any] | None = None
@@ -1481,13 +1756,26 @@ class AutoTuner:
             except Exception:
                 pass
 
-        # 2) Apply persisted IESM rule params into the persisted rules file, then copy to runtime rules file.
+        # 2) Rebuild the persisted IESM rules file from the *current* baseline, then
+        #    re-apply persisted numeric rule params.
+        #
+        # Why:
+        # - only checking rule ids / rules_version is not enough;
+        # - the repo baseline can change rule internals (for example text-match branches)
+        #   without adding/removing ids or bumping version;
+        # - if we start from the old persisted full copy here, runtime rules can silently
+        #   resurrect stale logic and mask fresh baseline fixes.
         try:
-            doc = _load_rules_doc(self.persist_rules_path)
-            if doc:
-                iesm_params = {k: v for k, v in (self.persisted_params or {}).items() if isinstance(k, str) and k.startswith("iesm.rules.")}
-                if iesm_params and self._apply_iesm_rule_param_values(doc, iesm_params):
-                    self.persist_rules_path.write_text(_dump_rules_doc(doc), encoding="utf-8")
+            iesm_params = {k: v for k, v in (self.persisted_params or {}).items() if isinstance(k, str) and k.startswith("iesm.rules.")}
+            source_doc = None
+            if isinstance(baseline_doc, dict) and baseline_doc:
+                source_doc = copy.deepcopy(baseline_doc)
+            else:
+                source_doc = _load_rules_doc(self.persist_rules_path)
+            if source_doc:
+                if iesm_params:
+                    self._apply_iesm_rule_param_values(source_doc, iesm_params)
+                self.persist_rules_path.write_text(_dump_rules_doc(source_doc), encoding="utf-8")
         except Exception:
             pass
 
@@ -1581,9 +1869,6 @@ class AutoTuner:
         """
         Best-effort migration of legacy param aliases into canonical catalog ids.
 
-        Currently we only migrate a small set of known IESM aliases like:
-        - iesm.cfs_dissonance.threshold  -> iesm.rules.cfs_dissonance_from_cp_abs.when.metric.value
-
         This keeps old state.json compatible after we switched to catalog-style ids.
         """
         moved: list[dict[str, str]] = []
@@ -1592,9 +1877,7 @@ class AutoTuner:
             for legacy in list(container.keys()):
                 if not isinstance(legacy, str):
                     continue
-                if not legacy.startswith("iesm.") or legacy.startswith("iesm.rules."):
-                    continue
-                canonical = self._resolve_legacy_iesm_alias(legacy)
+                canonical = self._resolve_legacy_param_alias(legacy)
                 if not canonical or canonical == legacy:
                     continue
                 if canonical in container:
@@ -1609,6 +1892,48 @@ class AutoTuner:
         _migrate_one(self.runtime_params)
 
         return {"moved_count": len(moved), "moved": moved[:64]}
+
+    def _migrate_state_record_param_aliases_inplace(self) -> bool:
+        changed = False
+
+        def _walk(value: Any) -> Any:
+            nonlocal changed
+            if isinstance(value, list):
+                return [_walk(item) for item in value]
+            if isinstance(value, dict):
+                out: dict[str, Any] = {}
+                for raw_key, raw_val in value.items():
+                    key = str(raw_key) if isinstance(raw_key, str) else raw_key
+                    val = _walk(raw_val)
+                    if isinstance(key, str) and key in {"param", "requested_param", "param_id"} and isinstance(val, str):
+                        canonical = self._canonicalize_param_id(val)
+                        if canonical and canonical != val:
+                            changed = True
+                            val = canonical
+                    out[key] = val
+                return out
+            return value
+
+        original = (
+            self.active_trials,
+            self.trial_history,
+            self.last_applied_updates,
+            self.rule_observations,
+            self.observation_history,
+            self.observation_review_history,
+            self.last_observation_review,
+        )
+        migrated = tuple(_walk(item) for item in original)
+        (
+            self.active_trials,
+            self.trial_history,
+            self.last_applied_updates,
+            self.rule_observations,
+            self.observation_history,
+            self.observation_review_history,
+            self.last_observation_review,
+        ) = migrated
+        return changed
 
     def _sanitize_param_stores(self) -> bool:
         """
@@ -1656,6 +1981,16 @@ class AutoTuner:
         self.persisted_params = persisted
         self.runtime_params = runtime
         return changed
+
+    def _resolve_legacy_param_alias(self, legacy_param_id: str) -> str | None:
+        legacy = str(legacy_param_id or "").strip()
+        if not legacy:
+            return None
+        if legacy in LEGACY_PARAM_ID_ALIASES:
+            return LEGACY_PARAM_ID_ALIASES[legacy]
+        if legacy.startswith("iesm.") and not legacy.startswith("iesm.rules."):
+            return self._resolve_legacy_iesm_alias(legacy)
+        return None
 
     def _resolve_legacy_iesm_alias(self, legacy_param_id: str) -> str | None:
         """
@@ -1720,6 +2055,8 @@ class AutoTuner:
                 return dict(getattr(getattr(self.app, "action", None), "_config", {}) or {})
             if m == "attention":
                 return dict(getattr(getattr(self.app, "attention", None), "_config", {}) or {})
+            if m == "cognitive_stitching":
+                return dict(getattr(getattr(self.app, "cognitive_stitching", None), "_config", {}) or {})
             if m == "cognitive_feeling":
                 return dict(getattr(getattr(self.app, "cfs", None), "_config", {}) or {})
             if m == "emotion":
@@ -1756,6 +2093,8 @@ class AutoTuner:
             return self.app.action.reload_config(trace_id=trace_id, config_path=p)  # type: ignore[attr-defined]
         if m == "attention":
             return self.app.attention.reload_config(trace_id=trace_id, config_path=p)  # type: ignore[attr-defined]
+        if m == "cognitive_stitching":
+            return self.app.cognitive_stitching.reload_config(trace_id=trace_id, config_path=p)  # type: ignore[attr-defined]
         if m == "cognitive_feeling":
             return self.app.cfs.reload_config(trace_id=trace_id, config_path=p)  # type: ignore[attr-defined]
         if m == "emotion":
@@ -3530,16 +3869,39 @@ class AutoTuner:
         decisions: list[dict[str, Any]] = []
         endogenous_balance = self._endogenous_balance_snapshot(rows=recent)
         cs_snapshot = self._cognitive_stitching_snapshot(rows=recent)
-        ev_balance = self._ev_balance_snapshot(rows=recent)
+        attention_snapshot = self._attention_special_selection_snapshot(rows=recent)
+        ev_balance_tuning_enabled = bool(getattr(self.cfg, "enable_ev_er_ratio_tuning", False))
+        ev_balance = (
+            self._ev_balance_snapshot(rows=recent)
+            if ev_balance_tuning_enabled
+            else {"enabled": False, "reason": "disabled_by_config"}
+        )
 
         if endogenous_balance.get("needs_recovery", False):
             decisions.extend(self._decide_endogenous_recovery(balance=endogenous_balance, long_term=False))
         decisions.extend(self._decide_structure_supply_nudges(balance=endogenous_balance, long_term=False))
         decisions.extend(self._decide_attention_overheat_nudges(balance=endogenous_balance, long_term=False))
-        decisions.extend(self._decide_ev_balance_nudges(snapshot=ev_balance, long_term=False))
+        decisions.extend(self._decide_attention_energy_resource_nudges(rows=recent, long_term=False))
+        decisions.extend(self._decide_energy_injection_fatigue_nudges(rows=recent, long_term=False))
+        decisions.extend(self._decide_attention_special_selection_nudges(snapshot=attention_snapshot, long_term=False))
+        if ev_balance_tuning_enabled:
+            decisions.extend(self._decide_ev_balance_nudges(snapshot=ev_balance, long_term=False))
         decisions.extend(self._decide_cognitive_stitching_nudges(snapshot=cs_snapshot, long_term=False))
+        timing_snapshot = self._timing_hotspot_snapshot(rows=recent)
+        decisions.extend(self._decide_timing_hotspot_nudges(snapshot=timing_snapshot, balance=endogenous_balance, long_term=False))
+        snapshot_bundle = {
+            "updated_at_ms": _now_ms(),
+            "tick_index": int(tick_index),
+            "window_size": int(window_n),
+            "endogenous_balance": endogenous_balance,
+            "attention_special_selection": attention_snapshot,
+            "ev_balance": ev_balance,
+            "cognitive_stitching": cs_snapshot,
+            "timing_hotspot": timing_snapshot,
+        }
+        self.last_short_term_snapshots = snapshot_bundle
 
-        # 1) Resource runaway guard (fast path): internal_resolution_raw_unit_count and timing_total_logic_ms
+        # 1) Resource runaway guard (fast path): internal_resolution_raw_unit_count
         timing_vals = _recent_window(recent, "timing_total_logic_ms", window_n)
         raw_vals = _recent_window(recent, "internal_resolution_raw_unit_count", window_n)
         timing_mean = _mean(timing_vals)
@@ -3547,9 +3909,9 @@ class AutoTuner:
         timing_max = max(timing_vals) if timing_vals else 0.0
         raw_max = max(raw_vals) if raw_vals else 0.0
 
-        if timing_max > self.metric_targets["timing_total_logic_ms"].expected_max or raw_max > self.metric_targets["internal_resolution_raw_unit_count"].expected_max:
-            # Tighten HDB fuses slightly (small steps; multiple rounds).
-            decisions.extend(self._decide_hdb_fuse_nudge(timing_max=timing_max, raw_max=raw_max))
+        if raw_max > self.metric_targets["internal_resolution_raw_unit_count"].expected_max:
+            # Raw-unit spikes are still an immediate HDB fuse condition.
+            decisions.extend(self._decide_hdb_fuse_nudge(timing_max=0.0, raw_max=raw_max))
 
         # 2) Feelings: keep the normal band mostly below half-range,
         # while still allowing occasional strong peaks for real events.
@@ -3613,7 +3975,7 @@ class AutoTuner:
 
         # No decisions
         if not decisions:
-            return {"enabled": True, "applied": False}
+            return {"enabled": True, "applied": False, "snapshots": snapshot_bundle}
 
         # Apply at most N updates per tick (avoid thrash).
         # Also apply a per-param cooldown (avoid "hammering" the same knob repeatedly).
@@ -3639,7 +4001,12 @@ class AutoTuner:
         for d in decisions:
             try:
                 d["tick_index"] = int(tick_index)
-                ok = self._apply_param_update(d, persist=False)
+                ok = self._apply_param_update(
+                    d,
+                    persist=False,
+                    apply_runtime=False,
+                    save_state=False,
+                )
                 if ok:
                     self._record_rule_hit(str(d.get("rule_id", "") or "manual"))
                     self._register_trial(update=d, persist=False, current_tick=int(tick_index), recent_rows=recent)
@@ -3648,11 +4015,27 @@ class AutoTuner:
                 self._audit({"ts_ms": int(time.time() * 1000), "kind": "apply_error", "error": str(exc), "update": d})
 
         if applied:
+            touched_modules = self._touched_modules_for_params(str(item.get("param", "") or "") for item in applied)
+            try:
+                self._apply_overrides_to_runtime(
+                    trace_id="auto_tuner_tick",
+                    touched_modules=touched_modules or None,
+                )
+            except Exception as exc:
+                self._audit(
+                    {
+                        "ts_ms": int(time.time() * 1000),
+                        "kind": "apply_runtime_error",
+                        "error": str(exc),
+                        "modules": sorted(touched_modules),
+                    }
+                )
             for d in applied:
                 pid = self._canonicalize_param_id(str(d.get("param", "") or "").strip())
                 if pid:
                     self.last_param_tick[pid] = int(tick_index)
             self.last_decision_tick = int(tick_index)
+            self._save_state()
             self._audit(
                 {
                     "ts_ms": int(time.time() * 1000),
@@ -3663,9 +4046,9 @@ class AutoTuner:
                     "applied": applied,
                 }
             )
-            return {"enabled": True, "applied": True, "applied_count": len(applied), "applied_updates": applied}
+            return {"enabled": True, "applied": True, "applied_count": len(applied), "applied_updates": applied, "snapshots": snapshot_bundle}
 
-        return {"enabled": True, "applied": False, "reason": "all_updates_rejected"}
+        return {"enabled": True, "applied": False, "reason": "all_updates_rejected", "snapshots": snapshot_bundle}
 
     def on_run_complete(self, *, all_metrics: Iterable[dict[str, Any]], trace_id: str) -> dict[str, Any]:
         """
@@ -3685,7 +4068,26 @@ class AutoTuner:
         observation_record = self._record_observation_run_results(recent_rows=recent, run_id=run_id, trace_id=trace_id)
         endogenous_balance = self._endogenous_balance_snapshot(rows=recent)
         cs_snapshot = self._cognitive_stitching_snapshot(rows=recent)
-        ev_balance = self._ev_balance_snapshot(rows=recent)
+        attention_snapshot = self._attention_special_selection_snapshot(rows=recent)
+        ev_balance_tuning_enabled = bool(getattr(self.cfg, "enable_ev_er_ratio_tuning", False))
+        ev_balance = (
+            self._ev_balance_snapshot(rows=recent)
+            if ev_balance_tuning_enabled
+            else {"enabled": False, "reason": "disabled_by_config"}
+        )
+        timing_snapshot = self._timing_hotspot_snapshot(rows=recent)
+        snapshot_bundle = {
+            "updated_at_ms": _now_ms(),
+            "run_id": run_id,
+            "window_size": int(n),
+            "endogenous_balance": endogenous_balance,
+            "attention_special_selection": attention_snapshot,
+            "ev_balance": ev_balance,
+            "cognitive_stitching": cs_snapshot,
+            "timing_hotspot": timing_snapshot,
+        }
+        self.last_long_term_snapshots = snapshot_bundle
+        self._save_state()
 
         if not self.enable_long_term:
             llm_loop = self._maybe_run_llm_auto_loop(recent_rows=recent, run_id=run_id)
@@ -3698,6 +4100,7 @@ class AutoTuner:
                 "observation_record": observation_record,
                 "llm_auto_loop": llm_loop,
                 "observation_review": observation_review,
+                "snapshots": snapshot_bundle,
             }
 
         # Example long-term: if mean timing is significantly above ideal, tighten HDB fuses very slightly.
@@ -3711,11 +4114,15 @@ class AutoTuner:
             updates.extend(self._decide_endogenous_recovery(balance=endogenous_balance, long_term=True))
         updates.extend(self._decide_structure_supply_nudges(balance=endogenous_balance, long_term=True))
         updates.extend(self._decide_attention_overheat_nudges(balance=endogenous_balance, long_term=True))
-        updates.extend(self._decide_ev_balance_nudges(snapshot=ev_balance, long_term=True))
+        updates.extend(self._decide_attention_energy_resource_nudges(rows=recent, long_term=True))
+        updates.extend(self._decide_energy_injection_fatigue_nudges(rows=recent, long_term=True))
+        updates.extend(self._decide_attention_special_selection_nudges(snapshot=attention_snapshot, long_term=True))
+        if ev_balance_tuning_enabled:
+            updates.extend(self._decide_ev_balance_nudges(snapshot=ev_balance, long_term=True))
         updates.extend(self._decide_cognitive_stitching_nudges(snapshot=cs_snapshot, long_term=True))
-        if timing_mean > self.metric_targets["timing_total_logic_ms"].ideal * 1.25 or raw_mean > self.metric_targets["internal_resolution_raw_unit_count"].ideal * 1.25:
-            # a smaller step than short-term
-            updates.extend(self._decide_hdb_fuse_nudge(timing_max=timing_mean, raw_max=raw_mean, long_term=True))
+        updates.extend(self._decide_timing_hotspot_nudges(snapshot=timing_snapshot, balance=endogenous_balance, long_term=True))
+        if raw_mean > self.metric_targets["internal_resolution_raw_unit_count"].ideal * 1.25:
+            updates.extend(self._decide_hdb_fuse_nudge(timing_max=0.0, raw_max=raw_mean, long_term=True))
 
         # If dissonance is near-zero and too flat, relax slightly (avoid "perfect straight line").
         dis_vals = _recent_window(recent, "cfs_dissonance_max", n)
@@ -3732,7 +4139,7 @@ class AutoTuner:
         updates = self._filter_endogenous_conflicts(decisions=updates, balance=endogenous_balance)
 
         if not updates:
-            return {"enabled": True, "applied": False}
+            return {"enabled": True, "applied": False, "snapshots": snapshot_bundle}
 
         # Canonicalize + keep the first update per param for this long-term pass.
         deduped: list[dict[str, Any]] = []
@@ -3756,7 +4163,13 @@ class AutoTuner:
         for upd in updates[: int(self.cfg.max_param_updates_per_tick)]:
             try:
                 upd["tick_index"] = int(rows[-1].get("tick_index", 0) or 0) if rows else -1
-                ok = self._apply_param_update(upd, persist=True)
+                ok = self._apply_param_update(
+                    upd,
+                    persist=True,
+                    apply_runtime=False,
+                    write_persist_files=False,
+                    save_state=False,
+                )
                 if ok:
                     self._record_rule_hit(str(upd.get("rule_id", "") or "manual"))
                     self._register_trial(update=upd, persist=True, current_tick=None, recent_rows=recent)
@@ -3765,9 +4178,10 @@ class AutoTuner:
                 continue
 
         if applied:
+            touched_modules = self._touched_modules_for_params(str(item.get("param", "") or "") for item in applied)
             # Materialize persisted overrides so the next run starts closer to the ideal envelope.
             try:
-                self._apply_persisted_overrides_to_persist_files()
+                self._apply_persisted_overrides_to_persist_files(touched_modules=touched_modules or None)
             except Exception:
                 pass
             self._save_state()
@@ -3784,7 +4198,7 @@ class AutoTuner:
             )
             # Apply to runtime too (best-effort).
             try:
-                self._apply_overrides_to_runtime(trace_id=trace_id)
+                self._apply_overrides_to_runtime(trace_id=trace_id, touched_modules=touched_modules or None)
             except Exception:
                 pass
             llm_loop = self._maybe_run_llm_auto_loop(recent_rows=recent, run_id=run_id)
@@ -3798,6 +4212,7 @@ class AutoTuner:
                 "observation_record": observation_record,
                 "llm_auto_loop": llm_loop,
                 "observation_review": observation_review,
+                "snapshots": snapshot_bundle,
             }
 
         llm_loop = self._maybe_run_llm_auto_loop(recent_rows=recent, run_id=run_id)
@@ -3809,6 +4224,7 @@ class AutoTuner:
             "observation_record": observation_record,
             "llm_auto_loop": llm_loop,
             "observation_review": observation_review,
+            "snapshots": snapshot_bundle,
         }
 
     # --------------------------
@@ -3890,26 +4306,378 @@ class AutoTuner:
             {"rule_id": rule_id, "param": "iesm.action_recall_time.bucket_energy_threshold", "delta": +0.03, "reason": "recall_too_frequent", "metric_key": "time_sensor_bucket_energy_sum", "issue_mode": "high"},
         ]
 
+    def _timing_hotspot_snapshot(self, *, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        if not rows:
+            return {}
+
+        n = len(rows)
+        timing_defaults: dict[str, float] = {
+            "timing_total_logic_ms": 8000.0,
+            "timing_structure_level_ms": 1400.0,
+            "timing_stimulus_level_ms": 4200.0,
+            "timing_cache_neutralization_ms": 2400.0,
+            "timing_maintenance_ms": 900.0,
+            "timing_attention_ms": 240.0,
+            "timing_sensor_ms": 120.0,
+            "timing_time_sensor_ms": 80.0,
+            "timing_cognitive_stitching_ms": 1200.0,
+        }
+
+        summary: dict[str, dict[str, Any]] = {}
+        for metric_key, fallback_max in timing_defaults.items():
+            vals = _recent_window(rows, metric_key, n)
+            target = self.metric_targets.get(metric_key)
+            expected_max = float(target.expected_max) if target is not None else float(fallback_max)
+            mean_v = _mean(vals)
+            latest_v = vals[-1] if vals else 0.0
+            max_v = max(vals) if vals else 0.0
+            hot = bool(expected_max > 0.0 and (mean_v > expected_max * 0.85 or latest_v > expected_max or max_v > expected_max))
+            summary[metric_key] = {
+                "mean": mean_v,
+                "latest": latest_v,
+                "max": max_v,
+                "expected_max": expected_max,
+                "hot": hot,
+            }
+
+        total_mean = float(summary["timing_total_logic_ms"]["mean"])
+        total_latest = float(summary["timing_total_logic_ms"]["latest"])
+        total_expected = float(summary["timing_total_logic_ms"]["expected_max"])
+        total_hot = bool(total_expected > 0.0 and (total_mean > total_expected * 0.85 or total_latest > total_expected))
+
+        grouped_defs = {
+            "hdb": ("HDB 主链", ("timing_structure_level_ms", "timing_stimulus_level_ms")),
+            "state_pool": ("状态池与中和", ("timing_cache_neutralization_ms", "timing_maintenance_ms")),
+            "attention": ("注意力", ("timing_attention_ms",)),
+            "sensor": ("文本感受器", ("timing_sensor_ms",)),
+            "time_sensor": ("时间感受器", ("timing_time_sensor_ms",)),
+            "cognitive_stitching": ("认知拼接", ("timing_cognitive_stitching_ms",)),
+        }
+        grouped: dict[str, dict[str, Any]] = {}
+        for group_id, (label, keys) in grouped_defs.items():
+            mean_ms = sum(float(summary.get(key, {}).get("mean", 0.0) or 0.0) for key in keys)
+            latest_ms = sum(float(summary.get(key, {}).get("latest", 0.0) or 0.0) for key in keys)
+            max_ms = max(float(summary.get(key, {}).get("max", 0.0) or 0.0) for key in keys)
+            hot = any(bool(summary.get(key, {}).get("hot", False)) for key in keys)
+            share = mean_ms / max(1e-6, total_mean)
+            pressure = max(
+                (
+                    float(summary.get(key, {}).get("mean", 0.0) or 0.0)
+                    / max(1e-6, float(summary.get(key, {}).get("expected_max", 1.0) or 1.0))
+                )
+                for key in keys
+            )
+            severity = pressure + share * 0.35 + (0.2 if hot else 0.0)
+            grouped[group_id] = {
+                "label": label,
+                "keys": list(keys),
+                "mean_ms": mean_ms,
+                "latest_ms": latest_ms,
+                "max_ms": max_ms,
+                "share": share,
+                "hot": hot,
+                "pressure": pressure,
+                "severity": severity,
+            }
+
+        ranked = sorted(grouped.items(), key=lambda item: (float(item[1].get("severity", 0.0)), float(item[1].get("share", 0.0))), reverse=True)
+        dominant_id = str(ranked[0][0]) if ranked and (bool(ranked[0][1].get("hot", False)) or total_hot or float(ranked[0][1].get("share", 0.0)) >= 0.30) else ""
+        dominant = grouped.get(dominant_id, {}) if dominant_id else {}
+
+        raw_unit_mean = _mean(_recent_window(rows, "internal_resolution_raw_unit_count", n))
+        merged_mean = _mean(_recent_window(rows, "merged_flat_token_count", n))
+        pool_mean = _mean(_recent_window(rows, "pool_active_item_count", n))
+        cache_residual_mean = _mean(_recent_window(rows, "cache_residual_flat_token_count", n))
+        attention_candidate_mean = _mean(_recent_window(rows, "attention_state_pool_candidate_count", n))
+        cam_mean = _mean(_recent_window(rows, "cam_item_count", n))
+        delayed_task_table_mean = _mean(_recent_window(rows, "time_sensor_delayed_task_table_size", n))
+        delayed_task_registered_mean = _mean(_recent_window(rows, "time_sensor_delayed_task_registered_count", n))
+        delayed_task_executed_mean = _mean(_recent_window(rows, "time_sensor_delayed_task_executed_count", n))
+        sensor_echo_mean = _mean(_recent_window(rows, "sensor_echo_pool_size", n))
+
+        pool_target = self.metric_targets.get("pool_active_item_count")
+        raw_target = self.metric_targets.get("internal_resolution_raw_unit_count")
+        merged_target = self.metric_targets.get("merged_flat_token_count")
+        echo_target = self.metric_targets.get("sensor_echo_pool_size")
+
+        runtime_params = getattr(self, "runtime_params", {}) if isinstance(getattr(self, "runtime_params", {}), dict) else {}
+        max_cam_items = _safe_float(runtime_params.get("attention.max_cam_items", 0.0), 0.0)
+        if max_cam_items <= 0.0 and "attention.max_cam_items" in self.param_bounds:
+            max_cam_items = float(self.param_bounds["attention.max_cam_items"].max_value)
+        delayed_capacity = _safe_float(runtime_params.get("time_sensor.delayed_task_capacity", 0.0), 0.0)
+        if delayed_capacity <= 0.0 and "time_sensor.delayed_task_capacity" in self.param_bounds:
+            delayed_capacity = float(self.param_bounds["time_sensor.delayed_task_capacity"].max_value)
+
+        raw_unit_pressure = bool(raw_target is not None and raw_unit_mean > float(raw_target.expected_max) * 0.90)
+        merged_pressure = bool(merged_target is not None and merged_mean > float(merged_target.expected_max) * 0.95)
+        pool_load_high = bool(pool_target is not None and pool_mean > float(pool_target.expected_max) * 0.90)
+        cache_residual_high = bool(cache_residual_mean >= max(16.0, merged_mean * 0.08))
+        attention_fanout_high = bool(
+            cam_mean > max(16.0, max_cam_items * 0.85)
+            or attention_candidate_mean > max(18.0, cam_mean * 3.0, max_cam_items * 2.5)
+        )
+        attention_candidate_pressure = bool(attention_candidate_mean > max(24.0, cam_mean * 4.0, max_cam_items * 3.0))
+        time_sensor_task_pressure = bool(
+            delayed_task_table_mean > max(12.0, delayed_capacity * 0.70)
+            or (delayed_task_registered_mean >= 3.0 and delayed_task_registered_mean > delayed_task_executed_mean * 1.5)
+        )
+        sensor_echo_pressure = bool(echo_target is not None and sensor_echo_mean > float(echo_target.expected_max) * 0.85)
+
+        return {
+            "summary": summary,
+            "grouped": grouped,
+            "ranked_group_ids": [str(item[0]) for item in ranked],
+            "dominant_group_id": dominant_id,
+            "dominant_group_label": str(dominant.get("label", "") or ""),
+            "total_hot": total_hot,
+            "hdb_hot": bool(grouped.get("hdb", {}).get("hot", False)),
+            "structure_hot": bool(summary["timing_structure_level_ms"]["hot"]),
+            "stimulus_hot": bool(summary["timing_stimulus_level_ms"]["hot"]),
+            "state_pool_hot": bool(grouped.get("state_pool", {}).get("hot", False)),
+            "cache_hot": bool(summary["timing_cache_neutralization_ms"]["hot"]),
+            "maintenance_hot": bool(summary["timing_maintenance_ms"]["hot"]),
+            "attention_hot": bool(grouped.get("attention", {}).get("hot", False)),
+            "sensor_hot": bool(grouped.get("sensor", {}).get("hot", False)),
+            "time_sensor_hot": bool(grouped.get("time_sensor", {}).get("hot", False)),
+            "cognitive_stitching_hot": bool(grouped.get("cognitive_stitching", {}).get("hot", False)),
+            "raw_unit_pressure": raw_unit_pressure,
+            "merged_pressure": merged_pressure,
+            "pool_load_high": pool_load_high,
+            "cache_residual_high": cache_residual_high,
+            "attention_fanout_high": attention_fanout_high,
+            "attention_candidate_pressure": attention_candidate_pressure,
+            "time_sensor_task_pressure": time_sensor_task_pressure,
+            "sensor_echo_pressure": sensor_echo_pressure,
+        }
+
+    def _decide_timing_hotspot_nudges(
+        self,
+        *,
+        snapshot: dict[str, Any],
+        balance: dict[str, Any] | None = None,
+        long_term: bool = False,
+    ) -> list[dict[str, Any]]:
+        if not isinstance(snapshot, dict) or not snapshot:
+            return []
+
+        step_scale = 0.5 if long_term else 1.0
+        source_supply_thin = bool(balance.get("source_supply_thin", False)) if isinstance(balance, dict) else False
+        needs_recovery = bool(balance.get("needs_recovery", False)) if isinstance(balance, dict) else False
+        updates: list[dict[str, Any]] = []
+
+        def _append(rule_id: str, param: str, direction: float, reason: str, metric_key: str, issue_mode: str, weight: float = 1.0) -> None:
+            pid = self._canonicalize_param_id(param)
+            if not pid or pid not in self.param_bounds or not self._rule_enabled(rule_id):
+                return
+            bound = self.param_bounds[pid]
+            delta = float(direction) * float(bound.max_step_abs) * step_scale * max(0.15, float(weight))
+            if abs(delta) < 1e-12:
+                return
+            updates.append(
+                {
+                    "rule_id": rule_id,
+                    "param": pid,
+                    "delta": delta,
+                    "reason": reason,
+                    "metric_key": metric_key,
+                    "issue_mode": issue_mode,
+                }
+            )
+
+        if bool(snapshot.get("state_pool_hot", False)):
+            if bool(snapshot.get("cache_hot", False)) and bool(snapshot.get("cache_residual_high", False)):
+                _append(
+                    "builtin.timing.state_pool.tighten.priority_neutralization",
+                    "state_pool.priority_neutralization_min_effect_threshold",
+                    +1.0,
+                    "timing_hotspot_state_pool_cache_pressure",
+                    "timing_cache_neutralization_ms",
+                    "high",
+                    0.70,
+                )
+                _append(
+                    "builtin.timing.state_pool.tighten.neutralization",
+                    "state_pool.neutralization_min_effect_threshold",
+                    +1.0,
+                    "timing_hotspot_state_pool_cache_pressure",
+                    "timing_cache_neutralization_ms",
+                    "high",
+                    0.55,
+                )
+            if bool(snapshot.get("maintenance_hot", False)) and bool(snapshot.get("pool_load_high", False)) and not needs_recovery:
+                _append(
+                    "builtin.timing.state_pool.tighten.soft_capacity_start",
+                    "state_pool.soft_capacity_start_items",
+                    -1.0,
+                    "timing_hotspot_state_pool_maintenance_pressure",
+                    "timing_maintenance_ms",
+                    "high",
+                    0.75,
+                )
+                _append(
+                    "builtin.timing.state_pool.tighten.soft_capacity_full",
+                    "state_pool.soft_capacity_full_items",
+                    -1.0,
+                    "timing_hotspot_state_pool_maintenance_pressure",
+                    "timing_maintenance_ms",
+                    "high",
+                    0.55,
+                )
+
+        if bool(snapshot.get("hdb_hot", False)) and not source_supply_thin:
+            if bool(snapshot.get("structure_hot", False)):
+                _append(
+                    "builtin.timing.hdb.tighten.structure_rounds",
+                    "hdb.structure_level_max_rounds",
+                    -1.0,
+                    "timing_hotspot_hdb_structure_pressure",
+                    "timing_structure_level_ms",
+                    "high",
+                    0.65,
+                )
+            if bool(snapshot.get("stimulus_hot", False)):
+                _append(
+                    "builtin.timing.hdb.tighten.stimulus_rounds",
+                    "hdb.stimulus_level_max_rounds",
+                    -1.0,
+                    "timing_hotspot_hdb_stimulus_pressure",
+                    "timing_stimulus_level_ms",
+                    "high",
+                    0.70,
+                )
+            if bool(snapshot.get("raw_unit_pressure", False)) or (bool(snapshot.get("stimulus_hot", False)) and bool(snapshot.get("merged_pressure", False))):
+                _append(
+                    "builtin.timing.hdb.tighten.flat_cap",
+                    "hdb.internal_resolution_flat_unit_cap_per_structure",
+                    -1.0,
+                    "timing_hotspot_hdb_flat_unit_pressure",
+                    "internal_resolution_raw_unit_count" if bool(snapshot.get("raw_unit_pressure", False)) else "timing_stimulus_level_ms",
+                    "high",
+                    0.60,
+                )
+
+        if bool(snapshot.get("attention_hot", False)) and bool(snapshot.get("attention_fanout_high", False)) and not source_supply_thin:
+            _append(
+                "builtin.timing.attention.tighten.max_cam_items",
+                "attention.max_cam_items",
+                -1.0,
+                "timing_hotspot_attention_fanout_pressure",
+                "timing_attention_ms",
+                "high",
+                0.70,
+            )
+            if bool(snapshot.get("attention_candidate_pressure", False)):
+                _append(
+                    "builtin.timing.attention.tighten.min_total_energy",
+                    "attention.min_total_energy",
+                    +1.0,
+                    "timing_hotspot_attention_candidate_pressure",
+                    "timing_attention_ms",
+                    "high",
+                    0.45,
+                )
+
+        if bool(snapshot.get("time_sensor_hot", False)) and bool(snapshot.get("time_sensor_task_pressure", False)):
+            _append(
+                "builtin.timing.time_sensor.tighten.max_total_bindings",
+                "time_sensor.max_total_bindings",
+                -1.0,
+                "timing_hotspot_time_sensor_binding_pressure",
+                "timing_time_sensor_ms",
+                "high",
+                0.60,
+            )
+            _append(
+                "builtin.timing.time_sensor.tighten.delayed_task_capacity",
+                "time_sensor.delayed_task_capacity",
+                -1.0,
+                "timing_hotspot_time_sensor_task_pressure",
+                "timing_time_sensor_ms",
+                "high",
+                0.45,
+            )
+
+        if bool(snapshot.get("sensor_hot", False)) and bool(snapshot.get("sensor_echo_pressure", False)):
+            _append(
+                "builtin.timing.sensor.tighten.echo_pool_frames",
+                "text_sensor.echo_pool_max_frames",
+                -1.0,
+                "timing_hotspot_sensor_echo_pressure",
+                "timing_sensor_ms",
+                "high",
+                0.50,
+            )
+            _append(
+                "builtin.timing.sensor.tighten.echo_energy_floor",
+                "text_sensor.echo_min_energy_threshold",
+                +1.0,
+                "timing_hotspot_sensor_echo_pressure",
+                "timing_sensor_ms",
+                "high",
+                0.35,
+            )
+            _append(
+                "builtin.timing.sensor.tighten.echo_decay_factor",
+                "text_sensor.echo_round_decay_factor",
+                -1.0,
+                "timing_hotspot_sensor_echo_pressure",
+                "timing_sensor_ms",
+                "high",
+                0.35,
+            )
+
+        return updates
+
     def _cognitive_stitching_snapshot(self, *, rows: list[dict[str, Any]]) -> dict[str, Any]:
         if not rows:
             return {}
 
         n = len(rows)
+        raw_accepted_vals = _recent_window(rows, "cs_candidate_raw_accepted_count", n)
         candidate_vals = _recent_window(rows, "cs_candidate_count", n)
+        rejected_low_score_vals = _recent_window(rows, "cs_candidate_rejected_low_score_count", n)
+        rejected_component_limit_vals = _recent_window(rows, "cs_candidate_rejected_component_limit_count", n)
+        rejected_non_positive_edge_vals = _recent_window(rows, "cs_candidate_rejected_non_positive_edge_count", n)
+        replacement_vals = _recent_window(rows, "cs_candidate_replacement_count", n)
+        kept_existing_vals = _recent_window(rows, "cs_candidate_kept_existing_count", n)
+        threshold_margin_vals = _recent_window(rows, "cs_candidate_threshold_margin_mean", n)
         action_vals = _recent_window(rows, "cs_action_count", n)
         created_vals = _recent_window(rows, "cs_created_count", n)
         extended_vals = _recent_window(rows, "cs_extended_count", n)
         merged_vals = _recent_window(rows, "cs_merged_count", n)
         reinforced_vals = _recent_window(rows, "cs_reinforced_count", n)
+        event_grasp_emitted_vals = _recent_window(rows, "cs_event_grasp_emitted_count", n)
+        event_grasp_selected_vals = _recent_window(rows, "cs_event_grasp_selected_event_count", n)
+        event_grasp_post_action_seed_vals = _recent_window(rows, "cs_event_grasp_post_action_seed_count", n)
+        event_grasp_post_action_selected_vals = _recent_window(rows, "cs_event_grasp_post_action_selected_event_count", n)
+        narrative_grasp_vals = _recent_window(rows, "cs_narrative_top_grasp", n)
+        narrative_grasp_max_vals = _recent_window(rows, "cs_narrative_grasp_max", n)
+        narrative_grasp_positive_count_vals = _recent_window(rows, "cs_narrative_grasp_positive_count", n)
         stimulus_new_structure_vals = _recent_window(rows, "stimulus_new_structure_count", n)
         timing_vals = _recent_window(rows, "timing_cognitive_stitching_ms", n)
 
+        mean_raw_accepted = _mean(raw_accepted_vals)
         mean_candidates = _mean(candidate_vals)
+        mean_rejected_low_score = _mean(rejected_low_score_vals)
+        mean_rejected_component_limit = _mean(rejected_component_limit_vals)
+        mean_rejected_non_positive_edge = _mean(rejected_non_positive_edge_vals)
+        mean_replacements = _mean(replacement_vals)
+        mean_kept_existing = _mean(kept_existing_vals)
+        mean_threshold_margin = _mean(threshold_margin_vals)
         mean_actions = _mean(action_vals)
         mean_created = _mean(created_vals)
         mean_extended = _mean(extended_vals)
         mean_merged = _mean(merged_vals)
         mean_reinforced = _mean(reinforced_vals)
+        mean_event_grasp_emitted = _mean(event_grasp_emitted_vals)
+        mean_event_grasp_selected = _mean(event_grasp_selected_vals)
+        mean_event_grasp_post_action_seed = _mean(event_grasp_post_action_seed_vals)
+        mean_event_grasp_post_action_selected = _mean(event_grasp_post_action_selected_vals)
+        mean_narrative_grasp = _mean(narrative_grasp_vals)
+        mean_narrative_grasp_max = _mean(narrative_grasp_max_vals)
+        max_narrative_grasp_max = max(narrative_grasp_max_vals) if narrative_grasp_max_vals else 0.0
+        mean_narrative_grasp_positive_count = _mean(narrative_grasp_positive_count_vals)
+        latest_narrative_grasp_positive_count = narrative_grasp_positive_count_vals[-1] if narrative_grasp_positive_count_vals else 0.0
         mean_stimulus_new_structures = _mean(stimulus_new_structure_vals)
         mean_timing = _mean(timing_vals)
 
@@ -3923,42 +4691,122 @@ class AutoTuner:
 
         output_total = mean_created + mean_extended + mean_merged + mean_reinforced
         candidate_rich_but_action_starved = bool(mean_candidates >= 0.8 and mean_actions <= 0.05)
+        candidate_supply_thin = bool(mean_candidates < 0.45 and mean_actions < 0.20)
         upstream_structure_alive = bool(mean_stimulus_new_structures >= 0.12 or latest_stimulus_new_structures > 0.0)
         timing_hot = bool(mean_timing > float(self.metric_targets.get("timing_cognitive_stitching_ms", MetricTarget("",0,0,0,0,0)).expected_max or 1200.0) * 0.85)
+        competition_pressure = (mean_replacements + mean_kept_existing) / max(1e-6, max(mean_candidates, mean_raw_accepted, 1.0))
+        narrative_zone_alive = bool(
+            mean_narrative_grasp_max >= 0.08
+            or max_narrative_grasp_max >= 0.12
+            or mean_narrative_grasp_positive_count >= 1.0
+            or latest_narrative_grasp_positive_count >= 1.0
+        )
+        narrative_zone_mature = bool(
+            mean_narrative_grasp_max >= 0.16
+            or max_narrative_grasp_max >= 0.20
+            or mean_narrative_grasp_positive_count >= 1.5
+        )
+        low_score_dominant = bool(
+            mean_rejected_low_score >= 0.5
+            and mean_rejected_low_score >= mean_rejected_component_limit
+            and mean_rejected_low_score >= mean_rejected_non_positive_edge
+        )
+        component_limit_dominant = bool(
+            mean_rejected_component_limit >= 0.5
+            and mean_rejected_component_limit > mean_rejected_low_score
+            and mean_rejected_component_limit >= mean_rejected_non_positive_edge
+        )
+        non_positive_edge_dominant = bool(
+            mean_rejected_non_positive_edge >= 0.5
+            and mean_rejected_non_positive_edge > mean_rejected_low_score
+            and mean_rejected_non_positive_edge >= mean_rejected_component_limit
+        )
 
         return {
+            "mean_raw_accepted": mean_raw_accepted,
             "mean_candidates": mean_candidates,
             "latest_candidates": latest_candidates,
+            "mean_rejected_low_score": mean_rejected_low_score,
+            "mean_rejected_component_limit": mean_rejected_component_limit,
+            "mean_rejected_non_positive_edge": mean_rejected_non_positive_edge,
+            "mean_replacements": mean_replacements,
+            "mean_kept_existing": mean_kept_existing,
+            "mean_threshold_margin": mean_threshold_margin,
             "mean_actions": mean_actions,
             "latest_actions": latest_actions,
             "mean_created": mean_created,
             "mean_extended": mean_extended,
             "mean_merged": mean_merged,
             "mean_reinforced": mean_reinforced,
+            "mean_event_grasp_emitted": mean_event_grasp_emitted,
+            "mean_event_grasp_selected": mean_event_grasp_selected,
+            "mean_event_grasp_post_action_seed": mean_event_grasp_post_action_seed,
+            "mean_event_grasp_post_action_selected": mean_event_grasp_post_action_selected,
+            "mean_narrative_grasp": mean_narrative_grasp,
+            "mean_narrative_grasp_max": mean_narrative_grasp_max,
+            "max_narrative_grasp_max": max_narrative_grasp_max,
+            "mean_narrative_grasp_positive_count": mean_narrative_grasp_positive_count,
+            "latest_narrative_grasp_positive_count": latest_narrative_grasp_positive_count,
             "mean_stimulus_new_structures": mean_stimulus_new_structures,
             "latest_stimulus_new_structures": latest_stimulus_new_structures,
             "mean_timing": mean_timing,
             "candidate_to_action_ratio": candidate_to_action_ratio,
             "candidate_rich_but_action_starved": candidate_rich_but_action_starved,
+            "candidate_supply_thin": candidate_supply_thin,
             "upstream_structure_alive": upstream_structure_alive,
             "timing_hot": timing_hot,
+            "narrative_zone_alive": narrative_zone_alive,
+            "narrative_zone_mature": narrative_zone_mature,
             "output_total": output_total,
+            "competition_pressure": competition_pressure,
+            "low_score_dominant": low_score_dominant,
+            "component_limit_dominant": component_limit_dominant,
+            "non_positive_edge_dominant": non_positive_edge_dominant,
         }
 
     def _decide_cognitive_stitching_nudges(self, *, snapshot: dict[str, Any], long_term: bool = False) -> list[dict[str, Any]]:
         if not isinstance(snapshot, dict) or not snapshot:
             return []
+        current_cs_config = self._get_runtime_module_config("cognitive_stitching")
+        if not bool(current_cs_config.get("enabled", False)):
+            return []
 
         updates: list[dict[str, Any]] = []
         step_scale = 0.45 if long_term else 1.0
 
+        mean_raw_accepted = float(snapshot.get("mean_raw_accepted", 0.0) or 0.0)
         mean_candidates = float(snapshot.get("mean_candidates", 0.0) or 0.0)
+        mean_rejected_low_score = float(snapshot.get("mean_rejected_low_score", 0.0) or 0.0)
+        mean_rejected_component_limit = float(snapshot.get("mean_rejected_component_limit", 0.0) or 0.0)
+        mean_rejected_non_positive_edge = float(snapshot.get("mean_rejected_non_positive_edge", 0.0) or 0.0)
+        mean_threshold_margin = float(snapshot.get("mean_threshold_margin", 0.0) or 0.0)
         mean_actions = float(snapshot.get("mean_actions", 0.0) or 0.0)
         mean_timing = float(snapshot.get("mean_timing", 0.0) or 0.0)
+        mean_event_grasp_emitted = float(snapshot.get("mean_event_grasp_emitted", 0.0) or 0.0)
+        mean_event_grasp_selected = float(snapshot.get("mean_event_grasp_selected", 0.0) or 0.0)
+        mean_event_grasp_post_action_seed = float(snapshot.get("mean_event_grasp_post_action_seed", 0.0) or 0.0)
+        mean_event_grasp_post_action_selected = float(snapshot.get("mean_event_grasp_post_action_selected", 0.0) or 0.0)
+        mean_narrative_grasp = float(snapshot.get("mean_narrative_grasp", 0.0) or 0.0)
+        mean_narrative_grasp_max = float(snapshot.get("mean_narrative_grasp_max", 0.0) or 0.0)
+        mean_narrative_grasp_positive_count = float(snapshot.get("mean_narrative_grasp_positive_count", 0.0) or 0.0)
         candidate_to_action_ratio = float(snapshot.get("candidate_to_action_ratio", 0.0) or 0.0)
         candidate_rich_but_action_starved = bool(snapshot.get("candidate_rich_but_action_starved", False))
+        candidate_supply_thin = bool(snapshot.get("candidate_supply_thin", False))
         upstream_structure_alive = bool(snapshot.get("upstream_structure_alive", False))
         timing_hot = bool(snapshot.get("timing_hot", False))
+        narrative_zone_alive = bool(snapshot.get("narrative_zone_alive", False))
+        narrative_zone_mature = bool(snapshot.get("narrative_zone_mature", False))
+        competition_pressure = float(snapshot.get("competition_pressure", 0.0) or 0.0)
+        low_score_dominant = bool(snapshot.get("low_score_dominant", False))
+        component_limit_dominant = bool(snapshot.get("component_limit_dominant", False))
+        non_positive_edge_dominant = bool(snapshot.get("non_positive_edge_dominant", False))
+        def _is_unbounded_gate_param(pid: str) -> bool:
+            return pid in {
+                "cognitive_stitching.snapshot_top_k",
+                "cognitive_stitching.max_seed_items",
+                "cognitive_stitching.max_events_per_tick",
+                "cognitive_stitching.context_concat_max_targets_per_seed",
+            }
 
         def _append(rule_id: str, param: str, direction: float, reason: str, metric_key: str, issue_mode: str, weight: float = 1.0) -> None:
             pid = self._canonicalize_param_id(param)
@@ -3966,6 +4814,17 @@ class AutoTuner:
                 return
             if not self._rule_enabled(rule_id):
                 return
+            if _is_unbounded_gate_param(pid):
+                current_key = pid.split(".", 1)[1]
+                try:
+                    current_value = float(current_cs_config.get(current_key, 0.0) or 0.0)
+                except Exception:
+                    current_value = 0.0
+                # In CS high-throughput mode, 0 means "unbounded". Do not let
+                # the auto tuner turn that into a small hard cap or tighten it
+                # back toward the old "about two stitches per tick" target.
+                if current_value <= 0.0:
+                    return
             bound = self.param_bounds[pid]
             delta = float(direction) * float(bound.max_step_abs) * step_scale * max(0.35, min(1.0, weight))
             if abs(delta) < 1e-12:
@@ -3981,7 +4840,93 @@ class AutoTuner:
                 }
             )
 
-        if candidate_rich_but_action_starved and upstream_structure_alive and not timing_hot:
+        if low_score_dominant and mean_actions <= 0.10 and upstream_structure_alive and not timing_hot:
+            _append(
+                "builtin.cs.audit.lower_low_score_gate",
+                "cognitive_stitching.min_candidate_score",
+                -1.0,
+                f"cs_low_score_rejections_dominate rejected_low_score={mean_rejected_low_score:.3f} raw_accepted={mean_raw_accepted:.3f}",
+                "cs_candidate_rejected_low_score_count",
+                "high",
+                1.0,
+            )
+            if mean_raw_accepted < 0.35:
+                _append(
+                    "builtin.cs.audit.lower_seed_gate",
+                    "cognitive_stitching.min_seed_total_energy",
+                    -1.0,
+                    "cs_low_score_rejections_dominate_and_raw_accepts_too_few",
+                    "cs_candidate_rejected_low_score_count",
+                    "high",
+                    0.55,
+                )
+
+        if component_limit_dominant and mean_actions <= 0.10 and upstream_structure_alive and not timing_hot:
+            _append(
+                "builtin.cs.audit.raise_component_cap",
+                "cognitive_stitching.max_event_component_count",
+                +1.0,
+                f"cs_component_limit_rejections_dominate rejected_component_limit={mean_rejected_component_limit:.3f}",
+                "cs_candidate_rejected_component_limit_count",
+                "high",
+                0.7,
+            )
+
+        if candidate_supply_thin and not timing_hot:
+            _append(
+                "builtin.cs.supply.lower_seed_gate",
+                "cognitive_stitching.min_seed_total_energy",
+                -1.0,
+                f"cs_candidate_supply_thin mean_candidates={mean_candidates:.3f} mean_actions={mean_actions:.3f}",
+                "cs_candidate_count",
+                "low",
+                0.70,
+            )
+            _append(
+                "builtin.cs.supply.lower_candidate_gate",
+                "cognitive_stitching.min_candidate_score",
+                -1.0,
+                "cs_candidate_supply_thin_open_candidate_gate_slightly",
+                "cs_candidate_count",
+                "low",
+                0.55,
+            )
+            _append(
+                "builtin.cs.supply.raise_snapshot_top_k",
+                "cognitive_stitching.snapshot_top_k",
+                +1.0,
+                "cs_candidate_supply_thin_expand_snapshot_supply",
+                "cs_candidate_count",
+                "low",
+                0.45,
+            )
+            _append(
+                "builtin.cs.supply.raise_seed_items",
+                "cognitive_stitching.max_seed_items",
+                +1.0,
+                "cs_candidate_supply_thin_expand_seed_supply",
+                "cs_candidate_count",
+                "low",
+                0.45,
+            )
+            _append(
+                "builtin.cs.supply.raise_targets_per_seed",
+                "cognitive_stitching.context_concat_max_targets_per_seed",
+                +1.0,
+                "cs_candidate_supply_thin_expand_per_seed_target_supply",
+                "cs_candidate_count",
+                "low",
+                0.35,
+            )
+
+        if (
+            candidate_rich_but_action_starved
+            and upstream_structure_alive
+            and not timing_hot
+            and not component_limit_dominant
+            and not non_positive_edge_dominant
+            and not narrative_zone_alive
+        ):
             _append(
                 "builtin.cs.open_gate.thresholds",
                 "cognitive_stitching.min_candidate_score",
@@ -4014,29 +4959,97 @@ class AutoTuner:
                 "cognitive_stitching.event_grasp_min_total_energy",
                 -1.0,
                 "event_grasp_gate_may_be_too_strict_for_string_mode_bootstrap",
+                "cs_event_grasp_emitted_count",
+                "low",
+                0.40,
+            )
+            _append(
+                "builtin.cs.open_supply.snapshot_top_k",
+                "cognitive_stitching.snapshot_top_k",
+                +1.0,
+                "cs_candidates_exist_but_snapshot_supply_may_be_thin",
                 "cs_action_count",
                 "low",
                 0.55,
             )
+            _append(
+                "builtin.cs.open_supply.max_seed_items",
+                "cognitive_stitching.max_seed_items",
+                +1.0,
+                "cs_candidates_exist_but_seed_supply_may_be_thin",
+                "cs_action_count",
+                "low",
+                0.60,
+            )
+            _append(
+                "builtin.cs.open_supply.max_events_per_tick",
+                "cognitive_stitching.max_events_per_tick",
+                +1.0,
+                "cs_candidates_exist_but_event_budget_may_be_thin",
+                "cs_action_count",
+                "low",
+                0.45,
+            )
+            _append(
+                "builtin.cs.open_supply.max_targets_per_seed",
+                "cognitive_stitching.context_concat_max_targets_per_seed",
+                +1.0,
+                "cs_candidates_exist_but_per_seed_target_budget_may_be_thin",
+                "cs_action_count",
+                "low",
+                0.40,
+            )
 
-        if mean_candidates >= 6.0 and mean_actions >= 2.5:
+        if (
+            mean_actions >= 0.25
+            and mean_event_grasp_post_action_seed >= 0.20
+            and mean_event_grasp_post_action_selected >= 0.10
+            and mean_event_grasp_selected >= 0.10
+            and mean_event_grasp_emitted <= 0.05
+            and mean_narrative_grasp <= 0.03
+            and not narrative_zone_alive
+            and not narrative_zone_mature
+            and not timing_hot
+        ):
+            _append(
+                "builtin.cs.focus.lower_event_grasp_gate_after_post_focus",
+                "cognitive_stitching.event_grasp_min_total_energy",
+                -1.0,
+                f"event_grasp_not_emitting_after_post_action_focus actions={mean_actions:.3f} post_focus={mean_event_grasp_post_action_seed:.3f} selected={mean_event_grasp_selected:.3f} emitted={mean_event_grasp_emitted:.3f} grasp_max={mean_narrative_grasp_max:.3f} positive_count={mean_narrative_grasp_positive_count:.3f}",
+                "cs_event_grasp_emitted_count",
+                "low",
+                0.75,
+            )
+
+        if competition_pressure >= 0.85 and mean_actions >= 320.0 and mean_threshold_margin >= 0.24:
+            _append(
+                "builtin.cs.audit.tighten_competition_gate",
+                "cognitive_stitching.min_candidate_score",
+                +1.0,
+                f"cs_same_signature_competition_hot pressure={competition_pressure:.3f} margin={mean_threshold_margin:.3f}",
+                "cs_candidate_threshold_margin_mean",
+                "high",
+                0.8,
+            )
+
+        if mean_candidates >= 720.0 and mean_actions >= 520.0 and timing_hot:
             _append(
                 "builtin.cs.tighten.thresholds",
                 "cognitive_stitching.min_candidate_score",
                 +1.0,
-                f"cs_actions_too_dense mean_candidates={mean_candidates:.3f} mean_actions={mean_actions:.3f}",
+                f"cs_actions_too_dense_and_timing_hot mean_candidates={mean_candidates:.3f} mean_actions={mean_actions:.3f}",
                 "cs_action_count",
                 "high",
-                0.9,
+                0.35,
             )
             _append(
                 "builtin.cs.tighten.anchor_penalty",
                 "cognitive_stitching.anchor_distance_penalty",
                 +1.0,
-                "cs_branching_too_dense_raise_distance_penalty",
+                "cs_branching_extremely_dense_and_timing_hot_raise_distance_penalty",
                 "cs_candidate_count",
                 "high",
-                0.6,
+                0.25,
             )
 
         if mean_candidates >= 3.0 and candidate_to_action_ratio < 0.12 and upstream_structure_alive and not timing_hot:
@@ -4059,24 +5072,24 @@ class AutoTuner:
                 0.45,
             )
 
-        if timing_hot or mean_timing >= 900.0:
+        if mean_timing >= 1800.0:
             _append(
                 "builtin.cs.performance.tighten_context",
                 "cognitive_stitching.context_support_weight",
                 -1.0,
-                f"cs_timing_hot mean_timing={mean_timing:.3f}",
+                f"cs_timing_extreme_hot mean_timing={mean_timing:.3f}",
                 "timing_cognitive_stitching_ms",
                 "high",
-                0.7,
+                0.35,
             )
             _append(
                 "builtin.cs.performance.tighten_threshold",
                 "cognitive_stitching.min_candidate_score",
                 +1.0,
-                "cs_timing_hot_reduce_candidate_fanout",
+                "cs_timing_extreme_hot_reduce_candidate_fanout",
                 "timing_cognitive_stitching_ms",
                 "high",
-                0.7,
+                0.35,
             )
 
         return updates
@@ -4091,6 +5104,8 @@ class AutoTuner:
         mean_selected_structures = float(balance.get("mean_selected_structures", 0.0) or 0.0)
         latest_selected_structures = float(balance.get("latest_selected_structures", 0.0) or 0.0)
         mean_pool_items = float(balance.get("mean_pool_items", 0.0) or 0.0)
+        source_supply_healthy = bool(balance.get("source_supply_healthy", False))
+        source_supply_thin = bool(balance.get("source_supply_thin", False))
         budget_not_binding = bool(
             (float(balance.get("latest_raw_units", 0.0) or 0.0) > 0.0 and float(balance.get("latest_selected_units", 0.0) or 0.0) >= float(balance.get("latest_raw_units", 0.0) or 0.0) * 0.98)
             or (float(balance.get("latest_detail_budget", 0.0) or 0.0) > 0.0 and float(balance.get("latest_selected_units", 0.0) or 0.0) <= float(balance.get("latest_detail_budget", 0.0) or 0.0) * 0.75)
@@ -4136,24 +5151,43 @@ class AutoTuner:
             )
 
         if mean_selected_structures < 3.0 and latest_selected_structures < 3.0:
-            _append(
-                "builtin.structure_supply.raise_structure_cap",
-                "hdb.internal_resolution_max_structures_per_tick",
-                +1.0,
-                f"selected_structures_too_low mean={mean_selected_structures:.3f}",
-                "internal_resolution_structure_count_selected",
-                "low",
-                0.75,
-            )
-            if budget_not_binding:
+            if source_supply_healthy and not source_supply_thin:
+                _append(
+                    "builtin.structure_supply.raise_structure_cap",
+                    "hdb.internal_resolution_max_structures_per_tick",
+                    +1.0,
+                    f"selected_structures_too_low_but_source_supply_alive mean={mean_selected_structures:.3f}",
+                    "internal_resolution_structure_count_selected",
+                    "low",
+                    0.75,
+                )
+            if budget_not_binding or source_supply_thin:
                 _append(
                     "builtin.structure_supply.keep_pool_alive",
                     "state_pool.default_er_decay_ratio",
                     +1.0,
-                    "selected_structures_low_prefer_retention_first",
+                    "selected_structures_low_and_source_supply_thin_prefer_retention_first",
+                    "internal_resolution_structure_count_selected",
+                    "low",
+                    0.55,
+                )
+                _append(
+                    "builtin.structure_supply.keep_pool_ev_alive",
+                    "state_pool.default_ev_decay_ratio",
+                    +1.0,
+                    "selected_structures_low_and_source_supply_thin_keep_ev_alive",
                     "internal_resolution_structure_count_selected",
                     "low",
                     0.45,
+                )
+                _append(
+                    "builtin.structure_supply.raise_cam_cap_for_source_thin",
+                    "attention.max_cam_items",
+                    +1.0,
+                    "selected_structures_low_and_source_supply_thin_raise_cam_cap",
+                    "cam_item_count",
+                    "low",
+                    0.4,
                 )
 
         return updates
@@ -4164,15 +5198,326 @@ class AutoTuner:
         n = len(rows)
         er_vals = _recent_window(rows, "pool_total_er", n)
         ev_vals = _recent_window(rows, "pool_total_ev", n)
-        if not er_vals and not ev_vals:
+        ratio_vals = _recent_window(rows, "pool_ev_to_er_ratio", n)
+        total_delta_vals = _recent_window(rows, "induction_total_delta_ev", n)
+        total_ev_consumed_vals = _recent_window(rows, "induction_total_ev_consumed", n)
+        propagated_ev_vals = _recent_window(rows, "induction_propagated_ev_total", n)
+        ev_from_er_vals = _recent_window(rows, "induction_ev_from_er_total", n)
+        propagated_target_ratio_vals = _recent_window(rows, "induction_propagated_target_ratio", n)
+        ev_from_er_ratio_vals = _recent_window(rows, "induction_ev_from_er_ratio", n)
+        source_item_vals = _recent_window(rows, "induction_source_item_count", n)
+        target_count_vals = _recent_window(rows, "induction_target_count", n)
+        structure_target_count_vals = _recent_window(rows, "induction_structure_target_count", n)
+        memory_target_count_vals = _recent_window(rows, "induction_memory_target_count", n)
+        applied_target_count_vals = _recent_window(rows, "induction_applied_target_count", n)
+        skipped_target_count_vals = _recent_window(rows, "induction_skipped_target_count", n)
+        skipped_cs_event_target_count_vals = _recent_window(rows, "induction_skipped_cs_event_target_count", n)
+        propagated_target_count_vals = _recent_window(rows, "induction_propagated_target_count", n)
+        induced_target_count_vals = _recent_window(rows, "induction_induced_target_count", n)
+        targets_per_source_vals = _recent_window(rows, "induction_targets_per_source_mean", n)
+        structure_target_total_ev_vals = _recent_window(rows, "induction_structure_target_total_ev", n)
+        memory_target_total_ev_vals = _recent_window(rows, "induction_memory_target_total_ev", n)
+        applied_total_ev_vals = _recent_window(rows, "induction_structure_applied_total_ev", n)
+        if not applied_total_ev_vals:
+            applied_total_ev_vals = _recent_window(rows, "induction_applied_total_ev", n)
+        skipped_target_total_ev_vals = _recent_window(rows, "induction_skipped_target_total_ev", n)
+        applied_ev_ratio_vals = _recent_window(rows, "induction_structure_applied_ev_ratio", n)
+        if not applied_ev_ratio_vals:
+            applied_ev_ratio_vals = _recent_window(rows, "induction_applied_ev_ratio", n)
+        applied_target_ratio_vals = _recent_window(rows, "induction_structure_applied_target_ratio", n)
+        if not applied_target_ratio_vals:
+            applied_target_ratio_vals = _recent_window(rows, "induction_applied_target_ratio", n)
+        fallback_used_vals = _recent_window(rows, "induction_fallback_used", n)
+        source_available_vals = _recent_window(rows, "induction_source_available_st_count", n)
+        source_selected_ev_vals = _recent_window(rows, "induction_source_selected_from_ev_count", n)
+        source_selected_er_vals = _recent_window(rows, "induction_source_selected_from_er_count", n)
+        source_cap_vals = _recent_window(rows, "induction_source_max_items", n)
+        source_cap_hit_vals = _recent_window(rows, "induction_source_selection_cap_hit", n)
+        raw_residual_entry_count_vals = _recent_window(rows, "induction_raw_residual_entry_count", n)
+        raw_residual_entry_with_existing_structure_vals = _recent_window(
+            rows, "induction_raw_residual_entry_with_existing_structure_count", n
+        )
+        raw_residual_entry_routed_to_structure_vals = _recent_window(
+            rows, "induction_raw_residual_entry_routed_to_structure_count", n
+        )
+        raw_residual_structure_target_total_ev_vals = _recent_window(
+            rows, "induction_raw_residual_structure_target_total_ev", n
+        )
+        raw_residual_memory_target_total_ev_vals = _recent_window(
+            rows, "induction_raw_residual_memory_target_total_ev", n
+        )
+        raw_residual_hit_memory_target_total_ev_vals = _recent_window(
+            rows, "induction_raw_residual_hit_memory_target_total_ev", n
+        )
+        raw_residual_miss_memory_target_total_ev_vals = _recent_window(
+            rows, "induction_raw_residual_miss_memory_target_total_ev", n
+        )
+        hdb_requested_ev_ratio_vals = _recent_window(rows, "hdb_requested_ev_propagation_ratio", n)
+        hdb_effective_ev_ratio_vals = _recent_window(rows, "hdb_effective_ev_propagation_ratio", n)
+        hdb_requested_er_ratio_vals = _recent_window(rows, "hdb_requested_er_induction_ratio", n)
+        hdb_effective_er_ratio_vals = _recent_window(rows, "hdb_effective_er_induction_ratio", n)
+        hdb_ev_clamped_vals = _recent_window(rows, "hdb_ev_propagation_ratio_clamped", n)
+        hdb_er_clamped_vals = _recent_window(rows, "hdb_er_induction_ratio_clamped", n)
+        memory_feedback_total_ev_vals = _recent_window(rows, "memory_feedback_total_ev", n)
+        memory_feedback_packet_count_vals = _recent_window(rows, "memory_feedback_packet_count", n)
+        memory_feedback_packet_ev_vals = _recent_window(rows, "memory_feedback_packet_total_ev", n)
+        memory_feedback_structure_projection_attempted_count_vals = _recent_window(
+            rows, "memory_feedback_structure_projection_attempted_count", n
+        )
+        memory_feedback_structure_projection_skipped_count_vals = _recent_window(
+            rows, "memory_feedback_structure_projection_skipped_count", n
+        )
+        memory_feedback_structure_projection_count_vals = _recent_window(rows, "memory_feedback_structure_projection_count", n)
+        memory_feedback_structure_projection_effective_ratio_vals = _recent_window(
+            rows, "memory_feedback_structure_projection_effective_ratio", n
+        )
+        memory_feedback_structure_projection_ev_vals = _recent_window(rows, "memory_feedback_structure_projection_total_ev", n)
+        if not er_vals and not ev_vals and not ratio_vals:
             return {}
         mean_er = _mean(er_vals)
         mean_ev = _mean(ev_vals)
         latest_er = er_vals[-1] if er_vals else 0.0
         latest_ev = ev_vals[-1] if ev_vals else 0.0
-        mean_ratio = (mean_ev / mean_er) if mean_er > 1e-6 else 0.0
-        latest_ratio = (latest_ev / latest_er) if latest_er > 1e-6 else 0.0
-        severely_ev_starved = bool(mean_er >= 20.0 and mean_ratio < 0.85)
+        if not ratio_vals and er_vals and ev_vals:
+            ratio_vals = [
+                (float(ev_v) / max(0.000001, float(er_v)))
+                for er_v, ev_v in zip(er_vals, ev_vals)
+                if float(er_v) > 1e-6
+            ]
+        mean_ratio = _mean(ratio_vals) if ratio_vals else ((mean_ev / mean_er) if mean_er > 1e-6 else 0.0)
+        latest_ratio = ratio_vals[-1] if ratio_vals else ((latest_ev / latest_er) if latest_er > 1e-6 else 0.0)
+
+        ratio_target = self.metric_targets.get("pool_ev_to_er_ratio")
+        ratio_target_min = float(ratio_target.expected_min) if ratio_target else 1.02
+        ratio_target_ideal = float(ratio_target.ideal) if ratio_target else 1.12
+        er_target = self.metric_targets.get("pool_total_er")
+        er_expected_max = float(er_target.expected_max) if er_target else 260.0
+
+        mean_total_delta_ev = _mean(total_delta_vals)
+        mean_total_ev_consumed = _mean(total_ev_consumed_vals)
+        mean_propagated_ev = _mean(propagated_ev_vals)
+        mean_ev_from_er = _mean(ev_from_er_vals)
+        mean_propagated_target_ratio = _mean(propagated_target_ratio_vals)
+        mean_ev_from_er_ratio = _mean(ev_from_er_ratio_vals)
+        mean_source_items = _mean(source_item_vals)
+        mean_target_count = _mean(target_count_vals)
+        mean_structure_target_count = _mean(structure_target_count_vals) if structure_target_count_vals else mean_target_count
+        mean_memory_target_count = _mean(memory_target_count_vals)
+        mean_applied_target_count = _mean(applied_target_count_vals)
+        mean_skipped_target_count = _mean(skipped_target_count_vals)
+        mean_skipped_cs_event_target_count = _mean(skipped_cs_event_target_count_vals)
+        mean_propagated_target_count = _mean(propagated_target_count_vals)
+        mean_induced_target_count = _mean(induced_target_count_vals)
+        mean_targets_per_source = _mean(targets_per_source_vals)
+        mean_structure_target_total_ev = _mean(structure_target_total_ev_vals)
+        mean_memory_target_total_ev = _mean(memory_target_total_ev_vals)
+        mean_applied_total_ev = _mean(applied_total_ev_vals)
+        mean_skipped_target_total_ev = _mean(skipped_target_total_ev_vals)
+        mean_applied_ev_ratio = _mean(applied_ev_ratio_vals)
+        mean_applied_target_ratio = _mean(applied_target_ratio_vals)
+        mean_fallback_used = _mean(fallback_used_vals)
+        mean_source_available = _mean(source_available_vals)
+        mean_source_selected_from_ev = _mean(source_selected_ev_vals)
+        mean_source_selected_from_er = _mean(source_selected_er_vals)
+        mean_source_cap = _mean(source_cap_vals)
+        mean_source_cap_hit = _mean(source_cap_hit_vals)
+        mean_raw_residual_entry_count = _mean(raw_residual_entry_count_vals)
+        mean_raw_residual_entry_with_existing_structure_count = _mean(raw_residual_entry_with_existing_structure_vals)
+        mean_raw_residual_entry_routed_to_structure_count = _mean(raw_residual_entry_routed_to_structure_vals)
+        mean_raw_residual_structure_target_total_ev = _mean(raw_residual_structure_target_total_ev_vals)
+        mean_raw_residual_memory_target_total_ev = _mean(raw_residual_memory_target_total_ev_vals)
+        mean_raw_residual_hit_memory_target_total_ev = _mean(raw_residual_hit_memory_target_total_ev_vals)
+        mean_raw_residual_miss_memory_target_total_ev = _mean(raw_residual_miss_memory_target_total_ev_vals)
+        mean_hdb_requested_ev_ratio = _mean(hdb_requested_ev_ratio_vals)
+        mean_hdb_effective_ev_ratio = _mean(hdb_effective_ev_ratio_vals)
+        mean_hdb_requested_er_ratio = _mean(hdb_requested_er_ratio_vals)
+        mean_hdb_effective_er_ratio = _mean(hdb_effective_er_ratio_vals)
+        mean_hdb_ev_clamped = _mean(hdb_ev_clamped_vals)
+        mean_hdb_er_clamped = _mean(hdb_er_clamped_vals)
+        mean_memory_feedback_total_ev = _mean(memory_feedback_total_ev_vals)
+        mean_memory_feedback_packet_count = _mean(memory_feedback_packet_count_vals)
+        mean_memory_feedback_packet_ev = _mean(memory_feedback_packet_ev_vals)
+        mean_memory_feedback_structure_projection_attempted_count = _mean(
+            memory_feedback_structure_projection_attempted_count_vals
+        )
+        mean_memory_feedback_structure_projection_skipped_count = _mean(
+            memory_feedback_structure_projection_skipped_count_vals
+        )
+        mean_memory_feedback_structure_projection_count = _mean(memory_feedback_structure_projection_count_vals)
+        mean_memory_feedback_structure_projection_effective_ratio = _mean(
+            memory_feedback_structure_projection_effective_ratio_vals
+        )
+        mean_memory_feedback_structure_projection_ev = _mean(memory_feedback_structure_projection_ev_vals)
+        latest_total_delta_ev = total_delta_vals[-1] if total_delta_vals else 0.0
+        latest_applied_total_ev = applied_total_ev_vals[-1] if applied_total_ev_vals else 0.0
+        latest_propagated_ev = propagated_ev_vals[-1] if propagated_ev_vals else 0.0
+        latest_ev_from_er = ev_from_er_vals[-1] if ev_from_er_vals else 0.0
+        latest_memory_feedback_packet_ev = memory_feedback_packet_ev_vals[-1] if memory_feedback_packet_ev_vals else 0.0
+        latest_memory_feedback_structure_projection_ev = (
+            memory_feedback_structure_projection_ev_vals[-1] if memory_feedback_structure_projection_ev_vals else 0.0
+        )
+
+        propagated_ev_share = (
+            mean_propagated_ev / max(0.000001, mean_total_delta_ev)
+            if mean_total_delta_ev > 1e-6
+            else 0.0
+        )
+        memory_feedback_structure_projection_share = (
+            mean_memory_feedback_structure_projection_ev / max(0.000001, mean_memory_feedback_total_ev)
+            if mean_memory_feedback_total_ev > 1e-6
+            else 0.0
+        )
+        memory_feedback_packet_share = (
+            mean_memory_feedback_packet_ev / max(0.000001, mean_memory_feedback_total_ev)
+            if mean_memory_feedback_total_ev > 1e-6
+            else 0.0
+        )
+        structure_target_ev_share = (
+            mean_structure_target_total_ev / max(0.000001, mean_structure_target_total_ev + mean_memory_target_total_ev)
+            if (structure_target_total_ev_vals or memory_target_total_ev_vals)
+            else 1.0
+        )
+        raw_residual_structure_share = (
+            mean_raw_residual_structure_target_total_ev
+            / max(
+                0.000001,
+                mean_raw_residual_structure_target_total_ev + mean_raw_residual_memory_target_total_ev,
+            )
+            if (raw_residual_structure_target_total_ev_vals or raw_residual_memory_target_total_ev_vals)
+            else 0.0
+        )
+        raw_residual_hit_path_total_ev = (
+            mean_raw_residual_structure_target_total_ev + mean_raw_residual_hit_memory_target_total_ev
+        )
+        raw_residual_hit_structure_share = (
+            mean_raw_residual_structure_target_total_ev / max(0.000001, raw_residual_hit_path_total_ev)
+            if (raw_residual_structure_target_total_ev_vals or raw_residual_hit_memory_target_total_ev_vals)
+            else 0.0
+        )
+        raw_residual_existing_hit_rate = (
+            mean_raw_residual_entry_with_existing_structure_count / max(0.000001, mean_raw_residual_entry_count)
+            if raw_residual_entry_count_vals
+            else 0.0
+        )
+        expected_ev_floor = mean_er * max(0.0, ratio_target_min)
+        ev_ratio_deficit = max(0.0, ratio_target_min - mean_ratio)
+        ev_amount_deficit = max(0.0, expected_ev_floor - mean_ev)
+
+        ev_starved = bool(mean_er >= 20.0 and mean_ratio < max(0.98, ratio_target_min * 0.96))
+        severely_ev_starved = bool(mean_er >= 20.0 and mean_ratio < max(0.85, ratio_target_min * 0.84))
+        effective_target_count = mean_applied_target_count if applied_target_count_vals else mean_target_count
+        effective_targets_per_source = (
+            mean_applied_target_count / max(1.0, mean_source_items)
+            if applied_target_count_vals
+            else mean_targets_per_source
+        )
+        effective_total_delta_ev = mean_applied_total_ev if applied_total_ev_vals else mean_total_delta_ev
+        projection_blocked = bool(
+            mean_structure_target_count >= 1.0
+            and (
+                mean_skipped_cs_event_target_count >= 1.0
+                or (
+                    structure_target_ev_share >= 0.25
+                    and (
+                        (applied_target_count_vals and mean_applied_target_ratio < 0.55)
+                        or (applied_ev_ratio_vals and mean_applied_ev_ratio < 0.55)
+                    )
+                )
+            )
+        )
+        source_supply_thin = bool(
+            mean_source_items < 1.0
+            or effective_target_count < 1.0
+            or (effective_targets_per_source < 0.65 and effective_total_delta_ev < 0.8)
+        )
+        propagation_chain_weak = bool(
+            ev_starved
+            and not source_supply_thin
+            and not projection_blocked
+            and (
+                mean_propagated_target_ratio < 0.35
+                or (mean_total_ev_consumed >= 1.0 and mean_propagated_ev < mean_total_ev_consumed * 0.35)
+                or (mean_total_delta_ev >= 1.0 and propagated_ev_share < 0.38)
+            )
+        )
+        induction_chain_weak = bool(
+            ev_starved
+            and not source_supply_thin
+            and not projection_blocked
+            and (
+                mean_ev_from_er_ratio < 0.16
+                or (mean_total_delta_ev >= 1.0 and mean_ev_from_er < max(0.8, mean_total_delta_ev * 0.18))
+            )
+        )
+        retention_chain_weak = bool(
+            ev_starved
+            and (
+                source_supply_thin
+                or projection_blocked
+                or (not propagation_chain_weak and not induction_chain_weak)
+            )
+        )
+        er_overfull = bool(mean_er > max(180.0, er_expected_max * 0.82))
+        memory_feedback_packet_dominant = bool(
+            mean_memory_feedback_total_ev >= 0.6
+            and mean_memory_feedback_packet_ev >= 0.35
+            and memory_feedback_structure_projection_share < 0.24
+            and memory_feedback_packet_share > 0.68
+        )
+        memory_feedback_projection_overheavy = bool(
+            mean_memory_feedback_total_ev >= 0.6
+            and memory_feedback_structure_projection_share > 0.82
+            and mean_memory_feedback_packet_ev < max(0.18, mean_memory_feedback_structure_projection_ev * 0.28)
+        )
+        memory_feedback_projection_diluted = bool(
+            mean_memory_feedback_total_ev >= 0.8
+            and mean_memory_feedback_structure_projection_ev >= 0.45
+            and memory_feedback_structure_projection_share >= 0.20
+            and mean_memory_feedback_structure_projection_attempted_count >= max(
+                10.0, mean_memory_feedback_structure_projection_count + 6.0
+            )
+            and (
+                mean_memory_feedback_structure_projection_skipped_count
+                >= max(6.0, mean_memory_feedback_structure_projection_attempted_count * 0.30)
+                or mean_memory_feedback_structure_projection_effective_ratio < 0.42
+            )
+        )
+        source_cap_reached = bool(
+            mean_source_cap >= 1.0
+            and mean_source_items >= max(1.0, mean_source_cap - 0.25)
+            and mean_source_cap_hit >= 0.45
+        )
+        raw_residual_existing_hit_sparse = bool(
+            mean_raw_residual_entry_count >= 4.0
+            and raw_residual_existing_hit_rate < 0.12
+        )
+        raw_residual_structure_path_underused = bool(
+            ev_starved
+            and mean_raw_residual_entry_with_existing_structure_count >= 0.75
+            and mean_raw_residual_entry_routed_to_structure_count >= 0.50
+            and raw_residual_existing_hit_rate >= 0.08
+            and raw_residual_hit_path_total_ev >= 0.30
+            and mean_raw_residual_hit_memory_target_total_ev >= 0.12
+            and raw_residual_hit_structure_share < 0.42
+            and mean_raw_residual_structure_target_total_ev < max(
+                0.18,
+                mean_raw_residual_hit_memory_target_total_ev * 0.72,
+            )
+        )
+        propagation_ratio_saturated = bool(
+            mean_hdb_effective_ev_ratio >= 0.98
+            and (
+                mean_hdb_ev_clamped >= 0.35
+                or mean_hdb_requested_ev_ratio > mean_hdb_effective_ev_ratio + 0.05
+            )
+        )
+        induction_ratio_saturated = bool(
+            mean_hdb_effective_er_ratio >= 0.98
+            and (
+                mean_hdb_er_clamped >= 0.35
+                or mean_hdb_requested_er_ratio > mean_hdb_effective_er_ratio + 0.05
+            )
+        )
         return {
             "mean_er": mean_er,
             "mean_ev": mean_ev,
@@ -4180,18 +5525,119 @@ class AutoTuner:
             "latest_ev": latest_ev,
             "mean_ev_to_er_ratio": mean_ratio,
             "latest_ev_to_er_ratio": latest_ratio,
+            "ratio_target_min": ratio_target_min,
+            "ratio_target_ideal": ratio_target_ideal,
+            "mean_total_delta_ev": mean_total_delta_ev,
+            "mean_total_ev_consumed": mean_total_ev_consumed,
+            "mean_propagated_ev": mean_propagated_ev,
+            "latest_propagated_ev": latest_propagated_ev,
+            "mean_ev_from_er": mean_ev_from_er,
+            "latest_ev_from_er": latest_ev_from_er,
+            "latest_total_delta_ev": latest_total_delta_ev,
+            "latest_applied_total_ev": latest_applied_total_ev,
+            "mean_propagated_target_ratio": mean_propagated_target_ratio,
+            "mean_ev_from_er_ratio": mean_ev_from_er_ratio,
+            "mean_source_items": mean_source_items,
+            "mean_target_count": mean_target_count,
+            "mean_structure_target_count": mean_structure_target_count,
+            "mean_memory_target_count": mean_memory_target_count,
+            "mean_applied_target_count": mean_applied_target_count,
+            "mean_skipped_target_count": mean_skipped_target_count,
+            "mean_skipped_cs_event_target_count": mean_skipped_cs_event_target_count,
+            "mean_propagated_target_count": mean_propagated_target_count,
+            "mean_induced_target_count": mean_induced_target_count,
+            "mean_targets_per_source": mean_targets_per_source,
+            "mean_structure_target_total_ev": mean_structure_target_total_ev,
+            "mean_memory_target_total_ev": mean_memory_target_total_ev,
+            "mean_structure_target_ev_share": structure_target_ev_share,
+            "mean_applied_total_ev": mean_applied_total_ev,
+            "mean_skipped_target_total_ev": mean_skipped_target_total_ev,
+            "mean_applied_ev_ratio": mean_applied_ev_ratio,
+            "mean_applied_target_ratio": mean_applied_target_ratio,
+            "mean_fallback_used": mean_fallback_used,
+            "mean_source_available": mean_source_available,
+            "mean_source_selected_from_ev": mean_source_selected_from_ev,
+            "mean_source_selected_from_er": mean_source_selected_from_er,
+            "mean_source_cap": mean_source_cap,
+            "mean_source_cap_hit": mean_source_cap_hit,
+            "mean_raw_residual_entry_count": mean_raw_residual_entry_count,
+            "mean_raw_residual_entry_with_existing_structure_count": (
+                mean_raw_residual_entry_with_existing_structure_count
+            ),
+            "mean_raw_residual_entry_routed_to_structure_count": (
+                mean_raw_residual_entry_routed_to_structure_count
+            ),
+            "mean_raw_residual_structure_target_total_ev": mean_raw_residual_structure_target_total_ev,
+            "mean_raw_residual_memory_target_total_ev": mean_raw_residual_memory_target_total_ev,
+            "mean_raw_residual_hit_memory_target_total_ev": mean_raw_residual_hit_memory_target_total_ev,
+            "mean_raw_residual_miss_memory_target_total_ev": mean_raw_residual_miss_memory_target_total_ev,
+            "raw_residual_structure_share": raw_residual_structure_share,
+            "raw_residual_hit_path_total_ev": raw_residual_hit_path_total_ev,
+            "raw_residual_hit_structure_share": raw_residual_hit_structure_share,
+            "raw_residual_existing_hit_rate": raw_residual_existing_hit_rate,
+            "propagated_ev_share": propagated_ev_share,
+            "mean_memory_feedback_total_ev": mean_memory_feedback_total_ev,
+            "mean_memory_feedback_packet_count": mean_memory_feedback_packet_count,
+            "mean_memory_feedback_packet_ev": mean_memory_feedback_packet_ev,
+            "mean_memory_feedback_structure_projection_attempted_count": (
+                mean_memory_feedback_structure_projection_attempted_count
+            ),
+            "mean_memory_feedback_structure_projection_skipped_count": (
+                mean_memory_feedback_structure_projection_skipped_count
+            ),
+            "mean_memory_feedback_structure_projection_count": mean_memory_feedback_structure_projection_count,
+            "mean_memory_feedback_structure_projection_effective_ratio": (
+                mean_memory_feedback_structure_projection_effective_ratio
+            ),
+            "mean_memory_feedback_structure_projection_ev": mean_memory_feedback_structure_projection_ev,
+            "latest_memory_feedback_packet_ev": latest_memory_feedback_packet_ev,
+            "latest_memory_feedback_structure_projection_ev": latest_memory_feedback_structure_projection_ev,
+            "memory_feedback_structure_projection_share": memory_feedback_structure_projection_share,
+            "memory_feedback_packet_share": memory_feedback_packet_share,
+            "expected_ev_floor": expected_ev_floor,
+            "ev_ratio_deficit": ev_ratio_deficit,
+            "ev_amount_deficit": ev_amount_deficit,
+            "ev_starved": ev_starved,
             "severely_ev_starved": severely_ev_starved,
+            "source_supply_thin": source_supply_thin,
+            "projection_blocked": projection_blocked,
+            "propagation_chain_weak": propagation_chain_weak,
+            "induction_chain_weak": induction_chain_weak,
+            "retention_chain_weak": retention_chain_weak,
+            "memory_feedback_packet_dominant": memory_feedback_packet_dominant,
+            "memory_feedback_projection_overheavy": memory_feedback_projection_overheavy,
+            "memory_feedback_projection_diluted": memory_feedback_projection_diluted,
+            "source_cap_reached": source_cap_reached,
+            "raw_residual_existing_hit_sparse": raw_residual_existing_hit_sparse,
+            "raw_residual_structure_path_underused": raw_residual_structure_path_underused,
+            "er_overfull": er_overfull,
+            "mean_hdb_requested_ev_ratio": mean_hdb_requested_ev_ratio,
+            "mean_hdb_effective_ev_ratio": mean_hdb_effective_ev_ratio,
+            "mean_hdb_requested_er_ratio": mean_hdb_requested_er_ratio,
+            "mean_hdb_effective_er_ratio": mean_hdb_effective_er_ratio,
+            "mean_hdb_ev_clamped": mean_hdb_ev_clamped,
+            "mean_hdb_er_clamped": mean_hdb_er_clamped,
+            "propagation_ratio_saturated": propagation_ratio_saturated,
+            "induction_ratio_saturated": induction_ratio_saturated,
         }
 
     def _decide_ev_balance_nudges(self, *, snapshot: dict[str, Any], long_term: bool = False) -> list[dict[str, Any]]:
         if not isinstance(snapshot, dict) or not snapshot:
             return []
-        if not bool(snapshot.get("severely_ev_starved", False)):
+        if not bool(snapshot.get("ev_starved", False)):
             return []
         step_scale = 0.45 if long_term else 1.0
         updates: list[dict[str, Any]] = []
 
-        def _append(rule_id: str, param: str, direction: float, reason: str, weight: float = 1.0) -> None:
+        def _append(
+            rule_id: str,
+            param: str,
+            direction: float,
+            reason: str,
+            metric_key: str,
+            issue_mode: str,
+            weight: float = 1.0,
+        ) -> None:
             pid = self._canonicalize_param_id(param)
             if pid not in self.param_bounds:
                 return
@@ -4206,39 +5652,301 @@ class AutoTuner:
                 "param": pid,
                 "delta": delta,
                 "reason": reason,
-                "metric_key": "pool_total_ev",
-                "issue_mode": "low",
+                "metric_key": metric_key,
+                "issue_mode": issue_mode,
             })
 
         mean_ratio = float(snapshot.get("mean_ev_to_er_ratio", 0.0) or 0.0)
-        _append(
-            "builtin.ev_balance.raise_induction",
-            "emotion.subjective_modulators.er_induction_ratio.base",
-            +1.0,
-            f"ev_starved raise_er_induction_ratio mean_ev_to_er_ratio={mean_ratio:.3f}",
-            0.9,
+        ratio_target_min = float(snapshot.get("ratio_target_min", 1.02) or 1.02)
+        ratio_deficit = max(0.0, float(snapshot.get("ev_ratio_deficit", 0.0) or 0.0)) / max(0.000001, ratio_target_min)
+        propagation_chain_weak = bool(snapshot.get("propagation_chain_weak", False))
+        induction_chain_weak = bool(snapshot.get("induction_chain_weak", False))
+        retention_chain_weak = bool(snapshot.get("retention_chain_weak", False))
+        propagation_ratio_saturated = bool(snapshot.get("propagation_ratio_saturated", False))
+        induction_ratio_saturated = bool(snapshot.get("induction_ratio_saturated", False))
+        source_supply_thin = bool(snapshot.get("source_supply_thin", False))
+        er_overfull = bool(snapshot.get("er_overfull", False))
+        mean_hdb_requested_ev_ratio = float(snapshot.get("mean_hdb_requested_ev_ratio", 0.0) or 0.0)
+        mean_hdb_effective_ev_ratio = float(snapshot.get("mean_hdb_effective_ev_ratio", 0.0) or 0.0)
+        mean_hdb_requested_er_ratio = float(snapshot.get("mean_hdb_requested_er_ratio", 0.0) or 0.0)
+        mean_hdb_effective_er_ratio = float(snapshot.get("mean_hdb_effective_er_ratio", 0.0) or 0.0)
+        mean_propagated_target_ratio = float(snapshot.get("mean_propagated_target_ratio", 0.0) or 0.0)
+        mean_ev_from_er_ratio = float(snapshot.get("mean_ev_from_er_ratio", 0.0) or 0.0)
+        mean_propagated_ev = float(snapshot.get("mean_propagated_ev", 0.0) or 0.0)
+        mean_ev_from_er = float(snapshot.get("mean_ev_from_er", 0.0) or 0.0)
+        mean_total_delta_ev = float(snapshot.get("mean_total_delta_ev", 0.0) or 0.0)
+        mean_source_items = float(snapshot.get("mean_source_items", 0.0) or 0.0)
+        mean_target_count = float(snapshot.get("mean_target_count", 0.0) or 0.0)
+        mean_targets_per_source = float(snapshot.get("mean_targets_per_source", 0.0) or 0.0)
+        mean_source_available = float(snapshot.get("mean_source_available", 0.0) or 0.0)
+        mean_source_cap = float(snapshot.get("mean_source_cap", 0.0) or 0.0)
+        mean_source_cap_hit = float(snapshot.get("mean_source_cap_hit", 0.0) or 0.0)
+        mean_raw_residual_entry_count = float(snapshot.get("mean_raw_residual_entry_count", 0.0) or 0.0)
+        mean_raw_residual_entry_with_existing_structure_count = float(
+            snapshot.get("mean_raw_residual_entry_with_existing_structure_count", 0.0) or 0.0
         )
-        _append(
-            "builtin.ev_balance.raise_propagation",
-            "emotion.subjective_modulators.ev_propagation_ratio.base",
-            +1.0,
-            "ev_starved raise_ev_propagation_ratio",
-            1.0,
+        mean_raw_residual_entry_routed_to_structure_count = float(
+            snapshot.get("mean_raw_residual_entry_routed_to_structure_count", 0.0) or 0.0
         )
-        _append(
-            "builtin.ev_balance.slow_ev_decay",
-            "state_pool.default_ev_decay_ratio",
-            +1.0,
-            "ev_starved slow_default_ev_decay",
-            0.55,
+        mean_raw_residual_structure_target_total_ev = float(
+            snapshot.get("mean_raw_residual_structure_target_total_ev", 0.0) or 0.0
         )
-        if float(snapshot.get("mean_er", 0.0) or 0.0) > 180.0:
+        mean_raw_residual_memory_target_total_ev = float(
+            snapshot.get("mean_raw_residual_memory_target_total_ev", 0.0) or 0.0
+        )
+        mean_raw_residual_hit_memory_target_total_ev = float(
+            snapshot.get("mean_raw_residual_hit_memory_target_total_ev", 0.0) or 0.0
+        )
+        mean_raw_residual_miss_memory_target_total_ev = float(
+            snapshot.get("mean_raw_residual_miss_memory_target_total_ev", 0.0) or 0.0
+        )
+        raw_residual_structure_share = float(snapshot.get("raw_residual_structure_share", 0.0) or 0.0)
+        raw_residual_hit_structure_share = float(snapshot.get("raw_residual_hit_structure_share", 0.0) or 0.0)
+        raw_residual_existing_hit_rate = float(snapshot.get("raw_residual_existing_hit_rate", 0.0) or 0.0)
+        mean_memory_feedback_total_ev = float(snapshot.get("mean_memory_feedback_total_ev", 0.0) or 0.0)
+        mean_memory_feedback_packet_ev = float(snapshot.get("mean_memory_feedback_packet_ev", 0.0) or 0.0)
+        mean_memory_feedback_structure_projection_attempted_count = float(
+            snapshot.get("mean_memory_feedback_structure_projection_attempted_count", 0.0) or 0.0
+        )
+        mean_memory_feedback_structure_projection_skipped_count = float(
+            snapshot.get("mean_memory_feedback_structure_projection_skipped_count", 0.0) or 0.0
+        )
+        mean_memory_feedback_structure_projection_ev = float(
+            snapshot.get("mean_memory_feedback_structure_projection_ev", 0.0) or 0.0
+        )
+        mean_memory_feedback_structure_projection_effective_ratio = float(
+            snapshot.get("mean_memory_feedback_structure_projection_effective_ratio", 0.0) or 0.0
+        )
+        memory_feedback_structure_projection_share = float(
+            snapshot.get("memory_feedback_structure_projection_share", 0.0) or 0.0
+        )
+        memory_feedback_packet_share = float(snapshot.get("memory_feedback_packet_share", 0.0) or 0.0)
+        memory_feedback_tuning_enabled = bool(
+            getattr(getattr(self, "cfg", None), "enable_memory_feedback_tuning", True)
+        )
+
+        if propagation_chain_weak and not propagation_ratio_saturated:
+            prop_deficit = max(
+                max(0.0, 0.35 - mean_propagated_target_ratio) / 0.35,
+                max(0.0, 1.2 - mean_propagated_ev) / 1.2 if mean_total_delta_ev >= 1.0 else 0.0,
+            )
+            _append(
+                "builtin.ev_balance.raise_propagation",
+                "hdb.ev_propagation_ratio",
+                +1.0,
+                (
+                    "ev_starved_and_local_propagation_weak "
+                    f"mean_ev_to_er_ratio={mean_ratio:.3f} propagated_target_ratio={mean_propagated_target_ratio:.3f} "
+                    f"propagated_ev={mean_propagated_ev:.3f}"
+                ),
+                "induction_propagated_target_ratio",
+                "low",
+                0.55 + min(0.45, max(ratio_deficit, prop_deficit) * 0.55),
+            )
+
+        if induction_chain_weak and not induction_ratio_saturated:
+            induction_deficit = max(
+                max(0.0, 0.16 - mean_ev_from_er_ratio) / 0.16,
+                max(0.0, 0.8 - mean_ev_from_er) / 0.8 if mean_total_delta_ev >= 1.0 else 0.0,
+            )
+            _append(
+                "builtin.ev_balance.raise_induction",
+                "hdb.er_induction_ratio",
+                +1.0,
+                (
+                    "ev_starved_and_er_induction_weak "
+                    f"mean_ev_to_er_ratio={mean_ratio:.3f} ev_from_er_ratio={mean_ev_from_er_ratio:.3f} "
+                    f"ev_from_er={mean_ev_from_er:.3f}"
+                ),
+                "induction_ev_from_er_ratio",
+                "low",
+                0.55 + min(0.45, max(ratio_deficit, induction_deficit) * 0.55),
+            )
+
+        if (propagation_chain_weak and propagation_ratio_saturated) or (induction_chain_weak and induction_ratio_saturated):
+            saturated_parts: list[str] = []
+            if propagation_chain_weak and propagation_ratio_saturated:
+                saturated_parts.append(
+                    f"propagation requested={mean_hdb_requested_ev_ratio:.3f} effective={mean_hdb_effective_ev_ratio:.3f}"
+                )
+            if induction_chain_weak and induction_ratio_saturated:
+                saturated_parts.append(
+                    f"induction requested={mean_hdb_requested_er_ratio:.3f} effective={mean_hdb_effective_er_ratio:.3f}"
+                )
+            _append(
+                "builtin.ev_balance.saturated_input_prefer_ev_retention",
+                "state_pool.default_ev_decay_ratio",
+                +1.0,
+                (
+                    "ev_starved_but_hdb_input_ratios_already_saturated "
+                    f"mean_ev_to_er_ratio={mean_ratio:.3f} "
+                    + " | ".join(saturated_parts)
+                ),
+                "pool_ev_to_er_ratio",
+                "low",
+                0.55 + min(0.35, ratio_deficit * 0.55),
+            )
+
+        if bool(snapshot.get("ev_starved", False)) and mean_source_items >= 3.0 and (
+            mean_target_count < 1.8 or mean_targets_per_source < 0.30
+        ):
+            fanout_deficit = max(
+                max(0.0, 1.8 - mean_target_count) / 1.8,
+                max(0.0, 0.30 - mean_targets_per_source) / 0.30,
+            )
+            _append(
+                "builtin.ev_balance.lower_propagation_threshold",
+                "hdb.ev_propagation_threshold",
+                -1.0,
+                (
+                    "ev_starved_and_propagation_target_fanout_thin "
+                    f"mean_ev_to_er_ratio={mean_ratio:.3f} source_items={mean_source_items:.3f} "
+                    f"target_count={mean_target_count:.3f} targets_per_source={mean_targets_per_source:.3f}"
+                ),
+                "induction_target_count",
+                "low",
+                0.45 + min(0.35, max(ratio_deficit, fanout_deficit) * 0.50),
+            )
+
+        if bool(snapshot.get("ev_starved", False)) and bool(snapshot.get("source_cap_reached", False)) and (
+            mean_source_available >= mean_source_items + 2.0 or mean_source_cap_hit >= 0.70
+        ):
+            source_span_deficit = max(
+                max(0.0, (mean_source_items + 2.0) - mean_source_available) / max(1.0, mean_source_items + 2.0),
+                max(0.0, 0.70 - mean_source_cap_hit) / 0.70,
+            )
+            _append(
+                "builtin.ev_balance.raise_induction_source_span",
+                "observatory.induction_source_max_items",
+                +1.0,
+                (
+                    "ev_starved_and_induction_source_cap_hit "
+                    f"mean_ev_to_er_ratio={mean_ratio:.3f} source_items={mean_source_items:.3f} "
+                    f"available_sources={mean_source_available:.3f} source_cap={mean_source_cap:.3f} "
+                    f"cap_hit={mean_source_cap_hit:.3f}"
+                ),
+                "induction_source_available_st_count",
+                "low",
+                0.40 + min(0.30, max(ratio_deficit, source_span_deficit) * 0.45),
+            )
+
+        if bool(snapshot.get("raw_residual_structure_path_underused", False)):
+            raw_residual_deficit = max(
+                max(0.0, 0.42 - raw_residual_hit_structure_share) / 0.42,
+                max(
+                    0.0,
+                    max(0.18, mean_raw_residual_hit_memory_target_total_ev * 0.72)
+                    - mean_raw_residual_structure_target_total_ev,
+                )
+                / max(0.18, mean_raw_residual_hit_memory_target_total_ev * 0.72),
+            )
+            _append(
+                "builtin.ev_balance.raise_raw_residual_structure_share",
+                "hdb.induction_raw_residual_structure_share",
+                +1.0,
+                (
+                    "ev_starved_and_raw_residual_existing_structure_path_underused "
+                    f"raw_entries={mean_raw_residual_entry_count:.3f} "
+                    f"existing_hits={mean_raw_residual_entry_with_existing_structure_count:.3f} "
+                    f"routed_entries={mean_raw_residual_entry_routed_to_structure_count:.3f} "
+                    f"structure_ev={mean_raw_residual_structure_target_total_ev:.3f} "
+                    f"hit_memory_ev={mean_raw_residual_hit_memory_target_total_ev:.3f} "
+                    f"miss_memory_ev={mean_raw_residual_miss_memory_target_total_ev:.3f} "
+                    f"memory_ev={mean_raw_residual_memory_target_total_ev:.3f} "
+                    f"hit_rate={raw_residual_existing_hit_rate:.3f} "
+                    f"hit_structure_share={raw_residual_hit_structure_share:.3f} "
+                    f"overall_structure_share={raw_residual_structure_share:.3f}"
+                ),
+                "induction_raw_residual_structure_target_total_ev",
+                "low",
+                0.38 + min(0.24, max(ratio_deficit, raw_residual_deficit) * 0.30),
+            )
+
+        if retention_chain_weak:
+            retention_weight = 0.50 + min(0.40, ratio_deficit * 0.60)
+            reason = (
+                "ev_starved_but_supply_is_thin_prefer_retention_first"
+                if source_supply_thin
+                else "ev_starved_with_propagation_and_induction_alive_prefer_ev_retention"
+            )
+            _append(
+                "builtin.ev_balance.slow_ev_decay",
+                "state_pool.default_ev_decay_ratio",
+                +1.0,
+                f"{reason} mean_ev_to_er_ratio={mean_ratio:.3f}",
+                "pool_ev_to_er_ratio",
+                "low",
+                retention_weight,
+            )
+
+        if er_overfull and (retention_chain_weak or bool(snapshot.get("severely_ev_starved", False))):
             _append(
                 "builtin.ev_balance.soften_er_retention",
                 "state_pool.default_er_decay_ratio",
                 -1.0,
-                "ev_starved_and_er_overfull soften_default_er_decay",
-                0.35,
+                f"ev_starved_and_er_overfull mean_er={float(snapshot.get('mean_er', 0.0) or 0.0):.3f} mean_ev_to_er_ratio={mean_ratio:.3f}",
+                "pool_total_er",
+                "high",
+                0.35 + min(0.20, ratio_deficit * 0.35),
+            )
+
+        if memory_feedback_tuning_enabled and bool(snapshot.get("memory_feedback_packet_dominant", False)):
+            projection_deficit = max(0.0, 0.32 - memory_feedback_structure_projection_share) / 0.32
+            _append(
+                "builtin.ev_balance.raise_memory_feedback_structure_projection",
+                "observatory.memory_feedback_stimulus_packet_structure_projection_ratio",
+                +1.0,
+                (
+                    "ev_starved_and_memory_feedback_too_packet_heavy "
+                    f"packet_share={memory_feedback_packet_share:.3f} "
+                    f"structure_projection_share={memory_feedback_structure_projection_share:.3f} "
+                    f"packet_ev={mean_memory_feedback_packet_ev:.3f} total_feedback_ev={mean_memory_feedback_total_ev:.3f}"
+                ),
+                "memory_feedback_structure_projection_total_ev",
+                "low",
+                0.45 + min(0.35, max(ratio_deficit, projection_deficit) * 0.50),
+            )
+
+        if (
+            memory_feedback_tuning_enabled
+            and not bool(snapshot.get("ev_starved", False))
+            and bool(snapshot.get("memory_feedback_projection_overheavy", False))
+            and mean_ratio > max(float(snapshot.get("ratio_target_ideal", 1.12) or 1.12) * 1.05, 1.12)
+        ):
+            projection_excess = max(0.0, memory_feedback_structure_projection_share - 0.76) / 0.24
+            _append(
+                "builtin.ev_balance.lower_memory_feedback_structure_projection",
+                "observatory.memory_feedback_stimulus_packet_structure_projection_ratio",
+                -1.0,
+                (
+                    "ev_not_starved_and_memory_feedback_overprojects_to_structure_refs "
+                    f"structure_projection_share={memory_feedback_structure_projection_share:.3f} "
+                    f"structure_projection_ev={mean_memory_feedback_structure_projection_ev:.3f}"
+                ),
+                "memory_feedback_structure_projection_total_ev",
+                "high",
+                0.35 + min(0.25, projection_excess * 0.45),
+            )
+        if memory_feedback_tuning_enabled and bool(snapshot.get("memory_feedback_projection_diluted", False)):
+            dilution_deficit = max(
+                max(0.0, mean_memory_feedback_structure_projection_attempted_count - 12.0) / 12.0,
+                max(0.0, mean_memory_feedback_structure_projection_skipped_count - 6.0) / 6.0,
+                max(0.0, 0.42 - mean_memory_feedback_structure_projection_effective_ratio) / 0.42,
+            )
+            _append(
+                "builtin.ev_balance.tighten_memory_feedback_structure_targets",
+                "observatory.memory_feedback_structure_projection_max_targets",
+                -1.0,
+                (
+                    "ev_starved_and_memory_feedback_structure_projection_diluted "
+                    f"attempted={mean_memory_feedback_structure_projection_attempted_count:.3f} "
+                    f"skipped={mean_memory_feedback_structure_projection_skipped_count:.3f} "
+                    f"effective_ratio={mean_memory_feedback_structure_projection_effective_ratio:.3f} "
+                    f"structure_projection_ev={mean_memory_feedback_structure_projection_ev:.3f}"
+                ),
+                "memory_feedback_structure_projection_effective_ratio",
+                "low",
+                0.42 + min(0.33, dilution_deficit * 0.28),
             )
         return updates
 
@@ -4261,6 +5969,415 @@ class AutoTuner:
                 "metric_key": "cam_item_count",
                 "issue_mode": "high",
             })
+        return updates
+
+    def _decide_attention_energy_resource_nudges(self, *, rows: list[dict[str, Any]], long_term: bool = False) -> list[dict[str, Any]]:
+        if not rows:
+            return []
+        target = self.metric_targets.get("attention_net_delta_energy")
+        if target is None:
+            return []
+        n = len(rows)
+        net_vals = _recent_window(rows, "attention_net_delta_energy", n)
+        budget_vals = _recent_window(rows, "attention_energy_budget", n)
+        pool_ev_vals = _recent_window(rows, "pool_total_ev", n)
+        pool_er_vals = _recent_window(rows, "pool_total_er", n)
+        if not net_vals:
+            return []
+
+        mean_net = _mean(net_vals)
+        mean_budget = _mean(budget_vals)
+        mean_ev = _mean(pool_ev_vals)
+        mean_er = _mean(pool_er_vals)
+        latest_net = net_vals[-1] if net_vals else 0.0
+        pool_ev_target = self.metric_targets.get("pool_total_ev")
+        pool_er_target = self.metric_targets.get("pool_total_er")
+        ev_high = bool(pool_ev_target and mean_ev > float(pool_ev_target.expected_max) * 1.05)
+        ev_low = bool(pool_ev_target and mean_ev < float(pool_ev_target.expected_min) * 0.85)
+        er_low = bool(pool_er_target and mean_er < float(pool_er_target.expected_min) * 0.85)
+        net_high = bool(mean_net > float(target.expected_max))
+        net_low = bool(mean_net < float(target.expected_min))
+
+        updates: list[dict[str, Any]] = []
+        step_scale = 0.5 if long_term else 1.0
+
+        def _append(rule_id: str, param: str, direction: float, reason: str, metric_key: str, issue_mode: str, weight: float = 1.0) -> None:
+            pid = self._canonicalize_param_id(param)
+            if pid not in self.param_bounds:
+                return
+            if not self._rule_enabled(rule_id):
+                return
+            bound = self.param_bounds[pid]
+            delta = float(direction) * float(bound.max_step_abs) * step_scale * max(0.35, min(1.0, weight))
+            if abs(delta) < 1e-12:
+                return
+            updates.append(
+                {
+                    "rule_id": rule_id,
+                    "param": pid,
+                    "delta": delta,
+                    "reason": reason,
+                    "metric_key": metric_key,
+                    "issue_mode": issue_mode,
+                }
+            )
+
+        if net_high or (ev_high and mean_net > float(target.ideal)):
+            severity = max(
+                max(0.0, mean_net - float(target.expected_max)) / max(1.0, float(target.expected_max)),
+                max(0.0, mean_ev - (float(pool_ev_target.expected_max) if pool_ev_target else mean_ev)) / max(1.0, mean_ev),
+            )
+            _append(
+                "builtin.attention.energy.lower_budget_overheat",
+                "attention.attention_energy_budget_base",
+                -1.0,
+                f"attention_energy_overheat mean_net={mean_net:.3f} latest_net={latest_net:.3f} mean_budget={mean_budget:.3f} mean_ev={mean_ev:.3f}",
+                "attention_net_delta_energy",
+                "high",
+                0.65 + min(0.35, severity),
+            )
+            _append(
+                "builtin.attention.energy.raise_gain_floor_overheat",
+                "attention.attention_filter_gain_floor",
+                +1.0,
+                f"attention_gain_too_broad mean_net={mean_net:.3f}",
+                "attention_net_delta_energy",
+                "high",
+                0.40,
+            )
+
+        if (net_low and (ev_low or er_low)) or (mean_budget <= 0.0 and (ev_low or er_low)):
+            deficit = max(
+                max(0.0, float(target.expected_min) - mean_net) / max(1.0, float(target.expected_min)),
+                max(0.0, (float(pool_ev_target.expected_min) if pool_ev_target else mean_ev) - mean_ev) / max(1.0, mean_ev + 1.0),
+            )
+            _append(
+                "builtin.attention.energy.raise_budget_underpowered",
+                "attention.attention_energy_budget_base",
+                +1.0,
+                f"attention_energy_underpowered mean_net={mean_net:.3f} mean_budget={mean_budget:.3f} mean_ev={mean_ev:.3f} mean_er={mean_er:.3f}",
+                "attention_net_delta_energy",
+                "low",
+                0.60 + min(0.30, deficit),
+            )
+            _append(
+                "builtin.attention.energy.lower_gain_floor_underpowered",
+                "attention.attention_filter_gain_floor",
+                -1.0,
+                f"attention_gain_too_narrow mean_net={mean_net:.3f}",
+                "attention_net_delta_energy",
+                "low",
+                0.35,
+            )
+
+        return updates
+
+    def _decide_energy_injection_fatigue_nudges(self, *, rows: list[dict[str, Any]], long_term: bool = False) -> list[dict[str, Any]]:
+        if not rows:
+            return []
+        throttle_target = self.metric_targets.get("pool_energy_injection_throttle_ratio_total")
+        min_scale_target = self.metric_targets.get("pool_energy_injection_min_scale")
+        if throttle_target is None:
+            return []
+
+        n = len(rows)
+        throttle_vals = _recent_window(rows, "pool_energy_injection_throttle_ratio_total", n)
+        hit_vals = _recent_window(rows, "pool_energy_injection_side_hit_count", n)
+        min_scale_vals = _recent_window(rows, "pool_energy_injection_min_scale", n)
+        total_ev_vals = _recent_window(rows, "pool_total_ev", n)
+        total_er_vals = _recent_window(rows, "pool_total_er", n)
+        concentration_vals = _recent_window(rows, "energy_concentration", n)
+        if not throttle_vals:
+            return []
+
+        mean_throttle = _mean(throttle_vals)
+        mean_hits = _mean(hit_vals)
+        mean_min_scale = _mean(min_scale_vals) if min_scale_vals else 1.0
+        mean_ev = _mean(total_ev_vals)
+        mean_er = _mean(total_er_vals)
+        mean_concentration = _mean(concentration_vals)
+        ev_target = self.metric_targets.get("pool_total_ev")
+        er_target = self.metric_targets.get("pool_total_er")
+        ev_high = bool(ev_target and mean_ev > float(ev_target.expected_max) * 1.05)
+        er_high = bool(er_target and mean_er > float(er_target.expected_max) * 1.05)
+        concentration_high = bool(mean_concentration > 0.42)
+        throttle_high = bool(mean_throttle > float(throttle_target.expected_max))
+        throttle_low = bool(mean_hits >= 2.0 and mean_throttle < max(0.02, float(throttle_target.ideal) * 0.35))
+        over_suppressed = bool(
+            throttle_high
+            or (min_scale_target is not None and mean_min_scale < float(min_scale_target.expected_min) * 1.02 and mean_hits >= 1.0)
+        )
+        under_suppressed = bool(
+            throttle_low
+            or ((ev_high or er_high or concentration_high) and mean_hits >= 1.0 and mean_throttle < float(throttle_target.ideal))
+        )
+
+        updates: list[dict[str, Any]] = []
+        step_scale = 0.5 if long_term else 1.0
+
+        def _append(rule_id: str, param: str, direction: float, reason: str, metric_key: str, issue_mode: str, weight: float = 1.0) -> None:
+            pid = self._canonicalize_param_id(param)
+            if pid not in self.param_bounds:
+                return
+            if not self._rule_enabled(rule_id):
+                return
+            bound = self.param_bounds[pid]
+            delta = float(direction) * float(bound.max_step_abs) * step_scale * max(0.30, min(1.0, weight))
+            if abs(delta) < 1e-12:
+                return
+            updates.append(
+                {
+                    "rule_id": rule_id,
+                    "param": pid,
+                    "delta": delta,
+                    "reason": reason,
+                    "metric_key": metric_key,
+                    "issue_mode": issue_mode,
+                }
+            )
+
+        if under_suppressed:
+            severity = max(
+                max(0.0, float(throttle_target.ideal) - mean_throttle) / max(0.05, float(throttle_target.ideal)),
+                max(0.0, mean_concentration - 0.42) / 0.42,
+            )
+            _append(
+                "builtin.state_pool.energy_injection.tighten.ev_knee",
+                "state_pool.energy_injection_fatigue_same_side_knee_ev",
+                -1.0,
+                f"energy_injection_under_suppressed throttle={mean_throttle:.3f} hits={mean_hits:.3f} ev={mean_ev:.3f} concentration={mean_concentration:.3f}",
+                "pool_energy_injection_throttle_ratio_total",
+                "low",
+                0.70 + min(0.30, severity),
+            )
+            _append(
+                "builtin.state_pool.energy_injection.raise_repeat_step",
+                "state_pool.energy_injection_repeat_fatigue_step",
+                +1.0,
+                f"energy_injection_repeat_under_suppressed throttle={mean_throttle:.3f} hits={mean_hits:.3f}",
+                "pool_energy_injection_throttle_ratio_total",
+                "low",
+                0.50,
+            )
+
+        if over_suppressed:
+            severity = max(
+                max(0.0, mean_throttle - float(throttle_target.expected_max)) / max(0.05, float(throttle_target.expected_max)),
+                max(0.0, 0.18 - mean_min_scale) / 0.18,
+            )
+            _append(
+                "builtin.state_pool.energy_injection.relax.ev_knee",
+                "state_pool.energy_injection_fatigue_same_side_knee_ev",
+                +1.0,
+                f"energy_injection_over_suppressed throttle={mean_throttle:.3f} min_scale={mean_min_scale:.3f} hits={mean_hits:.3f}",
+                "pool_energy_injection_throttle_ratio_total",
+                "high",
+                0.65 + min(0.25, severity),
+            )
+            _append(
+                "builtin.state_pool.energy_injection.relax_repeat_step",
+                "state_pool.energy_injection_repeat_fatigue_step",
+                -1.0,
+                f"energy_injection_repeat_over_suppressed throttle={mean_throttle:.3f} min_scale={mean_min_scale:.3f}",
+                "pool_energy_injection_throttle_ratio_total",
+                "high",
+                0.45,
+            )
+
+        return updates
+
+    def _attention_special_selection_snapshot(self, *, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        if not rows:
+            return {}
+
+        n = len(rows)
+        standalone_vals = _recent_window(rows, "attention_standalone_special_selected_count", n)
+        carrier_vals = _recent_window(rows, "attention_structure_carrier_selected_count", n)
+        repeat_penalty_vals = _recent_window(rows, "attention_repeat_penalty_total", n)
+        reward_selected_vals = _recent_window(rows, "attention_reward_action_selected_count", n)
+        cam_vals = _recent_window(rows, "cam_item_count", n)
+
+        mean_standalone = _mean(standalone_vals)
+        mean_carrier = _mean(carrier_vals)
+        mean_repeat_penalty = _mean(repeat_penalty_vals)
+        mean_reward_selected = _mean(reward_selected_vals)
+        mean_cam = _mean(cam_vals)
+        latest_standalone = standalone_vals[-1] if standalone_vals else 0.0
+        latest_carrier = carrier_vals[-1] if carrier_vals else 0.0
+        latest_repeat_penalty = repeat_penalty_vals[-1] if repeat_penalty_vals else 0.0
+
+        total_special = mean_standalone + mean_carrier
+        standalone_share = mean_standalone / max(1e-6, total_special)
+        carrier_share = mean_carrier / max(1e-6, total_special)
+        standalone_hot = bool(
+            mean_standalone > 1.0
+            or (mean_standalone >= 0.7 and standalone_share >= 0.45)
+            or (mean_standalone >= max(0.4, mean_carrier * 0.85) and mean_carrier <= 1.0)
+        )
+        carrier_thin = bool(mean_carrier < 0.6 and mean_reward_selected >= 1.2 and mean_cam >= 3.0)
+        repeat_penalty_weak = bool(mean_standalone >= 0.8 and mean_repeat_penalty < max(0.5, mean_standalone * 0.45))
+        fatigue_overclamped = bool(mean_repeat_penalty > 4.5 and mean_carrier < 0.5)
+
+        return {
+            "mean_standalone": mean_standalone,
+            "latest_standalone": latest_standalone,
+            "mean_carrier": mean_carrier,
+            "latest_carrier": latest_carrier,
+            "mean_repeat_penalty": mean_repeat_penalty,
+            "latest_repeat_penalty": latest_repeat_penalty,
+            "mean_reward_selected": mean_reward_selected,
+            "mean_cam": mean_cam,
+            "standalone_share": standalone_share,
+            "carrier_share": carrier_share,
+            "standalone_hot": standalone_hot,
+            "carrier_thin": carrier_thin,
+            "repeat_penalty_weak": repeat_penalty_weak,
+            "fatigue_overclamped": fatigue_overclamped,
+        }
+
+    def _decide_attention_special_selection_nudges(self, *, snapshot: dict[str, Any], long_term: bool = False) -> list[dict[str, Any]]:
+        if not isinstance(snapshot, dict) or not snapshot:
+            return []
+
+        updates: list[dict[str, Any]] = []
+        step_scale = 0.5 if long_term else 1.0
+        mean_standalone = float(snapshot.get("mean_standalone", 0.0) or 0.0)
+        mean_carrier = float(snapshot.get("mean_carrier", 0.0) or 0.0)
+        mean_repeat_penalty = float(snapshot.get("mean_repeat_penalty", 0.0) or 0.0)
+        standalone_share = float(snapshot.get("standalone_share", 0.0) or 0.0)
+        standalone_hot = bool(snapshot.get("standalone_hot", False))
+        carrier_thin = bool(snapshot.get("carrier_thin", False))
+        repeat_penalty_weak = bool(snapshot.get("repeat_penalty_weak", False))
+        fatigue_overclamped = bool(snapshot.get("fatigue_overclamped", False))
+
+        def _append(rule_id: str, param: str, direction: float, reason: str, metric_key: str, issue_mode: str, weight: float = 1.0) -> None:
+            pid = self._canonicalize_param_id(param)
+            if pid not in self.param_bounds:
+                return
+            if not self._rule_enabled(rule_id):
+                return
+            bound = self.param_bounds[pid]
+            delta = float(direction) * float(bound.max_step_abs) * step_scale * max(0.35, min(1.0, weight))
+            if abs(delta) < 1e-12:
+                return
+            updates.append(
+                {
+                    "rule_id": rule_id,
+                    "param": pid,
+                    "delta": delta,
+                    "reason": reason,
+                    "metric_key": metric_key,
+                    "issue_mode": issue_mode,
+                }
+            )
+
+        if standalone_hot:
+            _append(
+                "builtin.attention.special.tighten.standalone_penalty",
+                "attention.reward_action_special_standalone_penalty",
+                +1.0,
+                f"standalone_special_hot mean_standalone={mean_standalone:.3f} carrier={mean_carrier:.3f} share={standalone_share:.3f}",
+                "attention_standalone_special_selected_count",
+                "high",
+                0.95,
+            )
+            _append(
+                "builtin.attention.special.tighten.standalone_energy_gain",
+                "attention.reward_action_special_standalone_energy_gain",
+                +1.0,
+                "standalone_special_hot_raise_energy_scaled_penalty",
+                "attention_standalone_special_selected_count",
+                "high",
+                0.70,
+            )
+            _append(
+                "builtin.attention.special.raise_special_fatigue_multiplier",
+                "attention.attention_repeat_fatigue_special_multiplier",
+                +1.0,
+                "standalone_special_hot_raise_repeat_fatigue_for_bare_special_nodes",
+                "attention_standalone_special_selected_count",
+                "high",
+                0.80,
+            )
+            _append(
+                "builtin.attention.special.raise_selected_gain",
+                "attention.attention_repeat_fatigue_selected_gain",
+                +1.0,
+                "standalone_special_hot_raise_repeat_selected_gain",
+                "attention_standalone_special_selected_count",
+                "high",
+                0.72,
+            )
+
+        if carrier_thin:
+            _append(
+                "builtin.attention.special.raise_structure_bonus",
+                "attention.reward_action_structure_carrier_bonus",
+                +1.0,
+                f"structure_carrier_thin mean_carrier={mean_carrier:.3f} standalone={mean_standalone:.3f}",
+                "attention_structure_carrier_selected_count",
+                "low",
+                0.75,
+            )
+            _append(
+                "builtin.attention.special.raise_structure_context_gain",
+                "attention.reward_action_structure_carrier_context_gain",
+                +1.0,
+                "structure_carrier_thin_raise_context_reward",
+                "attention_structure_carrier_selected_count",
+                "low",
+                0.65,
+            )
+            _append(
+                "builtin.attention.special.raise_structure_value_gain",
+                "attention.reward_action_structure_carrier_value_gain",
+                +1.0,
+                "structure_carrier_thin_raise_value_reward",
+                "attention_structure_carrier_selected_count",
+                "low",
+                0.55,
+            )
+
+        if repeat_penalty_weak:
+            _append(
+                "builtin.attention.special.raise_repeat_penalty_gain",
+                "attention.attention_repeat_fatigue_penalty_gain",
+                +1.0,
+                f"repeat_attention_penalty_weak mean_repeat_penalty={mean_repeat_penalty:.3f} mean_standalone={mean_standalone:.3f}",
+                "attention_repeat_penalty_total",
+                "low",
+                0.85,
+            )
+            _append(
+                "builtin.attention.special.raise_repeat_max_penalty",
+                "attention.attention_repeat_fatigue_max_penalty",
+                +1.0,
+                "repeat_attention_penalty_weak_raise_cap",
+                "attention_repeat_penalty_total",
+                "low",
+                0.55,
+            )
+
+        if fatigue_overclamped:
+            _append(
+                "builtin.attention.special.relax_repeat_penalty_gain",
+                "attention.attention_repeat_fatigue_penalty_gain",
+                -1.0,
+                f"repeat_attention_overclamped mean_repeat_penalty={mean_repeat_penalty:.3f} mean_carrier={mean_carrier:.3f}",
+                "attention_repeat_penalty_total",
+                "high",
+                0.65,
+            )
+            _append(
+                "builtin.attention.special.relax_repeat_selected_gain",
+                "attention.attention_repeat_fatigue_selected_gain",
+                -1.0,
+                "repeat_attention_overclamped_reduce_selected_gain",
+                "attention_repeat_penalty_total",
+                "high",
+                0.50,
+            )
+
         return updates
 
     def _decide_custom_rule_nudges(self, *, recent: list[dict[str, Any]], long_term: bool = False) -> list[dict[str, Any]]:
@@ -4368,6 +6485,11 @@ class AutoTuner:
         budget_vals = _recent_window(rows, "internal_resolution_detail_budget", len(rows))
         cam_vals = _recent_window(rows, "cam_item_count", len(rows))
         pool_vals = _recent_window(rows, "pool_active_item_count", len(rows))
+        degraded_resolution_vals = _recent_window(rows, "pool_runtime_resolution_degraded_item_count", len(rows))
+        active_component_vals = _recent_window(rows, "pool_runtime_resolution_active_component_count", len(rows))
+        dropped_component_vals = _recent_window(rows, "pool_runtime_resolution_dropped_component_count", len(rows))
+        hdb_residual_diff_ratio_vals = _recent_window(rows, "hdb_residual_diff_entry_ratio", len(rows))
+        hdb_same_content_multi_context_ratio_vals = _recent_window(rows, "hdb_same_content_multi_context_ratio", len(rows))
 
         target_internal = self.metric_targets.get("internal_sa_count")
         target_ratio = self.metric_targets.get("internal_to_external_sa_ratio")
@@ -4382,6 +6504,11 @@ class AutoTuner:
         mean_budget = _mean(budget_vals)
         mean_cam_items = _mean(cam_vals)
         mean_pool_items = _mean(pool_vals)
+        mean_degraded_resolution_items = _mean(degraded_resolution_vals)
+        mean_active_resolution_components = _mean(active_component_vals)
+        mean_dropped_resolution_components = _mean(dropped_component_vals)
+        mean_hdb_residual_diff_ratio = _mean(hdb_residual_diff_ratio_vals)
+        mean_hdb_same_content_multi_context_ratio = _mean(hdb_same_content_multi_context_ratio_vals)
 
         latest_internal = internal_vals[-1] if internal_vals else 0.0
         latest_ratio = ratio_vals[-1] if ratio_vals else 0.0
@@ -4392,6 +6519,11 @@ class AutoTuner:
         latest_budget = budget_vals[-1] if budget_vals else 0.0
         latest_cam_items = cam_vals[-1] if cam_vals else 0.0
         latest_pool_items = pool_vals[-1] if pool_vals else 0.0
+        latest_degraded_resolution_items = degraded_resolution_vals[-1] if degraded_resolution_vals else 0.0
+        latest_active_resolution_components = active_component_vals[-1] if active_component_vals else 0.0
+        latest_dropped_resolution_components = dropped_component_vals[-1] if dropped_component_vals else 0.0
+        latest_hdb_residual_diff_ratio = hdb_residual_diff_ratio_vals[-1] if hdb_residual_diff_ratio_vals else 0.0
+        latest_hdb_same_content_multi_context_ratio = hdb_same_content_multi_context_ratio_vals[-1] if hdb_same_content_multi_context_ratio_vals else 0.0
         current_structure_cap = self._get_current_param_value(
             "hdb.internal_resolution_max_structures_per_tick",
             source="runtime",
@@ -4426,6 +6558,22 @@ class AutoTuner:
         if internal_vals and external_vals:
             dominance_lost = bool(mean_internal <= mean_external or latest_internal <= latest_external)
 
+        resolution_total_components = max(
+            1.0,
+            max(mean_active_resolution_components, latest_active_resolution_components)
+            + max(mean_dropped_resolution_components, latest_dropped_resolution_components),
+        )
+        resolution_visible_ratio = max(mean_active_resolution_components, latest_active_resolution_components) / resolution_total_components
+        source_supply_healthy = bool(
+            max(mean_hdb_residual_diff_ratio, latest_hdb_residual_diff_ratio) >= 0.18
+            or max(mean_degraded_resolution_items, latest_degraded_resolution_items) >= 1.0
+            or resolution_visible_ratio >= 0.55
+        )
+        context_branching_thin = bool(
+            max(mean_hdb_same_content_multi_context_ratio, latest_hdb_same_content_multi_context_ratio) < 0.03
+        )
+        source_supply_thin = bool(not source_supply_healthy)
+
         severity = max(internal_deficit, ratio_deficit, selected_deficit)
         if dominance_lost:
             severity = max(severity, 0.2)
@@ -4452,10 +6600,24 @@ class AutoTuner:
             "latest_cam_items": latest_cam_items,
             "mean_pool_items": mean_pool_items,
             "latest_pool_items": latest_pool_items,
+            "mean_runtime_resolution_degraded_items": mean_degraded_resolution_items,
+            "latest_runtime_resolution_degraded_items": latest_degraded_resolution_items,
+            "mean_runtime_resolution_active_components": mean_active_resolution_components,
+            "latest_runtime_resolution_active_components": latest_active_resolution_components,
+            "mean_runtime_resolution_dropped_components": mean_dropped_resolution_components,
+            "latest_runtime_resolution_dropped_components": latest_dropped_resolution_components,
+            "runtime_resolution_visible_ratio": resolution_visible_ratio,
+            "mean_hdb_residual_diff_ratio": mean_hdb_residual_diff_ratio,
+            "latest_hdb_residual_diff_ratio": latest_hdb_residual_diff_ratio,
+            "mean_hdb_same_content_multi_context_ratio": mean_hdb_same_content_multi_context_ratio,
+            "latest_hdb_same_content_multi_context_ratio": latest_hdb_same_content_multi_context_ratio,
             "internal_deficit": round(float(internal_deficit), 6),
             "ratio_deficit": round(float(ratio_deficit), 6),
             "selected_deficit": round(float(selected_deficit), 6),
             "dominance_lost": dominance_lost,
+            "source_supply_healthy": source_supply_healthy,
+            "source_supply_thin": source_supply_thin,
+            "context_branching_thin": context_branching_thin,
         }
 
     def _decide_endogenous_recovery(self, *, balance: dict[str, Any], long_term: bool = False) -> list[dict[str, Any]]:
@@ -4645,6 +6807,10 @@ class AutoTuner:
             score += 3.0
         if module == "state_pool" and metric_key in {"pool_active_item_count", "pool_high_cp_item_count", "timing_total_logic_ms"}:
             score += 1.5
+        if module == "state_pool" and metric_key.startswith("pool_energy_injection_"):
+            score += 3.0
+        if module == "state_pool" and metric_key in {"energy_concentration", "effective_peak_count"} and "energy_injection_fatigue" in pid:
+            score += 2.0
         if metric_key.startswith("cfs_dissonance") and "dissonance" in pid:
             score += 3.0
         if metric_key.startswith("cfs_pressure") and "pressure" in pid:
@@ -4725,6 +6891,27 @@ class AutoTuner:
         if "gating" in tags and not decrease_when_metric_high:
             increase_when_metric_high = True
 
+        if "state_pool.energy_injection_fatigue" in pid:
+            if any(token in pid for token in ["knee", "min_scale", "floor_scale"]):
+                decrease_when_metric_high = True
+                increase_when_metric_high = False
+            if any(token in pid for token in ["total_weight", "repeat_fatigue_step"]):
+                increase_when_metric_high = True
+                decrease_when_metric_high = False
+            if "decay_per_tick" in pid:
+                decrease_when_metric_high = True
+                increase_when_metric_high = False
+            if metric_key == "pool_energy_injection_throttle_ratio_total":
+                if issue_mode == "high":
+                    return -1 if any(token in pid for token in ["total_weight", "repeat_fatigue_step"]) else +1
+                if issue_mode in {"low", "flatline"}:
+                    return +1 if any(token in pid for token in ["total_weight", "repeat_fatigue_step"]) else -1
+            if metric_key == "pool_energy_injection_min_scale":
+                if issue_mode == "low":
+                    return +1 if any(token in pid for token in ["knee", "min_scale", "floor_scale", "decay_per_tick"]) else -1
+                if issue_mode == "high":
+                    return -1 if any(token in pid for token in ["knee", "min_scale", "floor_scale", "decay_per_tick"]) else +1
+
         sign = 0
         if issue_mode == "high":
             if increase_when_metric_high:
@@ -4769,9 +6956,56 @@ class AutoTuner:
         issue_modes = ("high", "low", "flatline")
         scale_base = 0.35 if long_term else 0.6
 
+        dedicated_control_metrics = {
+            # These metrics already have theory-aware dedicated control paths:
+            # - endogenous recovery
+            # - structure supply / context-residual source guarding
+            # - HDB fuse / raw-unit protection
+            # - EV/ER dedicated energy control
+            # - memory-feedback packet vs structure split control
+            # Letting generic catalog rules also push them causes "dual control"
+            # and often reintroduces old-style, result-only tuning.
+            "internal_sa_count",
+            "internal_resolution_structure_count_selected",
+            "internal_resolution_raw_unit_count",
+            "pool_ev_to_er_ratio",
+            "memory_feedback_packet_total_ev",
+            "memory_feedback_structure_projection_total_ev",
+            "memory_feedback_structure_projection_count",
+        }
+        diagnostic_only_metrics = {
+            # These metrics are valuable for diagnosis, but too coarse to directly
+            # drive broad catalog tuning without hotspot attribution.
+            # Otherwise we regress to old "global symptom -> tweak everything" logic.
+            "internal_to_external_sa_ratio",
+            "timing_total_logic_ms",
+            "timing_structure_level_ms",
+            "timing_stimulus_level_ms",
+            "timing_cache_neutralization_ms",
+            "timing_maintenance_ms",
+            "timing_attention_ms",
+            "timing_sensor_ms",
+            "timing_time_sensor_ms",
+            "timing_cognitive_stitching_ms",
+            "merged_flat_token_count",
+        }
+
         for metric_key in self.metric_targets.keys():
             issue = self._metric_issue_snapshot(rows=recent, metric_key=metric_key)
             if not issue:
+                continue
+
+            # Theory alignment (2026-04-26):
+            # `internal_to_external_sa_ratio` / `timing_total_logic_ms` /
+            # `merged_flat_token_count` are now treated as diagnostic indicators,
+            # not broad generic control signals.
+            # - ratio can be high simply because external input is sparse
+            # - total timing is a global symptom and needs hotspot attribution
+            # - merged flat token count may reflect user input size rather than
+            #   an internal budget bug
+            if metric_key in diagnostic_only_metrics:
+                continue
+            if metric_key in dedicated_control_metrics:
                 continue
 
             target = issue["target"]
@@ -4832,7 +7066,15 @@ class AutoTuner:
     # Apply parameter updates
     # --------------------------
 
-    def _apply_param_update(self, update: dict[str, Any], *, persist: bool) -> bool:
+    def _apply_param_update(
+        self,
+        update: dict[str, Any],
+        *,
+        persist: bool,
+        apply_runtime: bool = True,
+        write_persist_files: bool | None = None,
+        save_state: bool = True,
+    ) -> bool:
         """
         Update a parameter in the unified param store, then hot reload runtime modules.
         """
@@ -4872,24 +7114,50 @@ class AutoTuner:
 
         # Update param stores first (auditable even if hot reload fails).
         self._set_param_value(param, next_v, persist=persist)
+        touched_modules = self._touched_modules_for_params([param])
 
         # Apply to runtime now (best-effort).
-        self._apply_overrides_to_runtime(trace_id="auto_tuner_tick")
-        if persist:
-            self._apply_persisted_overrides_to_persist_files()
+        if apply_runtime:
+            self._apply_overrides_to_runtime(
+                trace_id="auto_tuner_tick",
+                touched_modules=touched_modules or None,
+            )
+        if persist and bool(persist if write_persist_files is None else write_persist_files):
+            self._apply_persisted_overrides_to_persist_files(touched_modules=touched_modules or None)
         update["from"] = current
         update["to"] = next_v
         if requested_param != param:
             update["requested_param"] = requested_param
             update["param"] = param
-        self._save_state()
+        if save_state:
+            self._save_state()
         return True
+
+    def _touched_modules_for_params(self, param_ids: Iterable[str]) -> set[str]:
+        modules: set[str] = set()
+        for raw_param in param_ids:
+            pid = self._canonicalize_param_id(str(raw_param or "").strip())
+            if not pid:
+                continue
+            spec = self.spec_by_id.get(pid)
+            module = str(getattr(spec, "module", "") or "").strip().lower() if spec is not None else ""
+            if not module:
+                if pid.startswith("iesm."):
+                    module = "innate_script"
+                else:
+                    module = str(pid.split(".", 1)[0] or "").strip().lower()
+            if module:
+                modules.add(module)
+        return modules
 
     def _canonicalize_param_id(self, param: str) -> str:
         """Resolve legacy aliases to canonical catalog ids when possible."""
         pid = str(param or "").strip()
         if not pid:
             return ""
+        alias = self._resolve_legacy_param_alias(pid)
+        if alias:
+            pid = alias
         if pid in self.param_bounds or pid in self.spec_by_id:
             return pid
         if pid.startswith("iesm.") and not pid.startswith("iesm.rules."):
@@ -4948,7 +7216,7 @@ class AutoTuner:
         if persist:
             self.persisted_params[pid] = float(value)
 
-    def _apply_overrides_to_runtime(self, *, trace_id: str) -> None:
+    def _apply_overrides_to_runtime(self, *, trace_id: str, touched_modules: set[str] | None = None) -> None:
         """
         Apply overrides to runtime modules (hot reload).
 
@@ -4963,13 +7231,24 @@ class AutoTuner:
         if not self.runtime_rules_path.exists():
             self.prepare_and_apply_overrides(trace_id=trace_id)
 
+        module_filter = {
+            str(module or "").strip().lower()
+            for module in (touched_modules or set())
+            if str(module or "").strip()
+        }
+        modules_to_apply = [
+            module
+            for module in self.runtime_module_patch_paths.keys()
+            if not module_filter or module in module_filter
+        ]
+
         # 1) IESM rules runtime patch
         iesm_rule_params = {
             k: v
             for k, v in (self.runtime_params or {}).items()
             if isinstance(k, str) and k.startswith("iesm.rules.")
         }
-        if iesm_rule_params:
+        if iesm_rule_params and (not module_filter or "innate_script" in module_filter):
             doc = _load_rules_doc(self.runtime_rules_path)
             if doc and self._apply_iesm_rule_param_values(doc, iesm_rule_params):
                 self.runtime_rules_path.write_text(_dump_rules_doc(doc), encoding="utf-8")
@@ -4979,7 +7258,8 @@ class AutoTuner:
                     pass
 
         # 2) Module config runtime patches
-        for module, path in self.runtime_module_patch_paths.items():
+        for module in modules_to_apply:
+            path = self.runtime_module_patch_paths[module]
             # innate_script config itself is special: it needs rules_path + any config tunables.
             try:
                 base = copy.deepcopy(self._base_module_configs.get(module, self._get_runtime_module_config(module)))
@@ -4994,12 +7274,17 @@ class AutoTuner:
             except Exception:
                 continue
 
-    def _apply_persisted_overrides_to_persist_files(self) -> None:
+    def _apply_persisted_overrides_to_persist_files(self, *, touched_modules: set[str] | None = None) -> None:
         """
         Materialize persisted params into files under outputs/auto_tuner/overrides/.
         This is what makes long-term tuning affect the next run.
         """
         _overrides_dir().mkdir(parents=True, exist_ok=True)
+        module_filter = {
+            str(module or "").strip().lower()
+            for module in (touched_modules or set())
+            if str(module or "").strip()
+        }
 
         # 1) Persisted IESM rules file
         if not self.persist_rules_path.exists() and self.runtime_rules_path.exists():
@@ -5012,7 +7297,7 @@ class AutoTuner:
             for k, v in (self.persisted_params or {}).items()
             if isinstance(k, str) and k.startswith("iesm.rules.")
         }
-        if iesm_params and self.persist_rules_path.exists():
+        if iesm_params and self.persist_rules_path.exists() and (not module_filter or "innate_script" in module_filter):
             try:
                 doc = _load_rules_doc(self.persist_rules_path)
                 if doc and self._apply_iesm_rule_param_values(doc, iesm_params):
@@ -5022,6 +7307,8 @@ class AutoTuner:
 
         # 2) Persisted module patch files for audit / next-run baseline preparation
         for module, path in self.persist_module_patch_paths.items():
+            if module_filter and module not in module_filter:
+                continue
             try:
                 base = self._base_module_configs.get(module, self._get_runtime_module_config(module))
                 patch = self._materialize_module_patch(module=module, params=self.persisted_params, base=copy.deepcopy(base))
@@ -5047,6 +7334,24 @@ def _make_preview_tuner(*, app: Any | None = None) -> AutoTuner:
 
 def read_auto_tuner_catalog(*, app: Any | None = None) -> dict[str, Any]:
     tuner = _make_preview_tuner(app=app)
+    try:
+        raw_guessed_bounds = param_catalog.build_default_param_bounds(tuner.catalog_specs)
+    except Exception:
+        raw_guessed_bounds = {}
+    recommended_bounds_obj: dict[str, ParamBound] = {
+        pid: ParamBound(min_value=b.min_value, max_value=b.max_value, max_step_abs=b.max_step_abs, quantum=b.quantum)
+        for pid, b in raw_guessed_bounds.items()
+    }
+    recommended_bounds_obj.update(_default_param_bounds())
+    recommended_bounds = {
+        pid: {
+            "min_value": float(bound.min_value),
+            "max_value": float(bound.max_value),
+            "max_step_abs": float(bound.max_step_abs),
+            "quantum": float(bound.quantum),
+        }
+        for pid, bound in recommended_bounds_obj.items()
+    }
     guessed_bounds = {
         pid: {
             "min_value": float(bound.min_value),
@@ -5063,8 +7368,10 @@ def read_auto_tuner_catalog(*, app: Any | None = None) -> dict[str, Any]:
         module_counts[module] = int(module_counts.get(module, 0)) + 1
     return {
         "metric_library": _merge_metric_target_defs(),
+        "metric_defaults": _default_metric_target_defs(),
         "params": params,
         "param_bounds": guessed_bounds,
+        "param_bound_recommendations": recommended_bounds,
         "summary": {
             "param_count": len(params),
             "auto_tune_allowed_count": sum(1 for spec in tuner.catalog_specs if spec.auto_tune_allowed),
@@ -5101,6 +7408,62 @@ def build_auto_tuner_rule_catalog(*, app: Any | None = None) -> dict[str, Any]:
             "metric_key": "timing_total_logic_ms",
             "issue_mode": "high",
             "param_id": "hdb.internal_resolution_max_structures_per_tick",
+        },
+        {
+            "rule_id": "builtin.state_pool.energy_injection.tighten.ev_knee",
+            "source": "builtin",
+            "title": "状态池能量高但正向赋能节流偏弱时，降低 EV 注入饱和拐点",
+            "metric_key": "pool_energy_injection_throttle_ratio_total",
+            "issue_mode": "low",
+            "param_id": "state_pool.energy_injection_fatigue_same_side_knee_ev",
+        },
+        {
+            "rule_id": "builtin.state_pool.energy_injection.raise_repeat_step",
+            "source": "builtin",
+            "title": "同一对象重复赋能仍偏强时，提高重复赋能疲劳增量",
+            "metric_key": "pool_energy_injection_throttle_ratio_total",
+            "issue_mode": "low",
+            "param_id": "state_pool.energy_injection_repeat_fatigue_step",
+        },
+        {
+            "rule_id": "builtin.state_pool.energy_injection.relax.ev_knee",
+            "source": "builtin",
+            "title": "正向赋能被压得过强时，提高 EV 注入饱和拐点",
+            "metric_key": "pool_energy_injection_throttle_ratio_total",
+            "issue_mode": "high",
+            "param_id": "state_pool.energy_injection_fatigue_same_side_knee_ev",
+        },
+        {
+            "rule_id": "builtin.state_pool.energy_injection.relax_repeat_step",
+            "source": "builtin",
+            "title": "重复赋能疲劳过强时，降低疲劳累计增量",
+            "metric_key": "pool_energy_injection_throttle_ratio_total",
+            "issue_mode": "high",
+            "param_id": "state_pool.energy_injection_repeat_fatigue_step",
+        },
+        {
+            "rule_id": "builtin.timing.hdb.tighten.structure_rounds",
+            "source": "builtin",
+            "title": "结构级耗时过热时，优先收紧结构级最大轮次",
+            "metric_key": "timing_structure_level_ms",
+            "issue_mode": "high",
+            "param_id": "hdb.structure_level_max_rounds",
+        },
+        {
+            "rule_id": "builtin.timing.hdb.tighten.stimulus_rounds",
+            "source": "builtin",
+            "title": "刺激级耗时过热时，优先收紧刺激级最大轮次",
+            "metric_key": "timing_stimulus_level_ms",
+            "issue_mode": "high",
+            "param_id": "hdb.stimulus_level_max_rounds",
+        },
+        {
+            "rule_id": "builtin.timing.hdb.tighten.flat_cap",
+            "source": "builtin",
+            "title": "HDB 原始展开过宽时，收紧每结构细节单元上限",
+            "metric_key": "internal_resolution_raw_unit_count",
+            "issue_mode": "high",
+            "param_id": "hdb.internal_resolution_flat_unit_cap_per_structure",
         },
         {
             "rule_id": "builtin.cfs.dissonance.tighten",
@@ -5167,12 +7530,52 @@ def build_auto_tuner_rule_catalog(*, app: Any | None = None) -> dict[str, Any]:
             "param_id": "cognitive_stitching.min_event_total_energy",
         },
         {
+            "rule_id": "builtin.cs.open_supply.snapshot_top_k",
+            "source": "builtin",
+            "title": "认知拼接候选虽有但供给面偏薄时，适度提高快照候选范围",
+            "metric_key": "cs_action_count",
+            "issue_mode": "low",
+            "param_id": "cognitive_stitching.snapshot_top_k",
+        },
+        {
+            "rule_id": "builtin.cs.open_supply.max_seed_items",
+            "source": "builtin",
+            "title": "认知拼接启动不足时，适度增加种子数量",
+            "metric_key": "cs_action_count",
+            "issue_mode": "low",
+            "param_id": "cognitive_stitching.max_seed_items",
+        },
+        {
+            "rule_id": "builtin.cs.open_supply.max_events_per_tick",
+            "source": "builtin",
+            "title": "认知拼接成功偏少时，适度增加每 tick 事件预算",
+            "metric_key": "cs_action_count",
+            "issue_mode": "low",
+            "param_id": "cognitive_stitching.max_events_per_tick",
+        },
+        {
+            "rule_id": "builtin.cs.open_supply.max_targets_per_seed",
+            "source": "builtin",
+            "title": "认知拼接每种子候选过窄时，适度放宽每种子目标数",
+            "metric_key": "cs_action_count",
+            "issue_mode": "low",
+            "param_id": "cognitive_stitching.context_concat_max_targets_per_seed",
+        },
+        {
             "rule_id": "builtin.cs.tighten.thresholds",
             "source": "builtin",
             "title": "认知拼接过密时，回收候选阈值避免泛滥",
             "metric_key": "cs_action_count",
             "issue_mode": "high",
             "param_id": "cognitive_stitching.min_candidate_score",
+        },
+        {
+            "rule_id": "builtin.cs.tighten.supply.max_events_per_tick",
+            "source": "builtin",
+            "title": "认知拼接过密时，回收每 tick 事件预算避免同轮泛滥",
+            "metric_key": "cs_action_count",
+            "issue_mode": "high",
+            "param_id": "cognitive_stitching.max_events_per_tick",
         },
         {
             "rule_id": "builtin.cs.performance.tighten_threshold",
@@ -5201,24 +7604,40 @@ def build_auto_tuner_rule_catalog(*, app: Any | None = None) -> dict[str, Any]:
         {
             "rule_id": "builtin.ev_balance.raise_induction",
             "source": "builtin",
-            "title": "虚能量明显偏低时，提高实能量诱发虚能量的基线系数",
-            "metric_key": "pool_total_ev",
+            "title": "ER→EV 诱发链偏弱且虚能量偏薄时，提高实能量诱发虚能量的真实系数",
+            "metric_key": "induction_ev_from_er_ratio",
             "issue_mode": "low",
-            "param_id": "emotion.subjective_modulators.er_induction_ratio.base",
+            "param_id": "hdb.er_induction_ratio",
         },
         {
             "rule_id": "builtin.ev_balance.raise_propagation",
             "source": "builtin",
-            "title": "虚能量明显偏低时，提高虚能量传播基线系数",
-            "metric_key": "pool_total_ev",
+            "title": "局部残差传播链偏弱且虚能量偏薄时，提高虚能量传播真实系数",
+            "metric_key": "induction_propagated_target_ratio",
             "issue_mode": "low",
-            "param_id": "emotion.subjective_modulators.ev_propagation_ratio.base",
+            "param_id": "hdb.ev_propagation_ratio",
+        },
+        {
+            "rule_id": "builtin.ev_balance.lower_propagation_threshold",
+            "source": "builtin",
+            "title": "来源对象并不少但传播命中目标太稀时，降低虚能量传播阈值，让局部预测先活起来",
+            "metric_key": "induction_target_count",
+            "issue_mode": "low",
+            "param_id": "hdb.ev_propagation_threshold",
         },
         {
             "rule_id": "builtin.ev_balance.slow_ev_decay",
             "source": "builtin",
-            "title": "虚能量明显偏低时，适度减缓虚能量默认衰减",
-            "metric_key": "pool_total_ev",
+            "title": "传播/诱发已在工作但虚能量仍偏薄时，适度减缓虚能量默认衰减",
+            "metric_key": "pool_ev_to_er_ratio",
+            "issue_mode": "low",
+            "param_id": "state_pool.default_ev_decay_ratio",
+        },
+        {
+            "rule_id": "builtin.ev_balance.saturated_input_prefer_ev_retention",
+            "source": "builtin",
+            "title": "当 HDB 输入比例已经贴顶但虚能量仍偏薄时，停止无效抬高输入比例，转而优先延长虚能量保活",
+            "metric_key": "pool_ev_to_er_ratio",
             "issue_mode": "low",
             "param_id": "state_pool.default_ev_decay_ratio",
         },
@@ -5231,12 +7650,212 @@ def build_auto_tuner_rule_catalog(*, app: Any | None = None) -> dict[str, Any]:
             "param_id": "state_pool.default_er_decay_ratio",
         },
         {
+            "rule_id": "builtin.ev_balance.raise_memory_feedback_structure_projection",
+            "source": "builtin",
+            "title": "记忆反馈过度停留在整包回放时，提高结构直投比例，把更多 EV 分到结构引用链",
+            "metric_key": "memory_feedback_structure_projection_total_ev",
+            "issue_mode": "low",
+            "param_id": "observatory.memory_feedback_stimulus_packet_structure_projection_ratio",
+        },
+        {
+            "rule_id": "builtin.ev_balance.lower_memory_feedback_structure_projection",
+            "source": "builtin",
+            "title": "结构直投占比过高且 EV 已不再偏薄时，适度回收结构直投比例，避免整包回放被压空",
+            "metric_key": "memory_feedback_structure_projection_total_ev",
+            "issue_mode": "high",
+            "param_id": "observatory.memory_feedback_stimulus_packet_structure_projection_ratio",
+        },
+        {
+            "rule_id": "builtin.ev_balance.tighten_memory_feedback_structure_targets",
+            "source": "builtin",
+            "title": "结构直投已经开启但明显分得太散时，收缩单条记忆反馈的结构目标数，把 EV 集中到更少的真实引用上",
+            "metric_key": "memory_feedback_structure_projection_effective_ratio",
+            "issue_mode": "low",
+            "param_id": "observatory.memory_feedback_structure_projection_max_targets",
+        },
+        {
             "rule_id": "builtin.attention.tighten.cam_cap",
             "source": "builtin",
             "title": "工作集长期过热时，回收注意力上限避免后续链路膨胀",
             "metric_key": "cam_item_count",
             "issue_mode": "high",
             "param_id": "attention.max_cam_items",
+        },
+        {
+            "rule_id": "builtin.attention.special.tighten.standalone_penalty",
+            "source": "builtin",
+            "title": "裸认知感受/奖励惩罚节点被选中过多时，提高其基础惩罚，避免长期抢占注意力",
+            "metric_key": "attention_standalone_special_selected_count",
+            "issue_mode": "high",
+            "param_id": "attention.reward_action_special_standalone_penalty",
+        },
+        {
+            "rule_id": "builtin.attention.special.tighten.standalone_energy_gain",
+            "source": "builtin",
+            "title": "裸特殊节点能量越高越容易霸榜时，提高其随能量增长的附加惩罚",
+            "metric_key": "attention_standalone_special_selected_count",
+            "issue_mode": "high",
+            "param_id": "attention.reward_action_special_standalone_energy_gain",
+        },
+        {
+            "rule_id": "builtin.attention.special.raise_special_fatigue_multiplier",
+            "source": "builtin",
+            "title": "裸特殊节点连续被注意时，提高其重复注意疲劳倍数",
+            "metric_key": "attention_standalone_special_selected_count",
+            "issue_mode": "high",
+            "param_id": "attention.attention_repeat_fatigue_special_multiplier",
+        },
+        {
+            "rule_id": "builtin.attention.special.raise_selected_gain",
+            "source": "builtin",
+            "title": "裸特殊节点连续被选中时，提高疲劳累计增量，抑制长期重复霸榜",
+            "metric_key": "attention_standalone_special_selected_count",
+            "issue_mode": "high",
+            "param_id": "attention.attention_repeat_fatigue_selected_gain",
+        },
+        {
+            "rule_id": "builtin.attention.special.raise_structure_bonus",
+            "source": "builtin",
+            "title": "承载奖励/认知感受的结构对象偏少时，提高其结构承载奖励",
+            "metric_key": "attention_structure_carrier_selected_count",
+            "issue_mode": "low",
+            "param_id": "attention.reward_action_structure_carrier_bonus",
+        },
+        {
+            "rule_id": "builtin.attention.special.raise_structure_context_gain",
+            "source": "builtin",
+            "title": "承载结构偏少时，提高上下文完整结构的加分，让特殊信息更容易带回锚点对象",
+            "metric_key": "attention_structure_carrier_selected_count",
+            "issue_mode": "low",
+            "param_id": "attention.reward_action_structure_carrier_context_gain",
+        },
+        {
+            "rule_id": "builtin.attention.special.raise_structure_value_gain",
+            "source": "builtin",
+            "title": "承载结构偏少时，提高结构内特殊属性值带来的加分",
+            "metric_key": "attention_structure_carrier_selected_count",
+            "issue_mode": "low",
+            "param_id": "attention.reward_action_structure_carrier_value_gain",
+        },
+        {
+            "rule_id": "builtin.attention.special.raise_repeat_penalty_gain",
+            "source": "builtin",
+            "title": "重复注意惩罚偏弱时，提高疲劳惩罚增益，减少连续重复思考同一裸特殊节点",
+            "metric_key": "attention_repeat_penalty_total",
+            "issue_mode": "low",
+            "param_id": "attention.attention_repeat_fatigue_penalty_gain",
+        },
+        {
+            "rule_id": "builtin.attention.special.raise_repeat_max_penalty",
+            "source": "builtin",
+            "title": "重复注意惩罚仍压不住时，提高单对象疲劳惩罚上限",
+            "metric_key": "attention_repeat_penalty_total",
+            "issue_mode": "low",
+            "param_id": "attention.attention_repeat_fatigue_max_penalty",
+        },
+        {
+            "rule_id": "builtin.attention.special.relax_repeat_penalty_gain",
+            "source": "builtin",
+            "title": "重复注意疲劳过强并压住了承载结构时，适度回收疲劳惩罚增益",
+            "metric_key": "attention_repeat_penalty_total",
+            "issue_mode": "high",
+            "param_id": "attention.attention_repeat_fatigue_penalty_gain",
+        },
+        {
+            "rule_id": "builtin.attention.special.relax_repeat_selected_gain",
+            "source": "builtin",
+            "title": "重复注意疲劳过强时，适度降低每次入选累积的疲劳强度",
+            "metric_key": "attention_repeat_penalty_total",
+            "issue_mode": "high",
+            "param_id": "attention.attention_repeat_fatigue_selected_gain",
+        },
+        {
+            "rule_id": "builtin.timing.state_pool.tighten.priority_neutralization",
+            "source": "builtin",
+            "title": "缓存中和耗时过热时，提高优先中和最小效果阈值",
+            "metric_key": "timing_cache_neutralization_ms",
+            "issue_mode": "high",
+            "param_id": "state_pool.priority_neutralization_min_effect_threshold",
+        },
+        {
+            "rule_id": "builtin.timing.state_pool.tighten.neutralization",
+            "source": "builtin",
+            "title": "缓存中和耗时过热时，提高普通中和最小效果阈值",
+            "metric_key": "timing_cache_neutralization_ms",
+            "issue_mode": "high",
+            "param_id": "state_pool.neutralization_min_effect_threshold",
+        },
+        {
+            "rule_id": "builtin.timing.state_pool.tighten.soft_capacity_start",
+            "source": "builtin",
+            "title": "状态池维护耗时过热时，提前启动软容量压力",
+            "metric_key": "timing_maintenance_ms",
+            "issue_mode": "high",
+            "param_id": "state_pool.soft_capacity_start_items",
+        },
+        {
+            "rule_id": "builtin.timing.state_pool.tighten.soft_capacity_full",
+            "source": "builtin",
+            "title": "状态池维护耗时过热时，适度提前满压阈值",
+            "metric_key": "timing_maintenance_ms",
+            "issue_mode": "high",
+            "param_id": "state_pool.soft_capacity_full_items",
+        },
+        {
+            "rule_id": "builtin.timing.attention.tighten.max_cam_items",
+            "source": "builtin",
+            "title": "注意力耗时过热时，回收工作集上限",
+            "metric_key": "timing_attention_ms",
+            "issue_mode": "high",
+            "param_id": "attention.max_cam_items",
+        },
+        {
+            "rule_id": "builtin.timing.attention.tighten.min_total_energy",
+            "source": "builtin",
+            "title": "注意力候选扇出过宽时，提高最低总能量门槛",
+            "metric_key": "timing_attention_ms",
+            "issue_mode": "high",
+            "param_id": "attention.min_total_energy",
+        },
+        {
+            "rule_id": "builtin.timing.time_sensor.tighten.max_total_bindings",
+            "source": "builtin",
+            "title": "时间感受器耗时过热时，收紧总绑定数上限",
+            "metric_key": "timing_time_sensor_ms",
+            "issue_mode": "high",
+            "param_id": "time_sensor.max_total_bindings",
+        },
+        {
+            "rule_id": "builtin.timing.time_sensor.tighten.delayed_task_capacity",
+            "source": "builtin",
+            "title": "时间感受器延迟任务过热时，适度回收延迟任务容量",
+            "metric_key": "timing_time_sensor_ms",
+            "issue_mode": "high",
+            "param_id": "time_sensor.delayed_task_capacity",
+        },
+        {
+            "rule_id": "builtin.timing.sensor.tighten.echo_pool_frames",
+            "source": "builtin",
+            "title": "文本感受器回声池过热时，收紧回声帧上限",
+            "metric_key": "timing_sensor_ms",
+            "issue_mode": "high",
+            "param_id": "text_sensor.echo_pool_max_frames",
+        },
+        {
+            "rule_id": "builtin.timing.sensor.tighten.echo_energy_floor",
+            "source": "builtin",
+            "title": "文本感受器回声池过热时，提高回声最小能量门槛",
+            "metric_key": "timing_sensor_ms",
+            "issue_mode": "high",
+            "param_id": "text_sensor.echo_min_energy_threshold",
+        },
+        {
+            "rule_id": "builtin.timing.sensor.tighten.echo_decay_factor",
+            "source": "builtin",
+            "title": "文本感受器回声池过热时，降低每轮回声保留系数，让旧输入更快淡出",
+            "metric_key": "timing_sensor_ms",
+            "issue_mode": "high",
+            "param_id": "text_sensor.echo_round_decay_factor",
         },
     ]
     for item in builtin_rules:
@@ -5309,7 +7928,9 @@ def read_auto_tuner_state(*, app: Any | None = None) -> dict[str, Any]:
         or list(raw_before.get("observation_history", [])) != list(tuner.observation_history)
         or list(raw_before.get("observation_review_history", [])) != list(tuner.observation_review_history)
         or dict(raw_before.get("last_observation_review", {})) != dict(tuner.last_observation_review)
-        or str(raw_before.get("schema_version", "") or "") != "v3"
+        or dict(raw_before.get("last_short_term_snapshots", {})) != dict(tuner.last_short_term_snapshots)
+        or dict(raw_before.get("last_long_term_snapshots", {})) != dict(tuner.last_long_term_snapshots)
+        or str(raw_before.get("schema_version", "") or "") != "v4"
     )
     if needs_save:
         tuner._save_state()
@@ -5346,9 +7967,11 @@ def read_auto_tuner_state(*, app: Any | None = None) -> dict[str, Any]:
             "llm_rejected_rule_count": len([x for x in llm_custom_rules if str(x.get("status", "") or "") == "rejected"]),
             "observation_active_count": len(active_observations),
             "observation_history_count": len([x for x in (state.get("observation_history", []) or []) if isinstance(x, dict)]),
-            "observation_reviewable_count": reviewable_observation_count,
-            "observation_review_history_count": len([x for x in (state.get("observation_review_history", []) or []) if isinstance(x, dict)]),
-            "last_observation_review_action_count": len(
+              "observation_reviewable_count": reviewable_observation_count,
+              "observation_review_history_count": len([x for x in (state.get("observation_review_history", []) or []) if isinstance(x, dict)]),
+              "last_short_term_snapshot_present": int(bool(state.get("last_short_term_snapshots"))),
+              "last_long_term_snapshot_present": int(bool(state.get("last_long_term_snapshots"))),
+              "last_observation_review_action_count": len(
                 [
                     x
                     for x in (

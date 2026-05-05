@@ -75,6 +75,23 @@ def sensor_with_intensity_attr():
 
 
 @pytest.fixture
+def sensor_with_intensity_attr_threshold():
+    """
+    创建“开启 stimulus_intensity 属性 SA，但只保留高 ER 单元”的感受器。
+
+    中文: 用于验证新阈值能抑制弱标点/弱噪音的属性 SA 膨胀。
+    English: Regression fixture for the low-risk numeric-attribute pruning path.
+    """
+    return TextSensor(
+        config_override={
+            "default_mode": "simple",
+            "enable_stimulus_intensity_attribute_sa": True,
+            "stimulus_intensity_attribute_min_er": 0.9,
+        }
+    )
+
+
+@pytest.fixture
 def sensor_no_echo():
     """创建关闭残响的感受器。"""
     return TextSensor(config_override={"default_mode": "simple", "enable_echo": False})
@@ -235,6 +252,51 @@ class TestSimpleMode:
         assert csa["energy"]["er"] == expected_csa_er
         assert csa["energy"]["er"] > anchor_sa["energy"]["er"]
 
+    def test_intensity_attribute_min_er_suppresses_weak_punctuation(
+        self,
+        sensor_with_intensity_attr_threshold,
+    ):
+        """
+        开启强度属性 SA 后，新增 ER 阈值应优先裁掉弱标点/弱噪音的数值属性 SA。
+        """
+        result = sensor_with_intensity_attr_threshold.ingest_text(
+            text="你！",
+            trace_id="test_003c",
+        )
+        packet = result["data"]["stimulus_packet"]
+        stats = result["data"]["stats"]
+
+        assert stats["feature_sa_count"] == 2
+        assert stats["attribute_sa_count"] == 1
+        assert stats["csa_count"] == 2
+
+        feature_sas = [
+            sa for sa in packet["sa_items"]
+            if sa.get("stimulus", {}).get("role") == "feature"
+        ]
+        attribute_sas = [
+            sa for sa in packet["sa_items"]
+            if sa.get("stimulus", {}).get("role") == "attribute"
+        ]
+        assert len(feature_sas) == 2
+        assert len(attribute_sas) == 1
+
+        char_feature = next(sa for sa in feature_sas if sa["content"]["raw"] == "你")
+        punctuation_feature = next(sa for sa in feature_sas if sa["content"]["raw"] == "！")
+        assert char_feature["energy"]["er"] >= 0.9
+        assert punctuation_feature["energy"]["er"] < 0.9
+
+        attr_sa = attribute_sas[0]
+        assert "stimulus_intensity" in attr_sa["content"]["raw"]
+        assert attr_sa["energy"]["er"] > 0.0
+
+        csa_by_anchor = {
+            csa["anchor_sa_id"]: csa
+            for csa in packet["csa_items"]
+        }
+        assert len(csa_by_anchor[char_feature["id"]]["member_sa_ids"]) == 2
+        assert len(csa_by_anchor[punctuation_feature["id"]]["member_sa_ids"]) == 1
+
     def test_energy_values(self, sensor):
         """验证不同字符类型的能量赋值。"""
         result = sensor.ingest_text(text="你！ A", trace_id="test_004")
@@ -331,6 +393,18 @@ class TestValidation:
         )
         assert result["success"] is False
         assert result["code"] == "INPUT_VALIDATION_ERROR"
+
+    def test_rejects_placeholder_garble_before_ingest(self, sensor):
+        result = sensor.ingest_text(text="????", trace_id="test_val_006")
+        assert result["success"] is False
+        assert result["code"] == "INPUT_TEXT_INTEGRITY_ERROR"
+
+    def test_repairs_common_utf8_latin1_mojibake(self, sensor):
+        result = sensor.ingest_text(text="ä½ å¥½", trace_id="test_val_007")
+        assert result["success"] is True
+        assert result["data"]["sensor_frame"]["input_text"] == "你好"
+        integrity = result["data"].get("input_integrity", {}) or {}
+        assert integrity.get("status") == "repaired"
 
 
 # ====================================================================== #

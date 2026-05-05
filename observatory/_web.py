@@ -15,6 +15,9 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
+import subprocess
+import sys
 import threading
 import time
 import urllib.parse
@@ -27,6 +30,307 @@ import traceback
 
 from ._app import ObservatoryApp
 from . import experiment as exp
+
+
+EXPERIMENT_TERMINAL_STATUSES = {"completed", "stopped_max_ticks", "cancelled", "failed"}
+EXPERIMENT_ACTIVE_STATUSES = {"queued", "waiting_for_app_lock", "running", "cancelling"}
+EXPERIMENT_CANCEL_STALE_MS = 90_000
+
+
+def _coerce_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _reset_app_runtime_modules(
+    app: ObservatoryApp,
+    *,
+    clear_hdb: bool,
+    trace_prefix: str,
+    reason: str,
+    operator: str,
+) -> dict[str, Any]:
+    """Reset runtime modules through the app helper, with a legacy-safe fallback."""
+    if hasattr(app, "_clear_runtime_modules"):
+        return app._clear_runtime_modules(  # type: ignore[attr-defined]
+            clear_hdb=clear_hdb,
+            trace_prefix=trace_prefix,
+            reason=reason,
+            operator=operator,
+        )
+
+    result: dict[str, Any] = {
+        "sensor": app.sensor.clear_echo_pool(trace_id=f"{trace_prefix}_sensor"),
+        "state_pool": app.pool.clear_state_pool(
+            trace_id=f"{trace_prefix}_pool",
+            reason=reason,
+            operator=operator,
+        ),
+    }
+    if clear_hdb:
+        result["hdb"] = app.hdb.clear_hdb(trace_id=trace_prefix, reason=reason, operator=operator)
+    elif hasattr(getattr(app, "hdb", None), "clear_runtime_state"):
+        result["hdb_runtime"] = app.hdb.clear_runtime_state(trace_id=f"{trace_prefix}_hdb_runtime", reason=reason)  # type: ignore[attr-defined]
+
+    for module_name in ("time_sensor", "action", "attention", "cognitive_stitching"):
+        module = getattr(app, module_name, None)
+        if hasattr(module, "clear_runtime_state"):
+            try:
+                result[module_name] = module.clear_runtime_state(  # type: ignore[attr-defined]
+                    trace_id=f"{trace_prefix}_{module_name}",
+                    reason=reason,
+                )
+            except TypeError:
+                result[module_name] = module.clear_runtime_state()  # type: ignore[attr-defined]
+
+    app._last_report = None  # type: ignore[attr-defined]
+    app._report_history = []  # type: ignore[attr-defined]
+    old_tick_counter = int(getattr(app, "tick_counter", 0) or 0)
+    app.tick_counter = 0  # type: ignore[attr-defined]
+    if hasattr(app, "_started_at"):
+        app._started_at = int(time.time() * 1000)  # type: ignore[attr-defined]
+    result["report_cache_cleared"] = True
+    result["tick_counter_reset"] = True
+    result["tick_counter_before_reset"] = old_tick_counter
+    result["started_at_reset"] = True
+    return result
+
+
+def _normalize_experiment_job_state(job: dict[str, Any]) -> dict[str, Any]:
+    """Keep experiment job rows from staying in an endless cancelling state."""
+
+    status = str(job.get("status", "") or "").lower()
+    if status in EXPERIMENT_TERMINAL_STATUSES:
+        return job
+
+    now_ms = int(time.time() * 1000)
+    if bool(job.get("cancelled", False)):
+        requested_at = _coerce_int(
+            job.get("cancel_requested_at_ms")
+            or job.get("updated_at_ms")
+            or job.get("last_progress_at_ms")
+            or job.get("started_at_ms")
+            or job.get("created_at_ms")
+            or now_ms,
+            now_ms,
+        )
+        job["cancel_requested_at_ms"] = requested_at
+        elapsed_ms = max(0, now_ms - requested_at)
+        if elapsed_ms >= EXPERIMENT_CANCEL_STALE_MS:
+            job["status"] = "cancelled"
+            job["stage"] = "cancelled"
+            job["stage_label"] = "已取消（停止请求超时兜底）"
+            job["finished_at_ms"] = job.get("finished_at_ms") or now_ms
+            job["updated_at_ms"] = now_ms
+            job["lock_waiting"] = False
+        else:
+            job["status"] = "cancelling"
+            job["stage"] = str(job.get("stage", "") or "cancelling")
+            job["stage_label"] = str(job.get("stage_label", "") or "正在停止：会在当前 tick 或收尾阶段结束后取消")
+            job["cancel_elapsed_ms"] = elapsed_ms
+    return job
+
+
+def _repair_job_row(job: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "repair_job_id": str(job.get("repair_job_id", "") or job.get("job_id", "") or ""),
+        "job_id": str(job.get("job_id", "") or job.get("repair_job_id", "") or ""),
+        "job_type": str(job.get("job_type", "repair") or "repair"),
+        "status": str(job.get("status", "") or ""),
+        "scope": str(job.get("repair_scope", job.get("scope", "")) or ""),
+        "target_id": str(job.get("target_id", "") or job.get("target", "") or "全局"),
+        "processed_count": int(job.get("processed_count", 0) or 0),
+        "repaired_count": int(job.get("repaired_count", 0) or 0),
+        "deleted_count": int(job.get("deleted_count", 0) or 0),
+        "issue_count": int(job.get("issue_count", 0) or 0),
+        "batch_limit": int(job.get("batch_limit", 0) or 0),
+        "created_at_ms": int(job.get("created_at", job.get("created_at_ms", 0)) or 0),
+        "started_at_ms": int(job.get("started_at", job.get("started_at_ms", 0)) or 0),
+        "updated_at_ms": int(job.get("updated_at", job.get("updated_at_ms", 0)) or 0),
+        "finished_at_ms": int(job.get("finished_at", job.get("finished_at_ms", 0)) or 0),
+        "request": {
+            "repair_scope": job.get("repair_scope", ""),
+            "target_id": job.get("target_id", ""),
+            "batch_limit": job.get("batch_limit", 0),
+            "background": job.get("background", False),
+        },
+        "data": job,
+        "error": "; ".join(str(item.get("error", "")) for item in (job.get("errors", []) or []) if isinstance(item, dict) and item.get("error")),
+    }
+
+
+def _idle_job_row(job: dict[str, Any]) -> dict[str, Any]:
+    data = job.get("data") if isinstance(job.get("data"), dict) else {}
+    hdb_data = (((data or {}).get("hdb") or {}).get("data") or {}) if isinstance(data, dict) else {}
+    progress = dict(job.get("progress", {}) or {})
+    scanned = progress.get("scanned_structure_db_count", hdb_data.get("scanned_structure_db_count", 0))
+    updated = progress.get("updated_structure_db_count", hdb_data.get("updated_structure_db_count", 0))
+    return {
+        "repair_job_id": str(job.get("job_id", "") or ""),
+        "job_id": str(job.get("job_id", "") or ""),
+        "job_type": str(job.get("job_type", "idle_consolidation") or "idle_consolidation"),
+        "status": str(job.get("status", "") or ""),
+        "scope": "手动闲时整理",
+        "target_id": "HDB",
+        "processed_count": int(scanned or 0),
+        "repaired_count": int(updated or 0),
+        "deleted_count": int(progress.get("trimmed_diff_entry_total", hdb_data.get("trimmed_diff_entry_total", 0)) or 0),
+        "issue_count": int(progress.get("trimmed_group_entry_total", hdb_data.get("trimmed_group_entry_total", 0)) or 0),
+        "batch_limit": int((job.get("request", {}) or {}).get("batch_limit", 0) or 0),
+        "created_at_ms": int(job.get("created_at_ms", 0) or 0),
+        "started_at_ms": int(job.get("started_at_ms", 0) or 0),
+        "updated_at_ms": int(job.get("updated_at_ms", job.get("finished_at_ms", job.get("started_at_ms", 0))) or 0),
+        "finished_at_ms": int(job.get("finished_at_ms", 0) or 0),
+        "request": job.get("request", {}),
+        "progress": progress,
+        "data": job.get("data"),
+        "error": str(job.get("error", "") or ""),
+    }
+
+
+def _job_stage_label(stage: Any, status: Any = "") -> str:
+    raw = str(stage or status or "").strip()
+    labels = {
+        "queued": "排队中",
+        "loading_dataset": "读取数据集",
+        "preparing_manifest": "准备运行清单",
+        "prepared": "准备初始化运行态",
+        "waiting_for_app_lock": "等待主循环锁/维护任务",
+        "capturing_baseline": "读取运行前基线",
+        "applying_overrides": "应用运行覆盖",
+        "resetting_runtime": "清理运行态",
+        "configuring_exports": "配置导出开关",
+        "configuring_time_sensor": "配置时间感受器",
+        "running": "运行中",
+        "running_tick": "执行 tick",
+        "tick_finished": "tick 已写入指标",
+        "idle_consolidation": "HDB 闲时整理",
+        "idle_consolidation_cs": "认知拼接整理",
+        "finished": "已结束",
+        "completed": "已完成",
+        "stopped_max_ticks": "达到最大 tick",
+        "cancelled": "已取消",
+        "cancelling": "正在停止",
+        "failed": "失败",
+    }
+    return labels.get(raw, raw or "未知")
+
+
+def _experiment_job_row(job: dict[str, Any]) -> dict[str, Any]:
+    job = _normalize_experiment_job_state(job)
+    status = str(job.get("status", "") or "")
+    stage = str(job.get("stage", "") or status or "")
+    tick_done = int(job.get("tick_done", job.get("source_tick_done", 0)) or 0)
+    tick_planned = job.get("tick_planned", None)
+    try:
+        planned_num = int(tick_planned) if tick_planned is not None else 0
+    except Exception:
+        planned_num = 0
+    progress_ratio = (float(tick_done) / float(planned_num)) if planned_num > 0 else 0.0
+    latest_metrics_preview = job.get("latest_metrics_preview") if isinstance(job.get("latest_metrics_preview"), dict) else None
+    return {
+        "job_id": str(job.get("job_id", "") or ""),
+        "job_type": "experiment_run",
+        "type_label": "数据集运行",
+        "status": status,
+        "stage": stage,
+        "stage_label": str(job.get("stage_label", "") or _job_stage_label(stage, status)),
+        "run_id": str(job.get("run_id", "") or ""),
+        "dataset_id": str(job.get("dataset_id", "") or ""),
+        "tick_done": tick_done,
+        "source_tick_done": int(job.get("source_tick_done", tick_done) or 0),
+        "synthetic_tick_done": int(job.get("synthetic_tick_done", 0) or 0),
+        "executed_tick_done_total": int(job.get("executed_tick_done_total", tick_done) or 0),
+        "tick_planned": tick_planned,
+        "progress_ratio": max(0.0, min(1.0, progress_ratio)),
+        "lock_waiting": bool(job.get("lock_waiting", False)),
+        "lock_wait_ms": int(job.get("lock_wait_ms", 0) or 0),
+        "last_lock_wait_ms": int(job.get("last_lock_wait_ms", 0) or 0),
+        "created_at_ms": int(job.get("created_at_ms", 0) or 0),
+        "started_at_ms": int(job.get("started_at_ms", 0) or 0),
+        "updated_at_ms": int(job.get("updated_at_ms", job.get("last_progress_at_ms", job.get("started_at_ms", 0))) or 0),
+        "finished_at_ms": int(job.get("finished_at_ms", 0) or 0),
+        "error": str(job.get("error", "") or ""),
+        "last_tick_index": int(job.get("last_tick_index", -1) or -1),
+        "latest_metrics_tick_index": int(job.get("latest_metrics_tick_index", job.get("last_tick_index", -1)) or -1),
+        "latest_metrics_preview": dict(latest_metrics_preview) if isinstance(latest_metrics_preview, dict) else None,
+        "data": job,
+    }
+
+
+def _active_experiment_job_with_preview(server: "ObservatoryWebServer") -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    with server.experiment_jobs_lock:
+        jobs = [
+            dict(job)
+            for job in server.experiment_jobs.values()
+            if isinstance(job, dict)
+            and (
+                str(job.get("status", "") or "").lower() in EXPERIMENT_ACTIVE_STATUSES
+                or str(job.get("stage", "") or "").lower() in EXPERIMENT_ACTIVE_STATUSES
+            )
+        ]
+    if not jobs:
+        return None, None
+    jobs.sort(
+        key=lambda item: int(item.get("updated_at_ms", item.get("last_progress_at_ms", item.get("started_at_ms", 0))) or 0),
+        reverse=True,
+    )
+    job = jobs[0]
+    preview = job.get("latest_metrics_preview") if isinstance(job.get("latest_metrics_preview"), dict) else None
+    return _experiment_job_row(job), dict(preview) if isinstance(preview, dict) else None
+
+
+def _generic_background_job_row(job: dict[str, Any], *, job_type: str, type_label: str) -> dict[str, Any]:
+    status = str(job.get("status", "") or "")
+    stage = str(job.get("stage", "") or status or "")
+    return {
+        "job_id": str(job.get("job_id", "") or job.get("repair_job_id", "") or ""),
+        "job_type": job_type,
+        "type_label": type_label,
+        "status": status,
+        "stage": stage,
+        "stage_label": str(job.get("stage_label", "") or _job_stage_label(stage, status)),
+        "run_id": str(job.get("run_id", "") or ""),
+        "created_at_ms": int(job.get("created_at_ms", 0) or 0),
+        "started_at_ms": int(job.get("started_at_ms", 0) or 0),
+        "updated_at_ms": int(job.get("updated_at_ms", job.get("finished_at_ms", job.get("started_at_ms", 0))) or 0),
+        "finished_at_ms": int(job.get("finished_at_ms", 0) or 0),
+        "error": str(job.get("error", "") or ""),
+        "data": job,
+    }
+
+
+def _collect_background_jobs(server: "ObservatoryWebServer", *, limit: int = 80) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    with server.experiment_jobs_lock:
+        rows.extend(_experiment_job_row(job) for job in server.experiment_jobs.values() if isinstance(job, dict))
+    with server.maintenance_jobs_lock:
+        for job_id, job in server.maintenance_jobs.items():
+            if job_id == "_seq" or not isinstance(job, dict):
+                continue
+            row = _generic_background_job_row(dict(job), job_type=str(job.get("job_type", "maintenance") or "maintenance"), type_label="维护任务")
+            row.update(_idle_job_row(dict(job)))
+            row["type_label"] = "维护任务"
+            rows.append(row)
+    try:
+        rows.extend(
+            _generic_background_job_row(dict(job), job_type="hdb_repair", type_label="HDB 修复")
+            for job in server.app.hdb._repair.jobs.values()
+            if isinstance(job, dict)
+        )
+    except Exception:
+        pass
+    with server.llm_review_jobs_lock:
+        rows.extend(_generic_background_job_row(dict(job), job_type="llm_review", type_label="LLM 审查") for job in server.llm_review_jobs.values() if isinstance(job, dict))
+    with server.auto_tuner_llm_jobs_lock:
+        rows.extend(_generic_background_job_row(dict(job), job_type="auto_tuner_llm", type_label="AutoTuner LLM") for job in server.auto_tuner_llm_jobs.values() if isinstance(job, dict))
+    rows.sort(
+        key=lambda item: int(item.get("updated_at_ms", 0) or item.get("created_at_ms", 0) or item.get("started_at_ms", 0) or 0),
+        reverse=True,
+    )
+    return rows[: max(1, int(limit or 80))]
 
 
 class ObservatoryWebServer(ThreadingHTTPServer):
@@ -47,9 +351,222 @@ class ObservatoryWebServer(ThreadingHTTPServer):
         # Background maintenance jobs (idle consolidation etc.).
         self.maintenance_jobs: dict[str, dict[str, Any]] = {}
         self.maintenance_jobs_lock = threading.RLock()
+        # Dataset catalog cache keyed by resolved path + file fingerprint.
+        self.dataset_catalog_cache: dict[str, dict[str, Any]] = {}
+        self.dataset_catalog_lock = threading.RLock()
+        # Auto-tuner state cache for UI polling; allows quick/stale responses when the app lock is busy.
+        self.auto_tuner_state_cache: dict[str, Any] = {}
+        self.auto_tuner_state_lock = threading.RLock()
+        self.web_host = str(host or "127.0.0.1")
+        self.web_port = int(port or 8765)
         self.static_dir = Path(__file__).resolve().parent / "web_static"
+        self.next_static_dir = Path(__file__).resolve().parent / "web_static_next"
         self.started_at = app._started_at
         super().__init__((host, port), _build_handler())
+
+
+def _request_server_stop(server: ObservatoryWebServer, *, force_exit: bool = False) -> None:
+    """Stop the local web server from an API handler without blocking the response."""
+    if force_exit:
+        def _force_exit() -> None:
+            os._exit(0)
+
+        threading.Timer(0.8, _force_exit).start()
+
+    def _stop() -> None:
+        try:
+            server.shutdown()
+        except Exception:
+            pass
+        if force_exit:
+            time.sleep(0.25)
+            os._exit(0)
+
+    threading.Thread(target=_stop, daemon=True).start()
+
+
+def _schedule_observatory_restart(server: ObservatoryWebServer) -> dict[str, Any]:
+    """Launch a detached helper that restarts the web server after this process exits."""
+    host = str(getattr(server, "web_host", "127.0.0.1") or "127.0.0.1")
+    port = int(getattr(server, "web_port", 8765) or 8765)
+    repo_root = Path(__file__).resolve().parents[1]
+    python_exe = sys.executable or "python"
+    helper_flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+    helper_code = (
+        "import subprocess, sys, time\n"
+        "py, cwd, host, port = sys.argv[1:5]\n"
+        "time.sleep(1.2)\n"
+        "flags = getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)\n"
+        "subprocess.Popen([py, '-m', 'observatory', '--mode', 'web', '--no-browser', '--host', host, '--port', port], cwd=cwd, creationflags=flags)\n"
+    )
+    subprocess.Popen(
+        [python_exe, "-c", helper_code, python_exe, str(repo_root), host, str(port)],
+        cwd=str(repo_root),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=helper_flags,
+        close_fds=True,
+    )
+    _request_server_stop(server, force_exit=True)
+    return {"message": "server restarting", "host": host, "port": port}
+
+
+def _blank_dataset_meta() -> dict[str, Any]:
+    return {
+        "dataset_id": "",
+        "title": "",
+        "description": "",
+        "experiment_goal": "",
+        "time_basis": "",
+        "tick_dt_ms": None,
+        "estimated_ticks": None,
+        "effective_text_ticks": None,
+        "empty_ticks": None,
+        "labeled_ticks": None,
+        "evaluation_dimensions": [],
+        "notes": [],
+        "app_config_override": {},
+        "app_config_override_keys": [],
+        "dataset_kind": "",
+    }
+
+
+def _dataset_fingerprint(path: Path) -> tuple[int, int]:
+    try:
+        stat = path.stat()
+        return int(stat.st_mtime_ns), int(stat.st_size)
+    except OSError:
+        return 0, 0
+
+
+def _load_dataset_meta(path: Path) -> dict[str, Any]:
+    meta = _blank_dataset_meta()
+    if path.suffix.lower() in {".yaml", ".yml"}:
+        raw = exp.io.load_yaml_file(path)  # type: ignore[attr-defined]
+        norm = exp.validate_and_normalize_dataset(raw)
+        meta.update(exp.dataset_overview(norm))
+        meta["dataset_kind"] = "yaml_episode_template"
+    elif path.suffix.lower() == ".jsonl":
+        summary = exp.summarize_expanded_tick_items(exp.io.iter_jsonl(path))  # type: ignore[attr-defined]
+        meta.update(
+            {
+                "dataset_id": summary.get("dataset_id", "") or path.stem,
+                "time_basis": summary.get("time_basis", ""),
+                "tick_dt_ms": summary.get("tick_dt_ms", None),
+                "estimated_ticks": summary.get("total_ticks", 0),
+                "effective_text_ticks": summary.get("effective_text_ticks", 0),
+                "empty_ticks": summary.get("empty_ticks", 0),
+                "labeled_ticks": summary.get("labeled_ticks", 0),
+                "dataset_kind": "jsonl_tick_stream",
+            }
+        )
+    return meta
+
+
+def _load_dataset_meta_cached(server: ObservatoryWebServer, ref) -> dict[str, Any]:
+    meta = _blank_dataset_meta()
+    try:
+        path = exp.storage.resolve_dataset_file(ref)  # type: ignore[attr-defined]
+        path_key = str(path.resolve())
+        fingerprint = _dataset_fingerprint(path)
+        with server.dataset_catalog_lock:
+            cached = server.dataset_catalog_cache.get(path_key)
+            if cached and tuple(cached.get("fingerprint", ())) == fingerprint:
+                return dict(cached.get("meta", meta))
+        loaded = _load_dataset_meta(path)
+        with server.dataset_catalog_lock:
+            server.dataset_catalog_cache[path_key] = {
+                "fingerprint": fingerprint,
+                "meta": dict(loaded),
+            }
+        return loaded
+    except Exception:
+        return meta
+
+
+_AUTO_TUNER_STATE_CACHE_TTL_MS = 1500
+_AUTO_TUNER_STATE_STALE_MAX_MS = 15000
+_AUTO_TUNER_STATE_LOCK_TIMEOUT_SEC = 0.15
+
+
+def _decorate_auto_tuner_state_payload(payload: dict[str, Any], *, mode: str, refreshed_at_ms: int, now_ms: int) -> dict[str, Any]:
+    data = dict(payload or {})
+    fetch_meta = dict(data.get("fetch_meta", {})) if isinstance(data.get("fetch_meta"), dict) else {}
+    fetch_meta.update(
+        {
+            "mode": str(mode or "live"),
+            "refreshed_at_ms": int(refreshed_at_ms or 0),
+            "cache_age_ms": max(0, int(now_ms or 0) - int(refreshed_at_ms or 0)),
+        }
+    )
+    data["fetch_meta"] = fetch_meta
+    return data
+
+
+def _load_auto_tuner_state_cached(server: ObservatoryWebServer) -> dict[str, Any]:
+    now_ms = int(time.time() * 1000)
+    cached_payload: dict[str, Any] | None = None
+    cached_mode = "live"
+    cached_refreshed_at_ms = 0
+    with server.auto_tuner_state_lock:
+        cached_payload = server.auto_tuner_state_cache.get("payload") if isinstance(server.auto_tuner_state_cache.get("payload"), dict) else None
+        cached_mode = str(server.auto_tuner_state_cache.get("mode", "live") or "live")
+        cached_refreshed_at_ms = int(server.auto_tuner_state_cache.get("refreshed_at_ms", 0) or 0)
+    if cached_payload is not None and max(0, now_ms - cached_refreshed_at_ms) <= _AUTO_TUNER_STATE_CACHE_TTL_MS:
+        return _decorate_auto_tuner_state_payload(
+            cached_payload,
+            mode=cached_mode,
+            refreshed_at_ms=cached_refreshed_at_ms,
+            now_ms=now_ms,
+        )
+
+    locked = False
+    try:
+        locked = bool(server.app_lock.acquire(timeout=_AUTO_TUNER_STATE_LOCK_TIMEOUT_SEC))
+        if locked:
+            live_payload = exp.read_auto_tuner_state(app=server.app)
+            refreshed_at_ms = int(time.time() * 1000)
+            with server.auto_tuner_state_lock:
+                server.auto_tuner_state_cache = {
+                    "payload": dict(live_payload),
+                    "mode": "live",
+                    "refreshed_at_ms": refreshed_at_ms,
+                }
+            return _decorate_auto_tuner_state_payload(
+                live_payload,
+                mode="live",
+                refreshed_at_ms=refreshed_at_ms,
+                now_ms=refreshed_at_ms,
+            )
+    except Exception:
+        pass
+    finally:
+        if locked:
+            server.app_lock.release()
+
+    if cached_payload is not None and max(0, now_ms - cached_refreshed_at_ms) <= _AUTO_TUNER_STATE_STALE_MAX_MS:
+        return _decorate_auto_tuner_state_payload(
+            cached_payload,
+            mode="stale_cache",
+            refreshed_at_ms=cached_refreshed_at_ms,
+            now_ms=now_ms,
+        )
+
+    fallback_payload = exp.read_auto_tuner_state(app=None)
+    refreshed_at_ms = int(time.time() * 1000)
+    with server.auto_tuner_state_lock:
+        server.auto_tuner_state_cache = {
+            "payload": dict(fallback_payload),
+            "mode": "fallback_disk",
+            "refreshed_at_ms": refreshed_at_ms,
+        }
+    return _decorate_auto_tuner_state_payload(
+        fallback_payload,
+        mode="fallback_disk",
+        refreshed_at_ms=refreshed_at_ms,
+        now_ms=refreshed_at_ms,
+    )
 
 
 def _build_handler():
@@ -82,6 +599,32 @@ def _build_handler():
                 if parsed.path == "/api/dashboard":
                     with self.server.app_lock:
                         payload = self.server.app.get_dashboard_data()
+                    active_experiment_job, latest_metrics_preview = _active_experiment_job_with_preview(self.server)
+                    try:
+                        with self.server.maintenance_jobs_lock:
+                            maintenance_jobs = [
+                                dict(job)
+                                for job_id, job in self.server.maintenance_jobs.items()
+                                if job_id != "_seq" and isinstance(job, dict)
+                            ]
+                        maintenance_jobs.sort(key=lambda item: int(item.get("created_at_ms", 0) or 0), reverse=True)
+                        payload = dict(payload)
+                        hdb_snapshot = dict(payload.get("hdb_snapshot", {}) or {})
+                        hdb_repair_jobs = list(hdb_snapshot.get("repair_jobs", []) or [])
+                        idle_rows = [_idle_job_row(job) for job in maintenance_jobs[:20]]
+                        hdb_snapshot["repair_jobs"] = idle_rows + hdb_repair_jobs
+                        payload["hdb_snapshot"] = hdb_snapshot
+                    except Exception:
+                        pass
+                    try:
+                        payload = dict(payload)
+                        if active_experiment_job is not None:
+                            payload["active_experiment_job"] = active_experiment_job
+                        if latest_metrics_preview is not None:
+                            payload["active_experiment_latest_metrics"] = latest_metrics_preview
+                            payload["live_metrics_source"] = "experiment_runner_memory"
+                    except Exception:
+                        pass
                     # The raw per-tick report can become extremely large during long runs.
                     # Keep the default dashboard payload compact for UI responsiveness.
                     # Use `?full=1` when a deep offline inspection is needed.
@@ -94,6 +637,25 @@ def _build_handler():
                             pass
                     self._send_json({"success": True, "data": payload})
                     return
+                if parsed.path == "/api/experiment/live_preview":
+                    active_experiment_job, latest_metrics_preview = _active_experiment_job_with_preview(self.server)
+                    payload = {
+                        "active_experiment_job": active_experiment_job,
+                        "active_experiment_latest_metrics": latest_metrics_preview,
+                        "live_metrics_source": "experiment_runner_memory" if latest_metrics_preview else "experiment_jobs",
+                        "generated_at_ms": int(time.time() * 1000),
+                    }
+                    if latest_metrics_preview is not None:
+                        tick_index = latest_metrics_preview.get("tick_index")
+                        payload["tick_counter"] = tick_index
+                        payload["meta"] = {
+                            "tick_counter": tick_index,
+                            "trace_id": latest_metrics_preview.get("trace_id"),
+                            "tick_id": latest_metrics_preview.get("tick_id"),
+                            "tick_source": latest_metrics_preview.get("tick_source"),
+                        }
+                    self._send_json({"success": True, "data": payload})
+                    return
                 if parsed.path == "/api/idle_consolidate_status":
                     job_id = (query.get("job_id", [""])[0] or "").strip()
                     if not job_id:
@@ -104,6 +666,50 @@ def _build_handler():
                         self._send_json({"success": False, "message": f"job not found: {job_id}"}, status=HTTPStatus.NOT_FOUND)
                         return
                     self._send_json({"success": True, "data": job})
+                    return
+                if parsed.path == "/api/maintenance_jobs":
+                    with self.server.maintenance_jobs_lock:
+                        idle_jobs = [
+                            _idle_job_row(dict(job))
+                            for job_id, job in self.server.maintenance_jobs.items()
+                            if job_id != "_seq" and isinstance(job, dict)
+                        ]
+                    try:
+                        repair_jobs = [
+                            _repair_job_row(dict(job))
+                            for job in self.server.app.hdb._repair.jobs.values()
+                            if isinstance(job, dict)
+                        ]
+                    except Exception:
+                        repair_jobs = []
+                    jobs = idle_jobs + repair_jobs
+                    jobs.sort(
+                        key=lambda item: int(item.get("created_at_ms", 0) or item.get("started_at_ms", 0) or 0),
+                        reverse=True,
+                    )
+                    self._send_json({"success": True, "data": {"jobs": jobs[:80]}})
+                    return
+                if parsed.path == "/api/background_jobs":
+                    limit = _maybe_int(query.get("limit", [80])[0]) or 80
+                    jobs = _collect_background_jobs(self.server, limit=max(1, min(200, int(limit))))
+                    active = [
+                        job
+                        for job in jobs
+                        if str(job.get("status", "") or "").lower() in EXPERIMENT_ACTIVE_STATUSES
+                        or str(job.get("stage", "") or "").lower() in EXPERIMENT_ACTIVE_STATUSES
+                        or bool(job.get("lock_waiting", False))
+                    ]
+                    self._send_json(
+                        {
+                            "success": True,
+                            "data": {
+                                "jobs": jobs,
+                                "active_jobs": active,
+                                "active_count": len(active),
+                                "generated_at_ms": int(time.time() * 1000),
+                            },
+                        }
+                    )
                     return
                 if parsed.path == "/api/state":
                     top_k = _maybe_int(query.get("top_k", [None])[0])
@@ -169,44 +775,7 @@ def _build_handler():
                     # List built-in and imported dataset files.
                     items = []
                     for ref in exp.list_dataset_files():
-                        meta = {
-                            "dataset_id": "",
-                            "title": "",
-                            "description": "",
-                            "experiment_goal": "",
-                            "time_basis": "",
-                            "tick_dt_ms": None,
-                            "estimated_ticks": None,
-                            "effective_text_ticks": None,
-                            "empty_ticks": None,
-                            "labeled_ticks": None,
-                            "evaluation_dimensions": [],
-                            "notes": [],
-                            "dataset_kind": "",
-                        }
-                        try:
-                            p = exp.storage.resolve_dataset_file(ref)  # type: ignore[attr-defined]
-                            if p.suffix.lower() in {".yaml", ".yml"}:
-                                raw = exp.io.load_yaml_file(p)  # type: ignore[attr-defined]
-                                norm = exp.validate_and_normalize_dataset(raw)
-                                meta.update(exp.dataset_overview(norm))
-                                meta["dataset_kind"] = "yaml_episode_template"
-                            elif p.suffix.lower() == ".jsonl":
-                                summary = exp.summarize_expanded_tick_items(exp.io.iter_jsonl(p))  # type: ignore[attr-defined]
-                                meta.update(
-                                    {
-                                        "dataset_id": summary.get("dataset_id", "") or p.stem,
-                                        "time_basis": summary.get("time_basis", ""),
-                                        "tick_dt_ms": summary.get("tick_dt_ms", None),
-                                        "estimated_ticks": summary.get("total_ticks", 0),
-                                        "effective_text_ticks": summary.get("effective_text_ticks", 0),
-                                        "empty_ticks": summary.get("empty_ticks", 0),
-                                        "labeled_ticks": summary.get("labeled_ticks", 0),
-                                        "dataset_kind": "jsonl_tick_stream",
-                                    }
-                                )
-                        except Exception:
-                            pass
+                        meta = _load_dataset_meta_cached(self.server, ref)
                         items.append(
                             {
                                 "source": ref.source,
@@ -223,6 +792,41 @@ def _build_handler():
                     limit = _maybe_int(query.get("limit", [32])[0]) or 32
                     run_ids = exp.list_runs(limit=limit)
                     run_items = exp.list_run_infos(limit=limit)
+                    with self.server.experiment_jobs_lock:
+                        active_jobs = [
+                            _experiment_job_row(job)
+                            for job in self.server.experiment_jobs.values()
+                            if isinstance(job, dict)
+                            and str(_normalize_experiment_job_state(job).get("status", "") or "").lower()
+                            in EXPERIMENT_ACTIVE_STATUSES
+                        ]
+                    by_run = {str(item.get("run_id", "") or ""): dict(item) for item in run_items if isinstance(item, dict)}
+                    for job in active_jobs:
+                        rid = str(job.get("run_id", "") or "")
+                        if not rid:
+                            continue
+                        merged = dict(by_run.get(rid, {}))
+                        merged.update(
+                            {
+                                "run_id": rid,
+                                "status": job.get("status", merged.get("status", "")),
+                                "dataset_id": job.get("dataset_id", merged.get("dataset_id", "")),
+                                "tick_done": job.get("tick_done", merged.get("tick_done", 0)),
+                                "source_tick_done": job.get("source_tick_done", merged.get("source_tick_done", 0)),
+                                "synthetic_tick_done": job.get("synthetic_tick_done", merged.get("synthetic_tick_done", 0)),
+                                "executed_tick_done_total": job.get("executed_tick_done_total", merged.get("executed_tick_done_total", 0)),
+                                "tick_planned": job.get("tick_planned", merged.get("tick_planned", None)),
+                                "started_at_ms": job.get("started_at_ms", merged.get("started_at_ms", 0)),
+                                "updated_at_ms": job.get("updated_at_ms", merged.get("updated_at_ms", 0)),
+                                "job_id": job.get("job_id", ""),
+                                "job_stage": job.get("stage", ""),
+                                "job_stage_label": job.get("stage_label", ""),
+                                "lock_waiting": job.get("lock_waiting", False),
+                            }
+                        )
+                        by_run[rid] = merged
+                    run_items = list(by_run.values())
+                    run_items.sort(key=lambda item: int(item.get("updated_at_ms", 0) or item.get("started_at_ms", 0) or 0), reverse=True)
                     self._send_json({"success": True, "data": {"runs": run_ids, "items": run_items}})
                     return
                 if parsed.path == "/api/experiment/llm_review/config":
@@ -234,6 +838,24 @@ def _build_handler():
                     if not run_id:
                         raise ValueError("run_id is required")
                     payload = exp.read_review_status(run_id=run_id)
+                    latest_job = _latest_llm_review_job_for_run(server=self.server, run_id=run_id)
+                    if latest_job:
+                        payload = dict(payload or {})
+                        payload["job_id"] = str(latest_job.get("job_id", "") or payload.get("job_id", "") or "")
+                        payload["job_status"] = str(latest_job.get("status", "") or "")
+                        payload["job_error"] = str(latest_job.get("error", "") or "")
+                        payload["job_started_at_ms"] = int(latest_job.get("started_at_ms", 0) or 0)
+                        payload["job_finished_at_ms"] = int(latest_job.get("finished_at_ms", 0) or 0)
+                        if str(payload.get("status", "") or "") in {"", "not_started", "unknown", "running"}:
+                            job_status = str(latest_job.get("status", "") or "")
+                            if job_status in {"queued", "running"}:
+                                payload["status"] = "running"
+                                payload.setdefault("stage", job_status)
+                            elif job_status == "failed":
+                                payload["status"] = "failed"
+                                payload.setdefault("stage", "failed")
+                                if not payload.get("error"):
+                                    payload["error"] = str(latest_job.get("error", "") or "")
                     self._send_json({"success": True, "data": payload})
                     return
                 if parsed.path == "/api/experiment/run/llm_review_report":
@@ -264,7 +886,11 @@ def _build_handler():
                     run_id = (query.get("run_id", [""])[0] or "").strip()
                     if not run_id:
                         raise ValueError("run_id is required")
-                    every = _maybe_int(query.get("every", [1])[0]) or 1
+                    every = (
+                        _maybe_int(query.get("every", [0])[0])
+                        or _maybe_int(query.get("downsample_every", [1])[0])
+                        or 1
+                    )
                     limit = _maybe_int(query.get("limit", [0])[0]) or 0
                     offset = _maybe_int(query.get("offset", [0])[0]) or 0
                     every = max(1, min(1000, int(every)))
@@ -303,6 +929,7 @@ def _build_handler():
                             "data": {
                                 "run_id": run_id,
                                 "every": every,
+                                "downsample_every": every,
                                 "offset": offset,
                                 "next_offset": offset + len(rows),
                                 "rows": rows,
@@ -318,10 +945,10 @@ def _build_handler():
                             if not job:
                                 self._send_json({"success": False, "message": f"job not found: {job_id}"}, status=HTTPStatus.NOT_FOUND)
                                 return
-                            self._send_json({"success": True, "data": job})
+                            self._send_json({"success": True, "data": _experiment_job_row(job)})
                             return
                         # list jobs (recent)
-                        jobs = list(self.server.experiment_jobs.values())
+                        jobs = [_experiment_job_row(job) for job in self.server.experiment_jobs.values() if isinstance(job, dict)]
                         jobs.sort(key=lambda j: int(j.get("created_at_ms", 0) or 0), reverse=True)
                         self._send_json({"success": True, "data": {"jobs": jobs[:40]}})
                         return
@@ -348,8 +975,7 @@ def _build_handler():
                     self._send_json({"success": True, "data": payload})
                     return
                 if parsed.path == "/api/experiment/auto_tuner/state":
-                    with self.server.app_lock:
-                        payload = exp.read_auto_tuner_state(app=self.server.app)
+                    payload = _load_auto_tuner_state_cached(self.server)
                     self._send_json({"success": True, "data": payload})
                     return
                 if parsed.path == "/api/experiment/auto_tuner/audit":
@@ -438,12 +1064,25 @@ def _build_handler():
                     self._send_json(result)
                     return
                 if parsed.path == "/api/repair_all":
-                    with self.server.app_lock:
+                    locked = self.server.app_lock.acquire(blocking=False)
+                    if not locked:
+                        self._send_json(
+                            {
+                                "success": False,
+                                "code": "BUSY",
+                                "message": "当前主循环或维护任务正在占用 HDB，请稍后再提交全局修复。",
+                            },
+                            status=HTTPStatus.CONFLICT,
+                        )
+                        return
+                    try:
                         result = self.server.app.hdb.repair_hdb(
                             trace_id="web_repair_all",
                             repair_scope="global_quick",
                             background=True,
                         )
+                    finally:
+                        self.server.app_lock.release()
                     self._send_json(result)
                     return
                 if parsed.path == "/api/idle_consolidate":
@@ -452,20 +1091,43 @@ def _build_handler():
                     reason = str(payload.get("reason", "") or "").strip() or "web_manual_trigger"
                     background = bool(payload.get("background", False))
                     max_cs_events = payload.get("max_cs_events", None)
+                    batch_limit = payload.get("batch_limit", None)
                     try:
                         max_cs_events = int(max_cs_events) if max_cs_events is not None else None
                     except Exception:
                         max_cs_events = None
+                    try:
+                        batch_limit = int(batch_limit) if batch_limit is not None else None
+                    except Exception:
+                        batch_limit = None
 
                     def _run_idle_consolidation() -> dict:
                         with self.server.app_lock:
                             data = {}
                             try:
+                                def progress_callback(progress: dict[str, Any]) -> None:
+                                    with self.server.maintenance_jobs_lock:
+                                        j = self.server.maintenance_jobs.get(job_id) or {}
+                                        j["progress"] = dict(progress or {})
+                                        j["updated_at_ms"] = int(time.time() * 1000)
+                                        self.server.maintenance_jobs[job_id] = j
+                                    try:
+                                        self.server.app.hdb.update_idle_consolidation_progress(
+                                            status="running",
+                                            job_id=job_id,
+                                            request=dict(j.get("request", {}) or {}),
+                                            progress=dict(progress or {}),
+                                        )
+                                    except Exception:
+                                        pass
+
                                 data["hdb"] = self.server.app.hdb.idle_consolidate_hdb(
                                     trace_id="web_idle_consolidate",
                                     reason=reason,
                                     rebuild_pointer_index=bool(rebuild),
                                     apply_soft_limits=bool(apply_limits),
+                                    batch_limit=batch_limit,
+                                    progress_callback=progress_callback,
                                 )
                             except Exception as exc:
                                 data["hdb_error"] = str(exc)
@@ -501,6 +1163,7 @@ def _build_handler():
                                     "rebuild_pointer_index": bool(rebuild),
                                     "apply_soft_limits": bool(apply_limits),
                                     "max_cs_events": max_cs_events,
+                                    "batch_limit": batch_limit,
                                 },
                                 "data": None,
                                 "error": "",
@@ -521,26 +1184,61 @@ def _build_handler():
                                 pass
 
                         def worker() -> None:
+                            request_payload = {}
                             with self.server.maintenance_jobs_lock:
                                 j = self.server.maintenance_jobs.get(job_id) or {}
                                 j["status"] = "running"
                                 j["started_at_ms"] = int(time.time() * 1000)
+                                j["updated_at_ms"] = j["started_at_ms"]
+                                request_payload = dict(j.get("request", {}) or {})
                                 self.server.maintenance_jobs[job_id] = j
                             try:
+                                try:
+                                    self.server.app.hdb.update_idle_consolidation_progress(
+                                        status="running",
+                                        job_id=job_id,
+                                        request=request_payload,
+                                        progress={"phase": "running"},
+                                    )
+                                except Exception:
+                                    pass
                                 data = _run_idle_consolidation()
                                 with self.server.maintenance_jobs_lock:
                                     j = self.server.maintenance_jobs.get(job_id) or {}
                                     j["status"] = "completed"
                                     j["finished_at_ms"] = int(time.time() * 1000)
+                                    j["updated_at_ms"] = j["finished_at_ms"]
                                     j["data"] = data
+                                    hdb_data = ((data.get("hdb") or {}).get("data") or {}) if isinstance(data, dict) else {}
+                                    j["progress"] = dict(hdb_data) if isinstance(hdb_data, dict) else {}
                                     self.server.maintenance_jobs[job_id] = j
+                                try:
+                                    self.server.app.hdb.update_idle_consolidation_progress(
+                                        status="completed",
+                                        job_id=job_id,
+                                        request=request_payload,
+                                        progress=dict(hdb_data) if isinstance(hdb_data, dict) else {},
+                                    )
+                                except Exception:
+                                    pass
                             except Exception as exc:
                                 with self.server.maintenance_jobs_lock:
                                     j = self.server.maintenance_jobs.get(job_id) or {}
                                     j["status"] = "failed"
                                     j["finished_at_ms"] = int(time.time() * 1000)
+                                    j["updated_at_ms"] = j["finished_at_ms"]
                                     j["error"] = str(exc)
                                     self.server.maintenance_jobs[job_id] = j
+                                try:
+                                    self.server.app.hdb.update_idle_consolidation_progress(
+                                        status="failed",
+                                        job_id=job_id,
+                                        request=request_payload,
+                                        progress={"phase": "failed"},
+                                        error=str(exc),
+                                    )
+                                except Exception:
+                                    pass
 
                         threading.Thread(target=worker, daemon=True).start()
                         self._send_json({"success": True, "code": "OK", "message": "idle consolidation job queued", "data": job})
@@ -564,36 +1262,46 @@ def _build_handler():
                     return
                 if parsed.path == "/api/clear_all":
                     with self.server.app_lock:
-                        if hasattr(self.server.app, "_clear_runtime_modules"):
-                            result = self.server.app._clear_runtime_modules(
-                                clear_hdb=True,
-                                trace_prefix="web_clear_all",
-                                reason="web_reset",
-                                operator="researcher",
-                            )
-                        else:
-                            self.server.app.sensor.clear_echo_pool(trace_id="web_clear_sensor")
-                            self.server.app.pool.clear_state_pool(trace_id="web_clear_pool", reason="web_reset", operator="researcher")
-                            result = self.server.app.hdb.clear_hdb(trace_id="web_clear_all", reason="web_reset", operator="researcher")
-                            self.server.app._last_report = None
-                            self.server.app._report_history = []
+                        result = _reset_app_runtime_modules(
+                            self.server.app,
+                            clear_hdb=True,
+                            trace_prefix="web_clear_all",
+                            reason="web_reset",
+                            operator="researcher",
+                        )
                     self._send_json({"success": True, "data": result})
                     return
                 if parsed.path == "/api/clear_runtime":
                     with self.server.app_lock:
-                        if hasattr(self.server.app, "_clear_runtime_modules"):
-                            result = self.server.app._clear_runtime_modules(
-                                clear_hdb=False,
-                                trace_prefix="web_clear_runtime",
-                                reason="web_reset",
+                        result = _reset_app_runtime_modules(
+                            self.server.app,
+                            clear_hdb=False,
+                            trace_prefix="web_clear_runtime",
+                            reason="web_reset",
+                            operator="researcher",
+                        )
+                    self._send_json({"success": True, "data": result})
+                    return
+                if parsed.path in {"/api/experiment/clear_all", "/api/experiment/runtime/clear", "/api/experiment/hdb/clear"}:
+                    with self.server.app_lock:
+                        if parsed.path == "/api/experiment/hdb/clear":
+                            result = self.server.app.hdb.clear_hdb(
+                                trace_id="web_experiment_clear_hdb",
+                                reason="web_experiment_reset",
                                 operator="researcher",
                             )
                         else:
-                            self.server.app.sensor.clear_echo_pool(trace_id="web_clear_sensor")
-                            self.server.app.pool.clear_state_pool(trace_id="web_clear_pool", reason="web_reset", operator="researcher")
-                            self.server.app._last_report = None
-                            self.server.app._report_history = []
-                            result = {"cleared": True}
+                            result = _reset_app_runtime_modules(
+                                self.server.app,
+                                clear_hdb=parsed.path == "/api/experiment/clear_all",
+                                trace_prefix=(
+                                    "web_experiment_clear_all"
+                                    if parsed.path == "/api/experiment/clear_all"
+                                    else "web_experiment_clear_runtime"
+                                ),
+                                reason="web_experiment_reset",
+                                operator="researcher",
+                            )
                     self._send_json({"success": True, "data": result})
                     return
                 if parsed.path == "/api/experiment/datasets/import":
@@ -729,6 +1437,7 @@ def _build_handler():
                         opt_raw = {}
                     options = exp.RunOptions(
                         reset_mode=str(opt_raw.get("reset_mode", "keep") or "keep").strip(),
+                        clean_run=bool(opt_raw.get("clean_run", False)),
                         export_json=bool(opt_raw.get("export_json", False)),
                         export_html=bool(opt_raw.get("export_html", False)),
                         auto_tune_enabled=bool(opt_raw.get("auto_tune_enabled", False)),
@@ -777,18 +1486,51 @@ def _build_handler():
                             j = self.server.experiment_jobs.get(job_id) or {}
                             if not j:
                                 return
+                            if update.get("run_id"):
+                                j["run_id"] = str(update.get("run_id") or j.get("run_id") or "")
                             j["tick_done"] = int(update.get("tick_done", j.get("tick_done", 0)) or 0)
+                            j["source_tick_done"] = int(update.get("source_tick_done", j.get("source_tick_done", j.get("tick_done", 0))) or 0)
+                            j["synthetic_tick_done"] = int(update.get("synthetic_tick_done", j.get("synthetic_tick_done", 0)) or 0)
+                            j["executed_tick_done_total"] = int(
+                                update.get("executed_tick_done_total", j.get("executed_tick_done_total", j.get("tick_done", 0))) or 0
+                            )
                             if update.get("tick_planned") is not None:
                                 j["tick_planned"] = int(update.get("tick_planned") or 0)
                             if update.get("status"):
                                 j["status"] = str(update.get("status") or j.get("status") or "")
+                            if update.get("stage"):
+                                j["stage"] = str(update.get("stage") or "")
+                            if update.get("stage_label"):
+                                j["stage_label"] = str(update.get("stage_label") or "")
+                            if update.get("lock_waiting") is not None:
+                                j["lock_waiting"] = bool(update.get("lock_waiting", False))
+                            if update.get("lock_wait_started_at_ms") is not None:
+                                j["lock_wait_started_at_ms"] = int(update.get("lock_wait_started_at_ms") or 0)
+                            if update.get("lock_wait_ms") is not None:
+                                j["lock_wait_ms"] = int(update.get("lock_wait_ms") or 0)
+                            if update.get("last_lock_wait_ms") is not None:
+                                j["last_lock_wait_ms"] = int(update.get("last_lock_wait_ms") or 0)
                             if update.get("error"):
                                 j["error"] = str(update.get("error") or "")
+                            if update.get("tick_source"):
+                                j["tick_source"] = str(update.get("tick_source") or "")
                             if update.get("tick_index") is not None:
                                 try:
                                     j["last_tick_index"] = int(update.get("tick_index") or 0)
                                 except Exception:
                                     pass
+                            latest_metrics_preview = update.get("latest_metrics_preview")
+                            if isinstance(latest_metrics_preview, dict):
+                                j["latest_metrics_preview"] = dict(latest_metrics_preview)
+                                try:
+                                    j["latest_metrics_tick_index"] = int(
+                                        latest_metrics_preview.get("tick_index", latest_metrics_preview.get("tick", j.get("last_tick_index", 0))) or 0
+                                    )
+                                except Exception:
+                                    pass
+                                j["latest_metrics_preview_source"] = str(latest_metrics_preview.get("preview_source", "experiment_runner_memory") or "")
+                            j["last_progress_at_ms"] = int(time.time() * 1000)
+                            j["updated_at_ms"] = j["last_progress_at_ms"]
                             short_term = update.get("auto_tuner_short_term")
                             if isinstance(short_term, dict):
                                 row = {
@@ -821,7 +1563,10 @@ def _build_handler():
                         with self.server.experiment_jobs_lock:
                             j = self.server.experiment_jobs.get(job_id) or {}
                             j["status"] = "running"
+                            j["stage"] = "loading_dataset"
+                            j["stage_label"] = "后台线程已启动，正在读取数据集"
                             j["started_at_ms"] = int(time.time() * 1000)
+                            j["updated_at_ms"] = j["started_at_ms"]
                             self.server.experiment_jobs[job_id] = j
                         try:
                             # Important: do NOT hold app_lock for the entire run.
@@ -843,9 +1588,14 @@ def _build_handler():
                             j["finished_at_ms"] = int(time.time() * 1000)
                             if not res.get("success", False):
                                 j["status"] = "failed"
+                                j["stage"] = "failed"
+                                j["stage_label"] = "运行失败"
                                 j["error"] = str(res.get("error", "") or "")
                             else:
                                 j["status"] = str(res.get("manifest", {}).get("status", "completed") or "completed")
+                                j["stage"] = "finished"
+                                j["stage_label"] = _job_stage_label(j["status"], j["status"])
+                            j["updated_at_ms"] = j["finished_at_ms"]
                             self.server.experiment_jobs[job_id] = j
 
                         # Optional: auto-run LLM review after completion.
@@ -909,14 +1659,23 @@ def _build_handler():
                     job_id = str(payload.get("job_id", "") or "").strip()
                     if not job_id:
                         raise ValueError("job_id is required")
+                    row: dict[str, Any] | None = None
                     with self.server.experiment_jobs_lock:
                         job = self.server.experiment_jobs.get(job_id)
                         if not job:
                             raise ValueError(f"job not found: {job_id}")
-                        job["cancelled"] = True
-                        job["status"] = "cancelling"
+                        status = str(job.get("status", "") or "").lower()
+                        if status not in EXPERIMENT_TERMINAL_STATUSES:
+                            now_ms = int(time.time() * 1000)
+                            job["cancelled"] = True
+                            job["cancel_requested_at_ms"] = int(job.get("cancel_requested_at_ms", 0) or now_ms)
+                            job["status"] = "cancelling"
+                            job["stage"] = "cancelling"
+                            job["stage_label"] = "正在停止：会在当前 tick 或收尾阶段结束后取消"
+                            job["updated_at_ms"] = now_ms
                         self.server.experiment_jobs[job_id] = job
-                    self._send_json({"success": True, "data": {"job_id": job_id, "cancelled": True}})
+                        row = _experiment_job_row(job)
+                    self._send_json({"success": True, "data": row or {"job_id": job_id, "cancelled": True}})
                     return
                 if parsed.path == "/api/experiment/run/delete":
                     run_id = str(payload.get("run_id", "") or "").strip()
@@ -926,7 +1685,7 @@ def _build_handler():
                         active = [
                             j for j in self.server.experiment_jobs.values()
                             if str(j.get("run_id", "") or "") == run_id
-                            and str(j.get("status", "") or "") in {"queued", "running", "cancelling"}
+                            and str(j.get("status", "") or "") in EXPERIMENT_ACTIVE_STATUSES
                         ]
                     if active:
                         raise ValueError("该运行任务仍在进行中，不能删除。请先停止任务。")
@@ -938,7 +1697,7 @@ def _build_handler():
                         keep_run_ids = {
                             str(j.get("run_id", "") or "")
                             for j in self.server.experiment_jobs.values()
-                            if str(j.get("status", "") or "") in {"queued", "running", "cancelling"}
+                            if str(j.get("status", "") or "") in EXPERIMENT_ACTIVE_STATUSES
                         }
                     result = exp.clear_runs(keep_run_ids=keep_run_ids)
                     self._send_json({"success": True, "data": result})
@@ -1000,28 +1759,51 @@ def _build_handler():
                 if parsed.path == "/api/open_report":
                     trace_id = str(payload.get("trace_id", "latest") or "latest")
                     with self.server.app_lock:
-                        result = json.loads(self.server.app.open_report(trace_id, open_browser=True))
+                        result = json.loads(self.server.app.open_report(trace_id, open_browser=False))
                     self._send_json({"success": True, "data": result})
                     return
                 if parsed.path == "/api/shutdown":
                     self._send_json({"success": True, "data": {"message": "server shutting down"}})
-                    threading.Thread(target=self.server.shutdown, daemon=True).start()
+                    _request_server_stop(self.server, force_exit=True)
+                    return
+                if parsed.path == "/api/restart":
+                    result = _schedule_observatory_restart(self.server)
+                    self._send_json({"success": True, "data": result})
                     return
                 self._send_json({"success": False, "message": "Unknown API path"}, status=HTTPStatus.NOT_FOUND)
             except Exception as exc:
                 self._send_json({"success": False, "message": str(exc)}, status=HTTPStatus.BAD_REQUEST)
 
         def _serve_static(self, path: str) -> None:
-            if path in {"", "/"}:
+            static_root = self.server.static_dir
+            if path == "/next":
+                self.send_response(HTTPStatus.FOUND)
+                self.send_header("Location", "/next/")
+                self.end_headers()
+                return
+            if path.startswith("/next/"):
+                static_root = self.server.next_static_dir
+                next_path = path[len("/next/") :]
+                relative = Path("index.html") if next_path in {"", "/"} else Path(next_path.lstrip("/"))
+            elif path in {"", "/"}:
                 relative = Path("index.html")
             else:
                 relative = Path(path.lstrip("/"))
-            file_path = (self.server.static_dir / relative).resolve()
+            file_path = (static_root / relative).resolve()
             try:
-                file_path.relative_to(self.server.static_dir.resolve())
+                file_path.relative_to(static_root.resolve())
             except ValueError:
                 self._send_json({"success": False, "message": "Forbidden"}, status=HTTPStatus.FORBIDDEN)
                 return
+            if path.startswith("/next/") and (not file_path.exists() or not file_path.is_file()):
+                # Vite SPA fallback: keep /next/#... and future /next/... routes working.
+                fallback = (static_root / "index.html").resolve()
+                try:
+                    fallback.relative_to(static_root.resolve())
+                except ValueError:
+                    fallback = file_path
+                if fallback.exists() and fallback.is_file():
+                    file_path = fallback
             if not file_path.exists() or not file_path.is_file():
                 self._send_json({"success": False, "message": "Not found"}, status=HTTPStatus.NOT_FOUND)
                 return
@@ -1159,6 +1941,22 @@ def _start_llm_review_job(*, server: ObservatoryWebServer, run_id: str, force: b
 
     threading.Thread(target=worker, daemon=True).start()
     return {"job_id": job_id, "run_id": run_id, "success": True, "status": "queued"}
+
+
+def _latest_llm_review_job_for_run(*, server: ObservatoryWebServer, run_id: str) -> dict[str, Any] | None:
+    run_id = str(run_id or "").strip()
+    if not run_id:
+        return None
+    with server.llm_review_jobs_lock:
+        matches = [
+            dict(job)
+            for job in server.llm_review_jobs.values()
+            if str(job.get("run_id", "") or "").strip() == run_id
+        ]
+    if not matches:
+        return None
+    matches.sort(key=lambda item: int(item.get("created_at_ms", 0) or 0), reverse=True)
+    return matches[0]
 
 
 def _start_auto_tuner_llm_job(

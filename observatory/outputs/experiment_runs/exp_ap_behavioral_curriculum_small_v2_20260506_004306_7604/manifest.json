@@ -1,0 +1,1159 @@
+{
+  "run_id": "exp_ap_behavioral_curriculum_small_v2_20260506_004306_7604",
+  "status": "completed",
+  "dataset": {
+    "dataset_id": "ap_behavioral_curriculum_small_v2",
+    "dataset_sha256": "6348920c3615202000c98142f4bc85ce100916fa32972ff6a8138adcef756776",
+    "dataset_ref": {
+      "source": "built_in",
+      "rel_path": "ap_behavioral_curriculum_small_v2.yaml"
+    },
+    "dataset_path": "datasets/ap_behavioral_curriculum_small_v2.yaml",
+    "total_ticks": 300,
+    "effective_text_ticks": 50,
+    "empty_ticks": 250,
+    "labeled_ticks": 50
+  },
+  "options": {
+    "reset_mode": "clear_runtime",
+    "clean_run": false,
+    "export_json": false,
+    "export_html": false,
+    "auto_tune_enabled": true,
+    "auto_tune_short_term": true,
+    "auto_tune_long_term": true,
+    "time_sensor_time_basis": null,
+    "tick_interval_sec": null,
+    "max_ticks": null
+  },
+  "runtime": {
+    "python": "3.11.9 (tags/v3.11.9:de54cf5, Apr  2 2024, 10:12:12) [MSC v.1938 64 bit (AMD64)]",
+    "platform": "win32",
+    "pid": 47604
+  },
+  "started_at_ms": 1777999386791,
+  "finished_at_ms": 1778000410636,
+  "tick_done": 300,
+  "source_tick_done": 300,
+  "synthetic_tick_done": 3,
+  "executed_tick_done_total": 303,
+  "tick_planned": 300,
+  "errors": [],
+  "expectation_contracts": {
+    "registered_count": 3,
+    "success_count": 3,
+    "failure_count": 0,
+    "synthetic_tick_count": 3,
+    "pending_count": 0,
+    "events_path": "observatory/outputs/experiment_runs/exp_ap_behavioral_curriculum_small_v2_20260506_004306_7604/expectation_contract_events.jsonl"
+  },
+  "runner_timing_path": "observatory/outputs/experiment_runs/exp_ap_behavioral_curriculum_small_v2_20260506_004306_7604/runner_timing.jsonl",
+  "registered_count": 3,
+  "success_count": 3,
+  "failure_count": 0,
+  "synthetic_tick_count": 3,
+  "pending_count": 0,
+  "auto_tuner": {
+    "enabled": true,
+    "prepare": {
+      "enabled": true,
+      "applied": {
+        "persist_rules_path": "observatory/outputs/auto_tuner/overrides/innate_rules.persisted.yaml",
+        "runtime_rules_path": "observatory/outputs/experiment_runs/exp_ap_behavioral_curriculum_small_v2_20260506_004306_7604/auto_tuner.innate_rules.runtime.yaml",
+        "migrate": {
+          "moved_count": 0,
+          "moved": []
+        },
+        "sanitized_param_stores": false,
+        "innate_script_reload_config": "OK",
+        "module_reload": {
+          "action": {
+            "patch_path": "observatory/outputs/experiment_runs/exp_ap_behavioral_curriculum_small_v2_20260506_004306_7604/auto_tuner.action_config.runtime.yaml",
+            "code": "OK"
+          },
+          "attention": {
+            "patch_path": "observatory/outputs/experiment_runs/exp_ap_behavioral_curriculum_small_v2_20260506_004306_7604/auto_tuner.attention_config.runtime.yaml",
+            "code": "OK"
+          },
+          "cognitive_feeling": {
+            "patch_path": "observatory/outputs/experiment_runs/exp_ap_behavioral_curriculum_small_v2_20260506_004306_7604/auto_tuner.cognitive_feeling_config.runtime.yaml",
+            "code": "OK"
+          },
+          "emotion": {
+            "patch_path": "observatory/outputs/experiment_runs/exp_ap_behavioral_curriculum_small_v2_20260506_004306_7604/auto_tuner.emotion_config.runtime.yaml",
+            "code": "OK"
+          },
+          "hdb": {
+            "patch_path": "observatory/outputs/experiment_runs/exp_ap_behavioral_curriculum_small_v2_20260506_004306_7604/auto_tuner.hdb_config.runtime.yaml",
+            "code": "OK"
+          },
+          "observatory": {
+            "patch_path": "observatory/outputs/experiment_runs/exp_ap_behavioral_curriculum_small_v2_20260506_004306_7604/auto_tuner.observatory_config.runtime.yaml",
+            "code": "OK"
+          },
+          "state_pool": {
+            "patch_path": "observatory/outputs/experiment_runs/exp_ap_behavioral_curriculum_small_v2_20260506_004306_7604/auto_tuner.state_pool_config.runtime.yaml",
+            "code": "OK"
+          }
+        }
+      }
+    },
+    "long_term": {
+      "enabled": true,
+      "applied": true,
+      "applied_count": 3,
+      "rollback_point": {
+        "point_id": "rb_1778000253877_54",
+        "created_at_ms": 1778000253882,
+        "reason": "long_term_before_update",
+        "summary": {
+          "trace_id": "exp_complete",
+          "timing_mean": 866.875,
+          "raw_mean": 286.45,
+          "evaluated_trials": [
+            {
+              "trial_id": "trial_1777944242199_929",
+              "result": "success",
+              "rolled_back": false,
+              "metric_key": "cam_item_count"
+            }
+          ]
+        },
+        "persisted_params": {
+          "hdb.stimulus_level_max_rounds": 20,
+          "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+          "state_pool.pool_max_items": 3654,
+          "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+          "cognitive_feeling.pressure_ev_threshold": 0.26,
+          "state_pool.priority_neutralization_min_effect_threshold": 0.05,
+          "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+          "state_pool.default_ev_decay_ratio": 0.995,
+          "state_pool.default_er_decay_ratio": 0.973,
+          "state_pool.soft_capacity_start_items": 100,
+          "hdb.ev_propagation_ratio": 1,
+          "observatory.attention_memory_energy_ratio": 0.58,
+          "attention.keep_score_ratio_base": 0.4,
+          "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.29,
+          "state_pool.neutralization_min_effect_threshold": 0.14,
+          "state_pool.soft_capacity_full_items": 800,
+          "attention.max_cam_items": 18,
+          "hdb.internal_resolution_flat_unit_cap_per_structure": 259,
+          "hdb.internal_resolution_detail_budget_base": 98,
+          "action.drive_decay_ratio": 0.852,
+          "action.drive_max": 3.0300000000000002,
+          "iesm.rules.innate_action_recall_from_expect_pressure.cooldown_ticks": 1,
+          "attention.attention_filter_gain_floor": 0.58
+        }
+      },
+      "evaluated_trials": [
+        {
+          "trial_id": "trial_1777944242199_929",
+          "result": "success",
+          "rolled_back": false,
+          "metric_key": "cam_item_count"
+        }
+      ],
+      "observation_record": [],
+      "llm_auto_loop": {
+        "triggered": true,
+        "analysis": {
+          "triggered": true,
+          "success": true,
+          "public_release_sanitized": true,
+          "note": "AutoTuner LLM suggestion history is runtime/private output and is not included in the public release."
+        },
+        "apply_result": {
+          "success": true,
+          "changed": false,
+          "rollback_point": null,
+          "applied_rule_changes": [],
+          "added_experiments": [],
+          "skipped_changes": []
+        },
+        "summary": {
+          "issue_count": 150,
+          "severe_issue_count": 142,
+          "failure_count": 1985,
+          "rollback_count": 1983,
+          "unhealthy_score": 4110,
+          "issues": [
+            {
+              "metric_key": "induction_raw_residual_exact_structure_budget_weight",
+              "mean": 923.3687614102495,
+              "std": 210.9513150215816,
+              "latest": 1358.04855591,
+              "severity": 114.07985147916666,
+              "high_ratio": 114.07985147916666,
+              "low_ratio": 0,
+              "flatline": false
+            },
+            {
+              "metric_key": "hdb_structure_count",
+              "mean": 9558.725,
+              "std": 53.29961890107658,
+              "latest": 9638,
+              "severity": 36.06923076923077,
+              "high_ratio": 36.06923076923077,
+              "low_ratio": 0,
+              "flatline": false
+            },
+            {
+              "metric_key": "induction_energy_graph_layer_max_width",
+              "mean": 213.75,
+              "std": 119.22829991239496,
+              "latest": 59,
+              "severity": 15.9375,
+              "high_ratio": 15.9375,
+              "low_ratio": 0,
+              "flatline": false
+            },
+            {
+              "metric_key": "pool_ev_to_er_ratio",
+              "mean": 7.9194711435,
+              "std": 4.650556386703387,
+              "latest": 1.75482977,
+              "severity": 13.122721746153847,
+              "high_ratio": 13.122721746153847,
+              "low_ratio": 0,
+              "flatline": false
+            },
+            {
+              "metric_key": "induction_raw_residual_materialized_structure_budget_weight",
+              "mean": 24.649270175,
+              "std": 39.68938639534367,
+              "latest": 0,
+              "severity": 12.436846116666667,
+              "high_ratio": 12.436846116666667,
+              "low_ratio": 0,
+              "flatline": false
+            },
+            {
+              "metric_key": "induction_induced_target_count",
+              "mean": 153.45,
+              "std": 68.23706837196336,
+              "latest": 51,
+              "severity": 10.583333333333334,
+              "high_ratio": 10.583333333333334,
+              "low_ratio": 0,
+              "flatline": false
+            },
+            {
+              "metric_key": "internal_to_external_sa_ratio",
+              "mean": 88.69977906800001,
+              "std": 37.55601054091758,
+              "latest": 106,
+              "severity": 8.333333333333334,
+              "high_ratio": 8.333333333333334,
+              "low_ratio": 0,
+              "flatline": false
+            },
+            {
+              "metric_key": "energy_balance_ratio_smooth",
+              "mean": 7.763059368,
+              "std": 2.8527094066545606,
+              "latest": 1.4973598,
+              "severity": 7.38204413076923,
+              "high_ratio": 7.38204413076923,
+              "low_ratio": 0,
+              "flatline": false
+            },
+            {
+              "metric_key": "nt_DA",
+              "mean": 0.61295851048745,
+              "std": 0.07969740018838573,
+              "latest": 0.39972354256070175,
+              "severity": 6,
+              "high_ratio": 6,
+              "low_ratio": 0,
+              "flatline": false
+            },
+            {
+              "metric_key": "nt_SER",
+              "mean": 0.6020358971284713,
+              "std": 0.032204551925691584,
+              "latest": 0.544821110017812,
+              "severity": 5.66666667,
+              "high_ratio": 5.66666667,
+              "low_ratio": 0,
+              "flatline": false
+            },
+            {
+              "metric_key": "induction_raw_residual_entry_routed_to_structure_count",
+              "mean": 56.825,
+              "std": 7.358286145564062,
+              "latest": 57,
+              "severity": 4.833333333333333,
+              "high_ratio": 4.833333333333333,
+              "low_ratio": 0,
+              "flatline": false
+            },
+            {
+              "metric_key": "induction_raw_residual_entry_with_existing_structure_count",
+              "mean": 56.825,
+              "std": 7.358286145564062,
+              "latest": 57,
+              "severity": 4.833333333333333,
+              "high_ratio": 4.833333333333333,
+              "low_ratio": 0,
+              "flatline": false
+            },
+            {
+              "metric_key": "attention_state_pool_candidate_count",
+              "mean": 329.225,
+              "std": 14.416115114690225,
+              "latest": 353,
+              "severity": 4.65625,
+              "high_ratio": 4.65625,
+              "low_ratio": 0,
+              "flatline": false
+            },
+            {
+              "metric_key": "induction_energy_graph_layer_total_nodes",
+              "mean": 213.75,
+              "std": 119.22829991239496,
+              "latest": 59,
+              "severity": 4.645833333333333,
+              "high_ratio": 4.645833333333333,
+              "low_ratio": 0,
+              "flatline": false
+            },
+            {
+              "metric_key": "induction_targets_per_source_mean",
+              "mean": 13.60625,
+              "std": 2.0324611773660033,
+              "latest": 12.75,
+              "severity": 4.546875,
+              "high_ratio": 4.546875,
+              "low_ratio": 0,
+              "flatline": false
+            },
+            {
+              "metric_key": "time_sensor_delayed_task_executed_count",
+              "mean": 0.375,
+              "std": 0.6959705453537527,
+              "latest": 0,
+              "severity": 4,
+              "high_ratio": 4,
+              "low_ratio": 0,
+              "flatline": false
+            },
+            {
+              "metric_key": "hdb_episodic_count",
+              "mean": 618.5,
+              "std": 11.543396380615196,
+              "latest": 638,
+              "severity": 3.557142857142857,
+              "high_ratio": 3.557142857142857,
+              "low_ratio": 0,
+              "flatline": false
+            },
+            {
+              "metric_key": "induction_energy_graph_frontier_pruned_count",
+              "mean": 154.075,
+              "std": 71.87954768221626,
+              "latest": 43,
+              "severity": 3.328125,
+              "high_ratio": 3.328125,
+              "low_ratio": 0,
+              "flatline": false
+            },
+            {
+              "metric_key": "induction_energy_graph_frontier_generated_count",
+              "mean": 58,
+              "std": 77.29974126735483,
+              "latest": 8,
+              "severity": 3.234375,
+              "high_ratio": 3.234375,
+              "low_ratio": 0,
+              "flatline": false
+            },
+            {
+              "metric_key": "induction_source_available_with_local_target_hint_count",
+              "mean": 89.2,
+              "std": 4.8020828814171885,
+              "latest": 86,
+              "severity": 3.2083333333333335,
+              "high_ratio": 3.2083333333333335,
+              "low_ratio": 0,
+              "flatline": false
+            },
+            {
+              "metric_key": "induction_raw_residual_entry_count",
+              "mean": 57.925,
+              "std": 7.322525179198773,
+              "latest": 57,
+              "severity": 3,
+              "high_ratio": 3,
+              "low_ratio": 0,
+              "flatline": false
+            },
+            {
+              "metric_key": "induction_structure_target_count",
+              "mean": 54.425,
+              "std": 8.129844709464013,
+              "latest": 51,
+              "severity": 2.9444444444444446,
+              "high_ratio": 2.9444444444444446,
+              "low_ratio": 0,
+              "flatline": false
+            },
+            {
+              "metric_key": "induction_raw_residual_existing_structure_target_count",
+              "mean": 56.825,
+              "std": 7.358286145564062,
+              "latest": 57,
+              "severity": 2.888888888888889,
+              "high_ratio": 2.888888888888889,
+              "low_ratio": 0,
+              "flatline": false
+            },
+            {
+              "metric_key": "induction_raw_residual_structure_target_count",
+              "mean": 53.375,
+              "std": 6.905387389567656,
+              "latest": 51,
+              "severity": 2.8333333333333335,
+              "high_ratio": 2.8333333333333335,
+              "low_ratio": 0,
+              "flatline": false
+            }
+          ],
+          "unhealthy_rules": [
+            {
+              "rule_id": "builtin.endogenous.recover::state_pool.default_er_decay_ratio",
+              "failure_count": 68,
+              "rollback_count": 68,
+              "success_count": 119,
+              "avg_improvement": 5.4480385086108924,
+              "last_result": "neutral"
+            },
+            {
+              "rule_id": "builtin.endogenous.recover::attention.max_cam_items",
+              "failure_count": 64,
+              "rollback_count": 64,
+              "success_count": 71,
+              "avg_improvement": 0.029846938775510177,
+              "last_result": "success"
+            },
+            {
+              "rule_id": "builtin.endogenous.recover::state_pool.soft_capacity_start_items",
+              "failure_count": 62,
+              "rollback_count": 62,
+              "success_count": 182,
+              "avg_improvement": 24.329843724431377,
+              "last_result": "neutral"
+            },
+            {
+              "rule_id": "builtin.endogenous.recover::state_pool.soft_capacity_full_items",
+              "failure_count": 55,
+              "rollback_count": 55,
+              "success_count": 164,
+              "avg_improvement": 27.65298514142502,
+              "last_result": "neutral"
+            },
+            {
+              "rule_id": "builtin.endogenous.recover::hdb.internal_resolution_max_structures_per_tick",
+              "failure_count": 50,
+              "rollback_count": 50,
+              "success_count": 70,
+              "avg_improvement": 0.1866002214839423,
+              "last_result": "neutral"
+            },
+            {
+              "rule_id": "builtin.cfs.dissonance.tighten",
+              "failure_count": 48,
+              "rollback_count": 48,
+              "success_count": 479,
+              "avg_improvement": 0.16625843896250256,
+              "last_result": "success"
+            },
+            {
+              "rule_id": "catalog::attention_state_pool_candidate_count::high::attention.top_n",
+              "failure_count": 45,
+              "rollback_count": 45,
+              "success_count": 19,
+              "avg_improvement": -31.970383275261323,
+              "last_result": "neutral"
+            },
+            {
+              "rule_id": "catalog::attention_state_pool_candidate_count::high::attention.size_cost_max_cost",
+              "failure_count": 45,
+              "rollback_count": 45,
+              "success_count": 23,
+              "avg_improvement": -18.28980392156861,
+              "last_result": "success"
+            },
+            {
+              "rule_id": "catalog::cfs_dissonance_max::high::cognitive_feeling.dissonance_cp_abs_threshold",
+              "failure_count": 44,
+              "rollback_count": 44,
+              "success_count": 59,
+              "avg_improvement": 0.02918285980434782,
+              "last_result": "neutral"
+            },
+            {
+              "rule_id": "catalog::pool_active_item_count::high::state_pool.pool_max_items",
+              "failure_count": 42,
+              "rollback_count": 42,
+              "success_count": 6,
+              "avg_improvement": -8.726160337552741,
+              "last_result": "failure"
+            },
+            {
+              "rule_id": "catalog::pool_active_item_count::high::state_pool.fatigue_window_ticks",
+              "failure_count": 38,
+              "rollback_count": 38,
+              "success_count": 2,
+              "avg_improvement": -16.6734375,
+              "last_result": "failure"
+            },
+            {
+              "rule_id": "catalog::cfs_dissonance_max::high::cognitive_feeling.dissonance_cp_abs_max",
+              "failure_count": 36,
+              "rollback_count": 36,
+              "success_count": 54,
+              "avg_improvement": 0.025779321808080805,
+              "last_result": "neutral"
+            },
+            {
+              "rule_id": "catalog::action_drive_active_count::flatline::action.drive_decay_ratio",
+              "failure_count": 36,
+              "rollback_count": 36,
+              "success_count": 47,
+              "avg_improvement": 0.11628859707064423,
+              "last_result": "neutral"
+            },
+            {
+              "rule_id": "catalog::pool_total_ev::low::attention.keep_score_ratio_concentration_gain",
+              "failure_count": 34,
+              "rollback_count": 34,
+              "success_count": 17,
+              "avg_improvement": -1.0021916727903233,
+              "last_result": "failure"
+            },
+            {
+              "rule_id": "catalog::pool_total_ev::low::attention.keep_score_ratio_min",
+              "failure_count": 34,
+              "rollback_count": 34,
+              "success_count": 15,
+              "avg_improvement": -1.2740565338620684,
+              "last_result": "failure"
+            },
+            {
+              "rule_id": "catalog::action_executed_attention_focus::high::iesm.rules.innate_action_attention_focus_from_core_cfs.when.cfs.min_strength",
+              "failure_count": 34,
+              "rollback_count": 34,
+              "success_count": 84,
+              "avg_improvement": 0.06807081807081808,
+              "last_result": "neutral"
+            },
+            {
+              "rule_id": "catalog::attention_suppressed_total_energy::flatline::attention.keep_score_ratio_concentration_gain",
+              "failure_count": 33,
+              "rollback_count": 33,
+              "success_count": 22,
+              "avg_improvement": 0.02741844504174518,
+              "last_result": "failure"
+            },
+            {
+              "rule_id": "catalog::action_executed_attention_focus::high::iesm.rules.innate_action_attention_focus_from_core_cfs.cooldown_ticks",
+              "failure_count": 32,
+              "rollback_count": 32,
+              "success_count": 82,
+              "avg_improvement": 0.06757369614512472,
+              "last_result": "neutral"
+            },
+            {
+              "rule_id": "catalog::action_drive_active_count::flatline::action.drive_max",
+              "failure_count": 29,
+              "rollback_count": 29,
+              "success_count": 59,
+              "avg_improvement": 0.14470460864313228,
+              "last_result": "neutral"
+            },
+            {
+              "rule_id": "catalog::attention_suppressed_total_energy::flatline::attention.keep_score_ratio_base",
+              "failure_count": 29,
+              "rollback_count": 29,
+              "success_count": 20,
+              "avg_improvement": 0.037435567100039806,
+              "last_result": "success"
+            },
+            {
+              "rule_id": "builtin.resource.hdb_fuse.raw_spike",
+              "failure_count": 26,
+              "rollback_count": 26,
+              "success_count": 31,
+              "avg_improvement": 5.025000000000002,
+              "last_result": "success"
+            },
+            {
+              "rule_id": "catalog::pool_total_er::low::attention.keep_score_ratio_base",
+              "failure_count": 25,
+              "rollback_count": 25,
+              "success_count": 15,
+              "avg_improvement": 0.902212188911108,
+              "last_result": "failure"
+            },
+            {
+              "rule_id": "catalog::pool_total_er::low::observatory.attention_memory_energy_ratio",
+              "failure_count": 25,
+              "rollback_count": 25,
+              "success_count": 16,
+              "avg_improvement": 2.819576612284885,
+              "last_result": "failure"
+            },
+            {
+              "rule_id": "catalog::pool_total_ev::low::observatory.attention_memory_energy_ratio",
+              "failure_count": 24,
+              "rollback_count": 24,
+              "success_count": 43,
+              "avg_improvement": 3.453225717959786,
+              "last_result": "success"
+            }
+          ],
+          "trigger_score": 6,
+          "reason": "unhealthy_score_trigger"
+        },
+        "maintenance": {
+          "changed": false,
+          "updated": []
+        }
+      },
+      "observation_review": {
+        "triggered": false,
+        "reason": "cfg.llm_auto_validation_enabled=false"
+      },
+      "snapshots": {
+        "updated_at_ms": 1778000253731,
+        "run_id": "exp_ap_behavioral_curriculum_small_v2_20260506_004306_7604",
+        "window_size": 40,
+        "endogenous_balance": {
+          "needs_recovery": false,
+          "severity": 0,
+          "mean_internal_sa": 104.575,
+          "latest_internal_sa": 106,
+          "mean_external_sa": 5.9,
+          "latest_external_sa": 0,
+          "mean_ratio": 88.69977906800001,
+          "latest_ratio": 106,
+          "mean_selected_structures": 3.7,
+          "latest_selected_structures": 4,
+          "current_structure_cap": 11,
+          "mean_raw_units": 286.45,
+          "latest_raw_units": 252,
+          "mean_selected_units": 100.825,
+          "latest_selected_units": 104,
+          "mean_detail_budget": 104,
+          "latest_detail_budget": 104,
+          "mean_cam_items": 3.95,
+          "latest_cam_items": 4,
+          "mean_pool_items": 347.675,
+          "latest_pool_items": 361,
+          "mean_runtime_resolution_degraded_items": 75.625,
+          "latest_runtime_resolution_degraded_items": 70,
+          "mean_runtime_resolution_active_components": 102.1,
+          "latest_runtime_resolution_active_components": 93,
+          "mean_runtime_resolution_dropped_components": 208.7,
+          "latest_runtime_resolution_dropped_components": 191,
+          "runtime_resolution_visible_ratio": 0.32850707850707855,
+          "mean_hdb_residual_diff_ratio": 0.9759980017499996,
+          "latest_hdb_residual_diff_ratio": 0.97584276,
+          "mean_hdb_same_content_multi_context_ratio": 0,
+          "latest_hdb_same_content_multi_context_ratio": 0,
+          "internal_deficit": 0,
+          "ratio_deficit": 0,
+          "selected_deficit": 0,
+          "dominance_lost": false,
+          "source_supply_healthy": true,
+          "source_supply_thin": false,
+          "context_branching_thin": true
+        },
+        "attention_special_selection": {
+          "mean_standalone": 0,
+          "latest_standalone": 0,
+          "mean_carrier": 3.275,
+          "latest_carrier": 4,
+          "mean_repeat_penalty": 0.45125285725,
+          "latest_repeat_penalty": 0,
+          "mean_reward_selected": 3.275,
+          "mean_cam": 3.95,
+          "standalone_share": 0,
+          "carrier_share": 1,
+          "standalone_hot": false,
+          "carrier_thin": false,
+          "repeat_penalty_weak": false,
+          "fatigue_overclamped": false
+        },
+        "ev_balance": {
+          "enabled": false,
+          "reason": "disabled_by_config"
+        },
+        "cognitive_stitching": {
+          "mean_raw_accepted": 0,
+          "mean_candidates": 0,
+          "latest_candidates": 0,
+          "mean_rejected_low_score": 0,
+          "mean_rejected_component_limit": 0,
+          "mean_rejected_non_positive_edge": 0,
+          "mean_replacements": 0,
+          "mean_kept_existing": 0,
+          "mean_threshold_margin": 0,
+          "mean_actions": 0,
+          "latest_actions": 0,
+          "mean_created": 0,
+          "mean_extended": 0,
+          "mean_merged": 0,
+          "mean_reinforced": 0,
+          "mean_event_grasp_emitted": 0,
+          "mean_event_grasp_selected": 0,
+          "mean_event_grasp_post_action_seed": 0,
+          "mean_event_grasp_post_action_selected": 0,
+          "mean_narrative_grasp": 0,
+          "mean_narrative_grasp_max": 0,
+          "max_narrative_grasp_max": 0,
+          "mean_narrative_grasp_positive_count": 0,
+          "latest_narrative_grasp_positive_count": 0,
+          "mean_stimulus_new_structures": 0,
+          "latest_stimulus_new_structures": 0,
+          "mean_timing": 0,
+          "candidate_to_action_ratio": 0,
+          "candidate_rich_but_action_starved": false,
+          "candidate_supply_thin": true,
+          "upstream_structure_alive": false,
+          "timing_hot": false,
+          "narrative_zone_alive": false,
+          "narrative_zone_mature": false,
+          "output_total": 0,
+          "competition_pressure": 0,
+          "low_score_dominant": false,
+          "component_limit_dominant": false,
+          "non_positive_edge_dominant": false
+        },
+        "timing_hotspot": {
+          "summary": {
+            "timing_total_logic_ms": {
+              "mean": 866.875,
+              "latest": 721,
+              "max": 2573,
+              "expected_max": 8000,
+              "hot": false
+            },
+            "timing_structure_level_ms": {
+              "mean": 23.075,
+              "latest": 19,
+              "max": 34,
+              "expected_max": 1400,
+              "hot": false
+            },
+            "timing_stimulus_level_ms": {
+              "mean": 410.475,
+              "latest": 371,
+              "max": 1953,
+              "expected_max": 4200,
+              "hot": false
+            },
+            "timing_cache_neutralization_ms": {
+              "mean": 44.825,
+              "latest": 29,
+              "max": 106,
+              "expected_max": 2400,
+              "hot": false
+            },
+            "timing_maintenance_ms": {
+              "mean": 25.475,
+              "latest": 23,
+              "max": 44,
+              "expected_max": 900,
+              "hot": false
+            },
+            "timing_attention_ms": {
+              "mean": 58.375,
+              "latest": 61,
+              "max": 75,
+              "expected_max": 240,
+              "hot": false
+            },
+            "timing_sensor_ms": {
+              "mean": 3.9,
+              "latest": 0,
+              "max": 31,
+              "expected_max": 120,
+              "hot": false
+            },
+            "timing_time_sensor_ms": {
+              "mean": 20.175,
+              "latest": 3,
+              "max": 81,
+              "expected_max": 80,
+              "hot": true
+            },
+            "timing_cognitive_stitching_ms": {
+              "mean": 0,
+              "latest": 0,
+              "max": 0,
+              "expected_max": 1200,
+              "hot": false
+            }
+          },
+          "grouped": {
+            "hdb": {
+              "label": "HDB 主链",
+              "keys": [
+                "timing_structure_level_ms",
+                "timing_stimulus_level_ms"
+              ],
+              "mean_ms": 433.55,
+              "latest_ms": 390,
+              "max_ms": 1953,
+              "share": 0.5001297764960346,
+              "hot": false,
+              "pressure": 0.09773214285714286,
+              "severity": 0.272777564630755
+            },
+            "state_pool": {
+              "label": "状态池与中和",
+              "keys": [
+                "timing_cache_neutralization_ms",
+                "timing_maintenance_ms"
+              ],
+              "mean_ms": 70.30000000000001,
+              "latest_ms": 52,
+              "max_ms": 106,
+              "share": 0.08109589041095892,
+              "hot": false,
+              "pressure": 0.028305555555555556,
+              "severity": 0.05668911719939118
+            },
+            "attention": {
+              "label": "注意力",
+              "keys": [
+                "timing_attention_ms"
+              ],
+              "mean_ms": 58.375,
+              "latest_ms": 61,
+              "max_ms": 75,
+              "share": 0.06733958183129056,
+              "hot": false,
+              "pressure": 0.24322916666666666,
+              "severity": 0.26679802030761834
+            },
+            "sensor": {
+              "label": "文本感受器",
+              "keys": [
+                "timing_sensor_ms"
+              ],
+              "mean_ms": 3.9,
+              "latest_ms": 0,
+              "max_ms": 31,
+              "share": 0.004498918529199711,
+              "hot": false,
+              "pressure": 0.0325,
+              "severity": 0.0340746214852199
+            },
+            "time_sensor": {
+              "label": "时间感受器",
+              "keys": [
+                "timing_time_sensor_ms"
+              ],
+              "mean_ms": 20.175,
+              "latest_ms": 3,
+              "max_ms": 81,
+              "share": 0.0232732516222062,
+              "hot": true,
+              "pressure": 0.2521875,
+              "severity": 0.4603331380677722
+            },
+            "cognitive_stitching": {
+              "label": "认知拼接",
+              "keys": [
+                "timing_cognitive_stitching_ms"
+              ],
+              "mean_ms": 0,
+              "latest_ms": 0,
+              "max_ms": 0,
+              "share": 0,
+              "hot": false,
+              "pressure": 0,
+              "severity": 0
+            }
+          },
+          "ranked_group_ids": [
+            "time_sensor",
+            "hdb",
+            "attention",
+            "state_pool",
+            "sensor",
+            "cognitive_stitching"
+          ],
+          "dominant_group_id": "time_sensor",
+          "dominant_group_label": "时间感受器",
+          "total_hot": false,
+          "hdb_hot": false,
+          "structure_hot": false,
+          "stimulus_hot": false,
+          "state_pool_hot": false,
+          "cache_hot": false,
+          "maintenance_hot": false,
+          "attention_hot": false,
+          "sensor_hot": false,
+          "time_sensor_hot": true,
+          "cognitive_stitching_hot": false,
+          "raw_unit_pressure": false,
+          "merged_pressure": false,
+          "pool_load_high": true,
+          "cache_residual_high": true,
+          "attention_fanout_high": true,
+          "attention_candidate_pressure": true,
+          "time_sensor_task_pressure": false,
+          "sensor_echo_pressure": false
+        }
+      }
+    }
+  },
+  "time_sensor_runtime_override": {
+    "time_basis": "tick",
+    "tick_interval_sec": 3
+  },
+  "dataset_runtime_override": {
+    "app_config_override": {},
+    "app_config_override_keys": [],
+    "experiment_default_overrides": {
+      "input_chunking_enabled": true,
+      "enable_goal_b_char_sa_string_mode": true,
+      "induction_projection_mode": "growth",
+      "enable_cognitive_stitching": false,
+      "cognitive_stitching_stage": "disabled"
+    },
+    "experiment_default_overrides_applied": {
+      "input_chunking_enabled": true,
+      "enable_goal_b_char_sa_string_mode": true,
+      "induction_projection_mode": true,
+      "enable_cognitive_stitching": true,
+      "cognitive_stitching_stage": true
+    },
+    "applied": true,
+    "effective_app_baseline": {
+      "input_chunking_enabled": true,
+      "enable_goal_b_char_sa_string_mode": true,
+      "induction_projection_mode": "growth",
+      "enable_cognitive_stitching": false,
+      "cognitive_stitching_stage": "disabled"
+    },
+    "baseline_conforms_to_growth_cs_off": true
+  },
+  "runtime_clock_override": {
+    "mode": "dataset_tick",
+    "base_now_ms": 1777999386791,
+    "tick_interval_sec": 3
+  },
+  "runtime_baseline": {
+    "hdb_before_reset": {
+      "summary": {
+        "structure_count": 6115,
+        "structure_db_count": 6115,
+        "group_count": 0,
+        "episodic_count": 335,
+        "memory_activation_count": 0,
+        "memory_activation_total_er": 0,
+        "memory_activation_total_ev": 0,
+        "memory_activation_total_energy": 0,
+        "issue_count": 0,
+        "active_repair_job_count": 0,
+        "contextual_structure_count": 0,
+        "multi_context_structure_count": 0,
+        "structure_context_path_depth_mean": 0,
+        "same_content_multi_context_count": 0,
+        "diff_entry_count": 5219,
+        "contextual_diff_entry_count": 0,
+        "residual_diff_entry_count": 5111,
+        "diff_entry_with_memory_ref_count": 2579
+      }
+    },
+    "hdb_after_reset": {
+      "summary": {
+        "structure_count": 6115,
+        "structure_db_count": 6115,
+        "group_count": 0,
+        "episodic_count": 335,
+        "memory_activation_count": 0,
+        "memory_activation_total_er": 0,
+        "memory_activation_total_ev": 0,
+        "memory_activation_total_energy": 0,
+        "issue_count": 0,
+        "active_repair_job_count": 0,
+        "contextual_structure_count": 0,
+        "multi_context_structure_count": 0,
+        "structure_context_path_depth_mean": 0,
+        "same_content_multi_context_count": 0,
+        "diff_entry_count": 5219,
+        "contextual_diff_entry_count": 0,
+        "residual_diff_entry_count": 5111,
+        "diff_entry_with_memory_ref_count": 2579
+      }
+    }
+  },
+  "effective_reset_mode": "clear_runtime",
+  "clean_run_requested": false,
+  "tick_loop_finished_at_ms": 1778000252644,
+  "runner_timing": {
+    "totals_ms": {
+      "tick_loop_wall_ms": 856735,
+      "run_cycle_wall_ms": 330742,
+      "run_cycle_lock_wait_ms": 0,
+      "metrics_extract_ms": 2421,
+      "metrics_serialize_ms": 573,
+      "metrics_write_ms": 40,
+      "expectation_contract_ms": 0,
+      "manifest_update_ms": 0,
+      "manifest_persist_ms": 1260,
+      "auto_tuner_short_term_ms": 488742,
+      "progress_callback_ms": 14,
+      "file_flush_ms": 19
+    },
+    "max_ms": {
+      "tick_loop_wall_ms": 19367,
+      "run_cycle_wall_ms": 4321,
+      "run_cycle_lock_wait_ms": 0,
+      "metrics_extract_ms": 39,
+      "metrics_serialize_ms": 7,
+      "metrics_write_ms": 13,
+      "expectation_contract_ms": 0,
+      "manifest_update_ms": 0,
+      "manifest_persist_ms": 43,
+      "auto_tuner_short_term_ms": 18720,
+      "progress_callback_ms": 2,
+      "file_flush_ms": 6
+    },
+    "executed_tick_count": 303,
+    "avg_ms": {
+      "tick_loop_wall_ms": 2827.508,
+      "run_cycle_wall_ms": 1091.558,
+      "run_cycle_lock_wait_ms": 0,
+      "metrics_extract_ms": 7.99,
+      "metrics_serialize_ms": 1.891,
+      "metrics_write_ms": 0.132,
+      "expectation_contract_ms": 0,
+      "manifest_update_ms": 0,
+      "manifest_persist_ms": 4.158,
+      "auto_tuner_short_term_ms": 1613.01,
+      "progress_callback_ms": 0.046,
+      "file_flush_ms": 0.063
+    }
+  },
+  "idle_consolidation": {
+    "hdb": {
+      "success": true,
+      "code": "OK",
+      "message": "HDB 闲时巩固完成 / HDB idle consolidation completed",
+      "data": {
+        "reason": "experiment_run_completed",
+        "timestamp_ms": 1778000352600,
+        "rebuild_pointer_index": true,
+        "apply_soft_limits": true,
+        "batch_limit": 0,
+        "pointer_index_before": {
+          "primary_pointer_count": 9638,
+          "fallback_pointer_count": 9638,
+          "signature_index_count": 18415,
+          "recent_cache_count": 64,
+          "exact_lookup_cache_count": 5494,
+          "numeric_bucket_family_count": 19,
+          "numeric_bucket_count": 40
+        },
+        "pointer_index_after": {
+          "primary_pointer_count": 9638,
+          "fallback_pointer_count": 9638,
+          "signature_index_count": 18415,
+          "recent_cache_count": 0,
+          "exact_lookup_cache_count": 0,
+          "numeric_bucket_family_count": 19,
+          "numeric_bucket_count": 0
+        },
+        "scanned_structure_db_count": 9638,
+        "updated_structure_db_count": 0,
+        "trimmed_diff_entry_total": 0,
+        "trimmed_group_entry_total": 0
+      },
+      "error": null,
+      "meta": {
+        "module": "hdb",
+        "interface": "idle_consolidate_hdb",
+        "trace_id": "exp_idle_consolidate",
+        "tick_id": "",
+        "elapsed_ms": 5530,
+        "logged": true,
+        "version": "1.0.0",
+        "schema_version": "1.1"
+      }
+    },
+    "cognitive_stitching": {
+      "success": true,
+      "code": "OK",
+      "message": "cognitive stitching idle consolidation completed",
+      "trace_id": "exp_idle_consolidate_cs",
+      "tick_id": "exp_idle_consolidate",
+      "elapsed_ms": 0,
+      "data": {
+        "enabled": true,
+        "reason": "experiment_run_completed",
+        "timestamp_ms": 1778000358130,
+        "event_count": 0,
+        "consolidated_event_count": 0,
+        "materialized_top_n": 96,
+        "materialized_diff_entry_total": 0,
+        "avg_parent_depth_before": 0,
+        "avg_parent_depth_after": 0,
+        "max_parent_depth_before": 0,
+        "max_parent_depth_after": 0,
+        "parent_ref_total_before": 0,
+        "parent_ref_total_after": 0,
+        "delta_diff_entry_total_before": 0,
+        "delta_diff_entry_total_after": 0,
+        "materialized_event_count_before": 0,
+        "materialized_event_count_after": 0,
+        "materialized_entry_total_before": 0,
+        "materialized_entry_total_after": 0,
+        "persist_events_enabled": true,
+        "persisted_event_count": 0,
+        "persist_results_preview": [],
+        "idle_consolidate_clear_all_caches": true,
+        "released_cache_event_count": 0,
+        "released_cache_row_total": 0,
+        "released_cache_est_bytes": 0,
+        "effective_max_events": 256
+      }
+    }
+  },
+  "hdb_pending_persistence_flush": {
+    "structure_count": 4032,
+    "db_count": 5134,
+    "batched": false,
+    "elapsed_ms": 52502,
+    "collect_elapsed_ms": 7,
+    "structure_elapsed_ms": 17364,
+    "db_elapsed_ms": 31356,
+    "structure_bytes_total": 24245954,
+    "db_bytes_total": 41384563,
+    "bytes_total": 65630517,
+    "structure_bytes_per_file_mean": 6013.381,
+    "db_bytes_per_file_mean": 8060.881,
+    "dirty_structure_pending_count_before": 4032,
+    "dirty_db_pending_count_before": 5134,
+    "parallel_enabled": false,
+    "parallel_workers": 0,
+    "backend": "sqlite",
+    "sqlite_path": "hdb/data/hdb_structure_store.sqlite3",
+    "sqlite_commit_elapsed_ms": 3771
+  },
+  "completion_timing": {
+    "auto_tuner_long_term_ms": 99952,
+    "idle_consolidation_hdb_ms": 5530,
+    "idle_consolidation_cognitive_stitching_ms": 0,
+    "hdb_pending_persistence_flush_ms": 52502,
+    "total_after_tick_loop_ms": 157985
+  },
+  "total_wall_ms": 1023845,
+  "tick_loop_wall_ms": 865853,
+  "release_note": "Sanitized demo run record. Local absolute paths and private LLM endpoints were removed for public release."
+}

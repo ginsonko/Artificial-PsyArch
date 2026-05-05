@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import json
 import os
 import shutil
 import sys
@@ -10,6 +11,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from observatory._app import ObservatoryApp
+from observatory.experiment.metrics import extract_tick_metrics
 from observatory._render_html import export_cycle_html
 from observatory._render_terminal import render_cycle_report
 from state_pool._id_generator import reset_id_generator
@@ -30,6 +32,8 @@ def app():
             "hdb_enable_background_repair": False,
             "hdb_data_dir": temp_hdb_dir,
             "enable_cognitive_stitching": True,
+            "cognitive_stitching_stage": "post_induction",
+            "cognitive_stitching_runtime_override": {"enabled": True},
             "enable_structure_level_retrieval_storage": False,
         }
     )
@@ -159,6 +163,7 @@ def _seed_hdb_event_structure(app: ObservatoryApp, *, member_refs: list[str], di
 
 
 def test_run_cycle_surfaces_cognitive_stitching_report_and_narrative_view(app, tmp_path):
+    app.cognitive_stitching.update_config({"enabled": True, "stitching_mode": "legacy_event", "context_concat_v2_enabled": False})
     structure_a = _seed_hdb_structure(app, "A", ["A"])
     structure_b = _seed_hdb_structure(app, "B", ["B"])
     add_edge = app.hdb._structure_store.add_diff_entry(
@@ -191,7 +196,18 @@ def test_run_cycle_surfaces_cognitive_stitching_report_and_narrative_view(app, t
     assert cs["action_count"] >= 1
     assert cs["created_count"] >= 1
     assert cs["narrative_top_items"]
-    assert report["structure_level"]["result"]["message"] == "disabled_by_switch"
+    assert isinstance(cs.get("candidate_audit"), dict)
+    assert cs["candidate_audit"]["raw_accepted_count"] >= cs["candidate_count"]
+    assert "score_means" in cs["candidate_audit"]
+    assert "rejection_preview" in cs["candidate_audit"]
+    assert "competition_preview" in cs["candidate_audit"]
+    assert cs["candidate_preview"]
+    assert "base_score" in cs["candidate_preview"][0]
+    assert "threshold_margin" in cs["candidate_preview"][0]
+    assert report["structure_level"]["result"]["message"] in {
+        "disabled_by_switch",
+        "CAM internal stimulus only (no group matching rounds)",
+    }
     # When structure-level retrieval is disabled, endogenous stimulus must still exist:
     # it is built from CAM (attention memory) and constrained by internal resolution (DARL+PARS).
     internal_pkt = report.get("internal_stimulus", {}) or {}
@@ -212,6 +228,174 @@ def test_run_cycle_surfaces_cognitive_stitching_report_and_narrative_view(app, t
     with open(html_path, "r", encoding="utf-8") as fh:
         html_text = fh.read()
     assert "CS narrative top" in html_text
+
+
+def test_run_cycle_emits_event_grasp_for_fresh_cs_action_event(app):
+    app.cognitive_stitching.update_config({"enabled": True, "stitching_mode": "legacy_event", "context_concat_v2_enabled": False})
+    structure_a = _seed_hdb_structure(app, "A", ["A"])
+    structure_b = _seed_hdb_structure(app, "B", ["B"])
+    add_edge = app.hdb._structure_store.add_diff_entry(
+        owner_structure_id=structure_a["id"],
+        target_id=structure_b["id"],
+        content_signature=structure_b.get("structure", {}).get("content_signature", "B"),
+        base_weight=1.2,
+        entry_type="structure_ref",
+        ext={"relation_type": "pytest_cs_pair_event_grasp"},
+    )
+    assert add_edge is not None
+
+    inserted_a = app.pool.insert_runtime_node(
+        _runtime_projection(structure_a, er=1.5, ev=0.2),
+        trace_id="seed_runtime_a_grasp",
+        source_module="pytest",
+    )
+    inserted_b = app.pool.insert_runtime_node(
+        _runtime_projection(structure_b, er=1.1, ev=0.3),
+        trace_id="seed_runtime_b_grasp",
+        source_module="pytest",
+    )
+    assert inserted_a["success"] is True
+    assert inserted_b["success"] is True
+
+    report = app.run_cycle(text=None)
+    cs = report["cognitive_stitching"]
+    event_grasp = cs.get("event_grasp", {}) or {}
+
+    assert cs["created_count"] >= 1
+    assert event_grasp.get("enabled") is True
+    assert event_grasp.get("success") is True
+    assert event_grasp.get("reason") == "ok"
+    assert int(event_grasp.get("emitted_count", 0) or 0) >= 1
+    assert int(event_grasp.get("post_action_seed_count", 0) or 0) >= 1
+    assert str(event_grasp.get("focus_mode", "") or "") in {"cam_plus_post_cs_action", "post_cs_action_only"}
+    assert any("post_cs_action" in list(item.get("selection_sources", []) or []) for item in event_grasp.get("signals", []))
+    assert any(float(item.get("event_grasp", 0.0) or 0.0) > 0.0 for item in cs.get("narrative_top_items", []))
+    metrics = extract_tick_metrics(report=report, dataset_tick={"tick_index": 0, "input_text": "", "input_is_empty": True})
+    assert metrics["cs_event_grasp_reason"] == "ok"
+    assert metrics["cs_event_grasp_focus_mode"] in {"cam_plus_post_cs_action", "post_cs_action_only"}
+    assert metrics["cs_narrative_top_grasp"] > 0.0
+    assert metrics["cs_narrative_grasp_max"] >= metrics["cs_narrative_top_grasp"]
+    assert metrics["cs_narrative_grasp_positive_count"] >= 1
+
+
+def test_run_cycle_emits_event_grasp_for_existing_event_in_cam(app):
+    structure_a = _seed_hdb_structure(app, "A", ["A"])
+    structure_b = _seed_hdb_structure(app, "B", ["B"])
+
+    inserted_event = app.pool.insert_runtime_node(
+        _event_runtime_projection(
+            [structure_a["id"], structure_b["id"]],
+            ["A", "B"],
+            er=6.0,
+            ev=4.8,
+            component_ledger=[
+                {
+                    "index": 0,
+                    "ref_id": structure_a["id"],
+                    "display": "A",
+                    "profile_share": 0.52,
+                    "er": 3.12,
+                    "ev": 2.50,
+                    "cp_abs": 0.62,
+                },
+                {
+                    "index": 1,
+                    "ref_id": structure_b["id"],
+                    "display": "B",
+                    "profile_share": 0.48,
+                    "er": 2.88,
+                    "ev": 2.30,
+                    "cp_abs": 0.58,
+                },
+            ],
+        ),
+        trace_id="seed_runtime_event",
+        source_module="pytest",
+    )
+    assert inserted_event["success"] is True
+
+    report = app.run_cycle(text=None)
+    cs = report["cognitive_stitching"]
+    event_grasp = cs.get("event_grasp", {}) or {}
+
+    assert event_grasp.get("enabled") is True
+    assert event_grasp.get("success") is True
+    assert int(event_grasp.get("selected_event_count", 0) or 0) >= 1
+    assert int(event_grasp.get("emitted_count", 0) or 0) >= 1
+    assert int(event_grasp.get("elapsed_ms", 0) or 0) >= 0
+    assert int((report.get("timing", {}) or {}).get("steps_ms", {}).get("event_grasp_ms", 0) or 0) >= 0
+    assert any(float(item.get("event_grasp", 0.0) or 0.0) > 0.0 for item in cs.get("narrative_top_items", []))
+
+
+def test_observatory_runtime_override_reaches_cognitive_stitching_and_survives_reload():
+    reset_id_generator()
+    temp_hdb_dir = tempfile.mkdtemp(prefix="observatory_cs_override_hdb_")
+    app = ObservatoryApp(
+        config_override={
+            "export_html": False,
+            "export_json": False,
+            "auto_open_html_report": False,
+            "web_auto_open_browser": False,
+            "state_pool_enable_placeholder_interfaces": False,
+            "state_pool_enable_script_broadcast": False,
+            "hdb_enable_background_repair": False,
+            "hdb_data_dir": temp_hdb_dir,
+            "enable_cognitive_stitching": True,
+            "cognitive_stitching_stage": "post_induction",
+            "enable_structure_level_retrieval_storage": False,
+            "cognitive_stitching_runtime_override": {
+                "enabled": True,
+                "stitching_mode": "context_match_v2",
+                "cs_v2_audit_only": False,
+            },
+        }
+    )
+    try:
+        assert app.cognitive_stitching._config.get("stitching_mode") == "context_match_v2"
+        assert app.cognitive_stitching._config.get("cs_v2_audit_only") is False
+        payload = json.loads(app.reload_all())
+        assert payload["cognitive_stitching"] == "OK"
+        assert app.cognitive_stitching._config.get("stitching_mode") == "context_match_v2"
+        assert app.cognitive_stitching._config.get("cs_v2_audit_only") is False
+        bundle = app.get_config_bundle()
+        cs_bundle = bundle.get("cognitive_stitching", {})
+        assert (cs_bundle.get("runtime_override") or {}).get("stitching_mode") == "context_match_v2"
+    finally:
+        app.close()
+        shutil.rmtree(temp_hdb_dir, ignore_errors=True)
+
+
+def test_observatory_context_concat_flag_controls_default_cs_main_path():
+    reset_id_generator()
+    temp_hdb_dir = tempfile.mkdtemp(prefix="observatory_cs_context_concat_hdb_")
+    base_override = {
+        "export_html": False,
+        "export_json": False,
+        "auto_open_html_report": False,
+        "web_auto_open_browser": False,
+        "state_pool_enable_placeholder_interfaces": False,
+        "state_pool_enable_script_broadcast": False,
+        "hdb_enable_background_repair": False,
+        "hdb_data_dir": temp_hdb_dir,
+        "enable_cognitive_stitching": True,
+        "cognitive_stitching_stage": "post_induction",
+        "enable_structure_level_retrieval_storage": False,
+        "cognitive_stitching_runtime_override": {"enabled": True},
+    }
+    app_on = ObservatoryApp(config_override={**base_override, "context_concat_v2_enabled": True})
+    app_off = ObservatoryApp(config_override={**base_override, "context_concat_v2_enabled": False})
+    try:
+        assert app_on.cognitive_stitching._config.get("context_concat_v2_enabled") is True
+        assert app_on.cognitive_stitching._config.get("stitching_mode") == "context_match_v2"
+        assert app_on.cognitive_stitching._config.get("cs_v2_audit_only") is False
+
+        assert app_off.cognitive_stitching._config.get("context_concat_v2_enabled") is False
+        assert app_off.cognitive_stitching._config.get("stitching_mode") == "legacy_event"
+        assert app_off.cognitive_stitching._config.get("cs_v2_audit_only") is True
+    finally:
+        app_on.close()
+        app_off.close()
+        shutil.rmtree(temp_hdb_dir, ignore_errors=True)
 
 
 def test_run_cycle_can_extend_existing_cs_event_seed(app):
@@ -249,6 +433,8 @@ def test_run_cycle_can_extend_existing_cs_event_seed(app):
     cs = report["cognitive_stitching"]
     assert cs["enabled"] is True
     assert cs["extended_count"] >= 1
+    assert isinstance(cs.get("candidate_audit"), dict)
+    assert "score_means" in cs["candidate_audit"]
     assert any(action.get("action_family") == "extend_event" for action in cs.get("actions", []))
 
     expected_ref_id = f"cs_event::{structure_a['id']}::{structure_b['id']}::{structure_c['id']}"

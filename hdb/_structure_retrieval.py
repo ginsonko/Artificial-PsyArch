@@ -9,8 +9,10 @@ from collections import deque
 import math
 import time
 
+from ._context_metadata import merge_context_metadata, merge_residual_metadata
 from ._display_semantics import strip_display_only_glyphs
 from ._id_generator import next_id
+from ._match_scoring_v2 import build_match_score_v2
 from ._profile_restore import restore_group_profile, restore_profile, restore_structure_profile
 from ._sequence_display import format_sequence_groups
 
@@ -28,6 +30,8 @@ class StructureRetrievalEngine:
         self._internal_resolution_history: dict[str, deque[str]] = {}
         self._internal_resolution_history_counts: dict[str, dict[str, int]] = {}
         self._internal_resolution_focus_credit: dict[str, float] = {}
+        self._runtime_match_now_ms: int | None = None
+        self._runtime_cache: dict | None = None
 
     def update_config(self, config: dict) -> None:
         self._config = config
@@ -43,6 +47,8 @@ class StructureRetrievalEngine:
         self._internal_resolution_history.clear()
         self._internal_resolution_history_counts.clear()
         self._internal_resolution_focus_credit.clear()
+        self._runtime_match_now_ms = None
+        self._runtime_cache = None
         return summary
 
     def run(
@@ -61,8 +67,20 @@ class StructureRetrievalEngine:
         enable_storage: bool,
         enable_new_group_creation: bool,
         max_rounds: int,
+        now_ms: int | None = None,
     ) -> dict:
         del enable_new_group_creation
+        try:
+            self._runtime_match_now_ms = int(now_ms) if now_ms is not None else None
+        except Exception:
+            self._runtime_match_now_ms = None
+        self._runtime_cache = {
+            "structure_fuzzy_metadata": {},
+            "metrics": {
+                "structure_fuzzy_metadata_cache_hit_count": 0,
+                "structure_fuzzy_metadata_cache_store_count": 0,
+            },
+        }
         items = list(state_snapshot.get("top_items") or state_snapshot.get("items") or [])
         # 注意力模式（attention_mode）说明：
         # - top_n_stub: 旧版占位口径（兼容保留）
@@ -127,6 +145,7 @@ class StructureRetrievalEngine:
                     budget_ev_map=budget_ev_map,
                     cut_engine=cut_engine,
                     origin_frame_id=tick_id,
+                    structure_store=structure_store,
                 )
                 episodic_meta = dict(episodic.get("meta", {}))
                 episodic_ext = dict(episodic_meta.get("ext", {}))
@@ -141,6 +160,11 @@ class StructureRetrievalEngine:
         group_projections: list[dict] = []
         bias_structure_ids: list[str] = []
         bias_projections: list[dict] = []
+        runtime_bound_attribute_map: dict[str, list[dict]] = {
+            str(item.get("structure_id", "")): [dict(unit) for unit in (item.get("runtime_bound_attribute_units", []) or []) if isinstance(unit, dict)]
+            for item in cam_items
+            if str(item.get("structure_id", ""))
+        }
         internal_fragments: list[dict] = []
         round_summaries: list[dict] = []
         debug_round_details: list[dict] = []
@@ -175,6 +199,7 @@ class StructureRetrievalEngine:
                 budget_ev_map=budget_ev_map,
                 cut_engine=cut_engine,
                 origin_frame_id=tick_id,
+                structure_store=structure_store,
             )
             budget_before = self._build_budget_snapshot(cam_structure_ids, budget_er_map, budget_ev_map)
             anchor_item = self._select_anchor_item(
@@ -243,6 +268,10 @@ class StructureRetrievalEngine:
                             fallback_total_er=float(anchor_item.get("er", 0.0)),
                             fallback_total_ev=float(anchor_item.get("ev", 0.0)),
                             cut_engine=cut_engine,
+                            runtime_bound_attribute_units=self._collect_runtime_bound_attribute_units_for_structure_ids(
+                                structure_ids=[anchor_item["structure_id"]],
+                                runtime_bound_attribute_map=runtime_bound_attribute_map,
+                            ),
                         )
                         internal_fragments.extend(storage_fragments)
                 round_summaries.append(
@@ -356,6 +385,10 @@ class StructureRetrievalEngine:
                 group_store=group_store,
                 cut_engine=cut_engine,
                 profile_cache=profile_restore_cache,
+                runtime_bound_attribute_units=self._collect_runtime_bound_attribute_units_for_structure_ids(
+                    structure_ids=required_ids,
+                    runtime_bound_attribute_map=runtime_bound_attribute_map,
+                ),
             )
 
             transferred_er_map: dict[str, float] = {}
@@ -385,6 +418,7 @@ class StructureRetrievalEngine:
                 group_store=group_store,
                 cut_engine=cut_engine,
                 profile_cache=profile_restore_cache,
+                runtime_bound_attribute_map=runtime_bound_attribute_map,
             )
             if active_group_fragment is not None:
                 round_fragments.insert(0, active_group_fragment)
@@ -416,10 +450,16 @@ class StructureRetrievalEngine:
             budget_after = self._build_budget_snapshot(cam_structure_ids, budget_er_map, budget_ev_map)
             selected_group = {
                 **self._build_group_debug_payload(group_obj, structure_store, cut_engine),
+                "group_kind": "group",
+                "synthetic": False,
                 "score": round(float(best.get("competition_score", 0.0)), 8),
                 "competition_score": round(float(best.get("competition_score", 0.0)), 8),
+                "competition_score_legacy": round(float(best.get("competition_score_legacy", 0.0)), 8),
+                "competition_score_v2": round(float(best.get("competition_score_v2", 0.0)), 8),
                 "similarity": round(float(best.get("competition_score", 0.0)), 8),
                 "base_similarity": round(float(best.get("base_similarity", 0.0)), 8),
+                "base_similarity_legacy": round(float(best.get("base_similarity_legacy", 0.0)), 8),
+                "base_similarity_v2": round(float(best.get("base_similarity_v2", 0.0)), 8),
                 "coverage_ratio": round(float(best.get("coverage_ratio", 0.0)), 8),
                 "structure_ratio": round(float(best.get("structure_ratio", 0.0)), 8),
                 "wave_similarity": round(float(best.get("wave_similarity", 0.0)), 8),
@@ -429,6 +469,15 @@ class StructureRetrievalEngine:
                 "chain_depth": int(best.get("chain_depth", 0)),
                 "owner_kind": best.get("owner_kind", ""),
                 "owner_id": best.get("owner_id", ""),
+                "v2_base_score": best.get("v2_base_score"),
+                "v2_numeric_score": best.get("v2_numeric_score"),
+                "v2_order_alignment_score": best.get("v2_order_alignment_score"),
+                "v2_attribute_anchor_score": best.get("v2_attribute_anchor_score"),
+                "v2_context_support_score": best.get("v2_context_support_score"),
+                "v2_energy_profile_score": best.get("v2_energy_profile_score"),
+                "v2_structure_inclusion_score": best.get("v2_structure_inclusion_score"),
+                "v2_threshold_margin": best.get("v2_threshold_margin"),
+                "v2_available_component_count": best.get("v2_available_component_count"),
                 "common_part": dict(best.get("common_part", {})),
             }
             debug_round_details.append(
@@ -505,6 +554,14 @@ class StructureRetrievalEngine:
             trace_id=trace_id,
             tick_id=tick_id,
         )
+        cam_runtime_priority_fragments, cam_runtime_priority_projection_summary = self._build_cam_runtime_priority_fragments(
+            cam_items=cam_items,
+            budget_er_map=budget_er_map,
+            budget_ev_map=budget_ev_map,
+            existing_fragments=internal_fragments,
+        )
+        if cam_runtime_priority_fragments:
+            internal_fragments = self._merge_internal_fragments(list(internal_fragments) + list(cam_runtime_priority_fragments))
 
         if self._config.get("detail_log_dump_group_match_profile", True):
             self._logger.detail(
@@ -531,8 +588,10 @@ class StructureRetrievalEngine:
             "bias_projections": bias_projections,
             "internal_stimulus_fragments": internal_fragments,
             "internal_resolution": internal_resolution_summary,
+            "cam_runtime_priority_projection": cam_runtime_priority_projection_summary,
             "episodic_memory_id": episodic_memory_id,
             "fallback_used": fallback_used,
+            "metrics": self._runtime_metrics_snapshot(),
             "debug": {
                 "cam_items": debug_cam_items,
                 "round_details": debug_round_details,
@@ -614,6 +673,15 @@ class StructureRetrievalEngine:
             er = round(max(0.0, float(item.get("er", 0.0))), 8)
             ev = round(max(0.0, float(item.get("ev", 0.0))), 8)
             cp_abs = round(max(0.0, float(item.get("cp_abs", 0.0))), 8)
+            runtime_bound_attribute_units = [
+                dict(unit)
+                for unit in (
+                    item.get("runtime_bound_attribute_units", [])
+                    or ref_snapshot.get("runtime_bound_attribute_units", [])
+                    or []
+                )
+                if isinstance(unit, dict)
+            ]
 
             # Build a stored-group-like payload from snapshot when available; otherwise fall back to tokens.
             if not flat_tokens and sequence_groups:
@@ -643,8 +711,18 @@ class StructureRetrievalEngine:
                     #   skip emitting this fragment (avoid generating large ungrounded internal streams).
                     stimulus = ref_snapshot.get("stimulus", {}) if isinstance(ref_snapshot.get("stimulus", {}), dict) else {}
                     content = ref_snapshot.get("content", {}) if isinstance(ref_snapshot.get("content", {}), dict) else {}
-                    role = str(stimulus.get("role", "") or "").strip()
-                    attribute_name = str(content.get("attribute_name", "") or "").strip()
+                    role = str(
+                        ref_snapshot.get("role", "")
+                        or item.get("role", "")
+                        or stimulus.get("role", "")
+                        or ""
+                    ).strip()
+                    attribute_name = str(
+                        ref_snapshot.get("attribute_name", "")
+                        or item.get("attribute_name", "")
+                        or content.get("attribute_name", "")
+                        or ""
+                    ).strip()
                     is_attribute = (role == "attribute") or bool(attribute_name)
 
                     if is_attribute:
@@ -653,19 +731,58 @@ class StructureRetrievalEngine:
                         # but include the numeric value so downstream can reconstruct/parse it.
                         #
                         # Note: we intentionally do NOT split attributes into characters.
-                        raw = str(content.get("raw", "") or "").strip()
-                        value_type = str(content.get("value_type", "") or "").strip()
-                        val = content.get("attribute_value", None)
+                        raw = str(
+                            content.get("raw", "")
+                            or ref_snapshot.get("content_display", "")
+                            or item.get("display", "")
+                            or ""
+                        ).strip()
+                        value_type = str(
+                            ref_snapshot.get("value_type", "")
+                            or item.get("value_type", "")
+                            or content.get("value_type", "")
+                            or ""
+                        ).strip()
+                        val = (
+                            ref_snapshot.get("attribute_value", None)
+                            if ref_snapshot.get("attribute_value", None) not in ("", None)
+                            else item.get("attribute_value", content.get("attribute_value", None))
+                        )
                         if not attribute_name and raw and ":" in raw:
                             attribute_name = raw.split(":", 1)[0].strip()
                         if attribute_name:
+                            attribute_token = ""
                             if value_type == "numerical" and val is not None:
                                 try:
                                     v = float(val)
                                 except Exception:
                                     v = None
                                 if v is not None and math.isfinite(v):
-                                    flat_tokens = [f"ATTR[{attribute_name}:{round(v, 6)}]"]
+                                    attribute_token = f"{attribute_name}:{round(v, 6)}"
+                                    flat_tokens = [attribute_token]
+                                    sequence_groups = [
+                                        {
+                                            "group_index": 0,
+                                            "source_type": "cam_snapshot",
+                                            "origin_frame_id": tick_id,
+                                            "tokens": [attribute_token],
+                                            "units": [
+                                                {
+                                                    "unit_id": f"cam_attr::{ref_id or display_text or order_index}",
+                                                    "object_type": "sa",
+                                                    "token": attribute_token,
+                                                    "display_text": attribute_token,
+                                                    "unit_role": "attribute",
+                                                    "attribute_name": attribute_name,
+                                                    "attribute_value": float(v),
+                                                    "value_type": "numerical",
+                                                    "sequence_index": 0,
+                                                    "group_index": 0,
+                                                }
+                                            ],
+                                            "csa_bundles": [],
+                                        }
+                                    ]
                                 else:
                                     # Can't preserve a valid numeric -> drop attribute fragment rather than pollute.
                                     flat_tokens = []
@@ -674,9 +791,57 @@ class StructureRetrievalEngine:
                                 safe = raw
                                 if len(safe) > 96:
                                     safe = safe[:96]
-                                flat_tokens = [f"ATTR[{safe}]"]
+                                attribute_token = safe
+                                flat_tokens = [attribute_token]
+                                sequence_groups = [
+                                    {
+                                        "group_index": 0,
+                                        "source_type": "cam_snapshot",
+                                        "origin_frame_id": tick_id,
+                                        "tokens": [attribute_token],
+                                        "units": [
+                                            {
+                                                "unit_id": f"cam_attr::{ref_id or display_text or order_index}",
+                                                "object_type": "sa",
+                                                "token": attribute_token,
+                                                "display_text": attribute_token,
+                                                "unit_role": "attribute",
+                                                "attribute_name": attribute_name,
+                                                "attribute_value": val,
+                                                "value_type": value_type or "discrete",
+                                                "sequence_index": 0,
+                                                "group_index": 0,
+                                            }
+                                        ],
+                                        "csa_bundles": [],
+                                    }
+                                ]
                             else:
-                                flat_tokens = [f"ATTR[{attribute_name}]"]
+                                attribute_token = attribute_name
+                                flat_tokens = [attribute_token]
+                                sequence_groups = [
+                                    {
+                                        "group_index": 0,
+                                        "source_type": "cam_snapshot",
+                                        "origin_frame_id": tick_id,
+                                        "tokens": [attribute_token],
+                                        "units": [
+                                            {
+                                                "unit_id": f"cam_attr::{ref_id or display_text or order_index}",
+                                                "object_type": "sa",
+                                                "token": attribute_token,
+                                                "display_text": attribute_token,
+                                                "unit_role": "attribute",
+                                                "attribute_name": attribute_name,
+                                                "attribute_value": val,
+                                                "value_type": value_type or "discrete",
+                                                "sequence_index": 0,
+                                                "group_index": 0,
+                                            }
+                                        ],
+                                        "csa_bundles": [],
+                                    }
+                                ]
                         else:
                             # Unknown attribute name -> skip (don't emit valueless attribute).
                             flat_tokens = []
@@ -693,14 +858,15 @@ class StructureRetrievalEngine:
                     if not flat_tokens:
                         # Too long / empty / unsupported -> skip this item.
                         continue
-                sequence_groups = [
-                    {
-                        "group_index": 0,
-                        "source_type": "cam_snapshot",
-                        "origin_frame_id": tick_id,
-                        "tokens": list(flat_tokens),
-                    }
-                ]
+                if not sequence_groups:
+                    sequence_groups = [
+                        {
+                            "group_index": 0,
+                            "source_type": "cam_snapshot",
+                            "origin_frame_id": tick_id,
+                            "tokens": list(flat_tokens),
+                        }
+                    ]
 
             profile = self._profile_from_stored_groups(
                 sequence_groups,
@@ -725,6 +891,7 @@ class StructureRetrievalEngine:
                     "goal_b_string_texts": [str(g.get("string_token_text", "") or "") for g in sequence_groups if bool(g.get("order_sensitive", False)) and str(g.get("string_unit_kind", "") or "") == "char_sequence"],
                     "sequence_group_count": int(len(sequence_groups)),
                 },
+                runtime_bound_attribute_units=runtime_bound_attribute_units,
             )
             if fragment is not None:
                 internal_fragments.append(fragment)
@@ -736,6 +903,7 @@ class StructureRetrievalEngine:
                     {
                         "structure_id": sid,
                         "structure_obj": None,  # intentionally absent in this mode
+                        "runtime_bound_attribute_units": runtime_bound_attribute_units,
                         "display_text": display_text,
                         "er": er,
                         "ev": ev,
@@ -750,6 +918,7 @@ class StructureRetrievalEngine:
                             "ev": ev,
                             "total_energy": round(er + ev, 8),
                             "cp_abs": cp_abs,
+                            "runtime_bound_attribute_units": runtime_bound_attribute_units,
                             "base_weight": 1.0,
                             "recent_gain": 1.0,
                             "fatigue": 0.0,
@@ -770,6 +939,14 @@ class StructureRetrievalEngine:
             trace_id=trace_id,
             tick_id=tick_id,
         )
+        cam_runtime_priority_fragments, cam_runtime_priority_projection_summary = self._build_cam_runtime_priority_fragments(
+            cam_items=cam_items,
+            budget_er_map={str(item.get("structure_id", "") or ""): max(0.0, float(item.get("er", 0.0))) for item in cam_items if str(item.get("structure_id", "") or "")},
+            budget_ev_map={str(item.get("structure_id", "") or ""): max(0.0, float(item.get("ev", 0.0))) for item in cam_items if str(item.get("structure_id", "") or "")},
+            existing_fragments=internal_fragments,
+        )
+        if cam_runtime_priority_fragments:
+            internal_fragments = self._merge_internal_fragments(list(internal_fragments) + list(cam_runtime_priority_fragments))
 
         return {
             "code": "OK",
@@ -783,8 +960,10 @@ class StructureRetrievalEngine:
             "bias_projections": [],
             "internal_stimulus_fragments": internal_fragments,
             "internal_resolution": internal_resolution_summary,
+            "cam_runtime_priority_projection": cam_runtime_priority_projection_summary,
             "episodic_memory_id": "",
             "fallback_used": False,
+            "metrics": self._runtime_metrics_snapshot(),
             "debug": {
                 "cam_items": debug_cam_items,
                 "round_details": [],
@@ -806,8 +985,28 @@ class StructureRetrievalEngine:
             "internal_stimulus_fragments": [],
             "episodic_memory_id": "",
             "fallback_used": False,
+            "metrics": self._runtime_metrics_snapshot(),
             "debug": {"cam_items": [], "round_details": [], "new_group_details": []},
         }
+
+    def _increment_runtime_metric(self, key: str, amount: int | float = 1) -> None:
+        if not isinstance(self._runtime_cache, dict):
+            return
+        metrics = self._runtime_cache.setdefault("metrics", {})
+        if not isinstance(metrics, dict):
+            return
+        try:
+            metrics[key] = metrics.get(key, 0) + amount
+        except Exception:
+            metrics[key] = amount
+
+    def _runtime_metrics_snapshot(self) -> dict:
+        if not isinstance(self._runtime_cache, dict):
+            return {}
+        metrics = self._runtime_cache.get("metrics", {})
+        if not isinstance(metrics, dict):
+            return {}
+        return dict(metrics)
 
     def _collect_cam_items(self, *, st_items: list[dict], structure_store, now_ms: int) -> list[dict]:
         cam_items = []
@@ -816,6 +1015,16 @@ class StructureRetrievalEngine:
             structure_obj = structure_store.get(structure_id)
             if not structure_id or not structure_obj:
                 continue
+            ref_snapshot = item.get("ref_snapshot", {}) if isinstance(item.get("ref_snapshot", {}), dict) else {}
+            runtime_bound_attribute_units = [
+                dict(unit)
+                for unit in (
+                    item.get("runtime_bound_attribute_units", [])
+                    or ref_snapshot.get("runtime_bound_attribute_units", [])
+                    or []
+                )
+                if isinstance(unit, dict)
+            ]
             runtime_stats = self._preview_structure_stats(structure_obj, now_ms=now_ms)
             er = round(max(0.0, float(item.get("er", 0.0))), 8)
             ev = round(max(0.0, float(item.get("ev", 0.0))), 8)
@@ -824,6 +1033,7 @@ class StructureRetrievalEngine:
                 {
                     "structure_id": structure_id,
                     "structure_obj": structure_obj,
+                    "runtime_bound_attribute_units": runtime_bound_attribute_units,
                     "display_text": self._structure_display_text(structure_obj),
                     "er": er,
                     "ev": ev,
@@ -838,6 +1048,7 @@ class StructureRetrievalEngine:
                         "ev": ev,
                         "total_energy": round(er + ev, 8),
                         "cp_abs": cp_abs,
+                        "runtime_bound_attribute_units": runtime_bound_attribute_units,
                         "base_weight": runtime_stats["base_weight"],
                         "recent_gain": runtime_stats["recent_gain"],
                         "fatigue": runtime_stats["fatigue"],
@@ -852,12 +1063,12 @@ class StructureRetrievalEngine:
         self._weight.decay_structure(preview, now_ms=now_ms, round_step=1)
         stats = preview.get("stats", {})
         runtime_weight = self._weight.compute_runtime_weight(
-            base_weight=float(stats.get("base_weight", 1.0)),
+            base_weight=float(stats.get("base_weight", 0.0)),
             recent_gain=float(stats.get("recent_gain", 1.0)),
             fatigue=float(stats.get("fatigue", 0.0)),
         )
         return {
-            "base_weight": round(float(stats.get("base_weight", 1.0)), 8),
+            "base_weight": round(float(stats.get("base_weight", 0.0)), 8),
             "recent_gain": round(float(stats.get("recent_gain", 1.0)), 8),
             "fatigue": round(float(stats.get("fatigue", 0.0)), 8),
             "runtime_weight": round(float(runtime_weight), 8),
@@ -868,12 +1079,12 @@ class StructureRetrievalEngine:
         self._weight.decay_group(preview, now_ms=now_ms, round_step=1)
         stats = preview.get("stats", {})
         runtime_weight = self._weight.compute_runtime_weight(
-            base_weight=float(stats.get("base_weight", 1.0)),
+            base_weight=float(stats.get("base_weight", 0.0)),
             recent_gain=float(stats.get("recent_gain", 1.0)),
             fatigue=float(stats.get("fatigue", 0.0)),
         )
         return {
-            "base_weight": round(float(stats.get("base_weight", 1.0)), 8),
+            "base_weight": round(float(stats.get("base_weight", 0.0)), 8),
             "recent_gain": round(float(stats.get("recent_gain", 1.0)), 8),
             "fatigue": round(float(stats.get("fatigue", 0.0)), 8),
             "runtime_weight": round(float(runtime_weight), 8),
@@ -884,7 +1095,7 @@ class StructureRetrievalEngine:
         self._weight.decay_entry(preview, now_ms=now_ms, round_step=1)
         runtime_weight = self._weight.entry_runtime_weight(preview)
         return {
-            "base_weight": round(float(preview.get("base_weight", 1.0)), 8),
+            "base_weight": round(float(preview.get("base_weight", 0.0)), 8),
             "recent_gain": round(float(preview.get("recent_gain", 1.0)), 8),
             "fatigue": round(float(preview.get("fatigue", 0.0)), 8),
             "runtime_weight": round(float(runtime_weight), 8),
@@ -898,6 +1109,7 @@ class StructureRetrievalEngine:
         budget_ev_map: dict[str, float],
         cut_engine,
         origin_frame_id: str,
+        structure_store,
     ) -> dict:
         units = []
         for order_index, item in enumerate(cam_items):
@@ -908,6 +1120,7 @@ class StructureRetrievalEngine:
                     structure_id=structure_id,
                     display_text=self._structure_display_text(structure_obj),
                     structure_obj=structure_obj,
+                    runtime_bound_attribute_units=item.get("runtime_bound_attribute_units", []),
                     er=float(budget_er_map.get(structure_id, 0.0)),
                     ev=float(budget_ev_map.get(structure_id, 0.0)),
                     order_index=order_index,
@@ -915,7 +1128,11 @@ class StructureRetrievalEngine:
                     origin_frame_id=origin_frame_id,
                 )
             )
-        return self._profile_from_units(units=units, cut_engine=cut_engine, ext={"kind": "structure_level_runtime"})
+        profile = self._profile_from_units(units=units, cut_engine=cut_engine, ext={"kind": "structure_level_runtime"})
+        return self._enrich_profile_structure_units(
+            profile=profile,
+            structure_store=structure_store,
+        )
 
     def _make_structure_unit(
         self,
@@ -923,13 +1140,17 @@ class StructureRetrievalEngine:
         structure_id: str,
         display_text: str,
         structure_obj: dict | None = None,
+        runtime_bound_attribute_units: list[dict] | None = None,
         er: float,
         ev: float,
         order_index: int,
         source_type: str,
         origin_frame_id: str,
     ) -> dict:
-        fuzzy_metadata = self._build_structure_fuzzy_metadata(structure_obj)
+        fuzzy_metadata = self._build_structure_fuzzy_metadata(
+            structure_obj,
+            runtime_bound_attribute_units=runtime_bound_attribute_units,
+        )
         return {
             "unit_id": structure_id,
             "object_type": "st",
@@ -965,7 +1186,12 @@ class StructureRetrievalEngine:
     # 结构级把 ST 当成“结构特征单元”比较时，不能只看 structure_id。
     # 这里显式抽取一个“数值可模糊匹配”的签名与显示模板，供 cut_engine
     # 在最大共同部分与结构组竞争时复用，避免 1.0 / 1.1 这种同类数值把本质相同的结构判成不同结构。
-    def _build_structure_fuzzy_metadata(self, structure_obj: dict | None) -> dict:
+    def _build_structure_fuzzy_metadata(
+        self,
+        structure_obj: dict | None,
+        *,
+        runtime_bound_attribute_units: list[dict] | None = None,
+    ) -> dict:
         if not structure_obj:
             return {
                 "fuzzy_signature": "",
@@ -973,15 +1199,31 @@ class StructureRetrievalEngine:
                 "grouped_display_text": "",
                 "display_template": "",
             }
+        cache_key = self._structure_fuzzy_metadata_cache_key(
+            structure_obj=structure_obj,
+            runtime_bound_attribute_units=runtime_bound_attribute_units,
+        ) if bool(self._config.get("structure_fuzzy_metadata_runtime_cache_enabled", True)) else None
+        metadata_cache = (
+            self._runtime_cache.get("structure_fuzzy_metadata", {})
+            if isinstance(self._runtime_cache, dict)
+            else {}
+        )
+        if cache_key and isinstance(metadata_cache, dict) and cache_key in metadata_cache:
+            self._increment_runtime_metric("structure_fuzzy_metadata_cache_hit_count", 1)
+            return self._clone_structure_fuzzy_metadata(metadata_cache[cache_key])
         structure = structure_obj.get("structure", {})
         sequence_groups = list(structure.get("sequence_groups", []))
         if not sequence_groups:
-            return {
+            result = {
                 "fuzzy_signature": "",
                 "numeric_slots": [],
                 "grouped_display_text": str(structure.get("display_text", structure_obj.get("id", ""))),
                 "display_template": str(structure.get("display_text", structure_obj.get("id", ""))),
             }
+            if cache_key and isinstance(metadata_cache, dict):
+                metadata_cache[cache_key] = self._clone_structure_fuzzy_metadata(result)
+                self._increment_runtime_metric("structure_fuzzy_metadata_cache_store_count", 1)
+            return result
 
         normalized_group_signatures: list[str] = []
         numeric_slots: list[dict] = []
@@ -1088,11 +1330,103 @@ class StructureRetrievalEngine:
 
         grouped_display_text = " / ".join(segment for segment in grouped_segments if segment)
         display_template = " / ".join(segment for segment in template_segments if segment)
-        return {
+        for attr_unit in runtime_bound_attribute_units or []:
+            if not isinstance(attr_unit, dict):
+                continue
+            family = str(attr_unit.get("attribute_name", "") or "").strip()
+            numeric_value = self._coerce_numeric(attr_unit.get("attribute_value"))
+            if not family or numeric_value is None:
+                continue
+            meta = attr_unit.get("meta", {}) if isinstance(attr_unit.get("meta", {}), dict) else {}
+            ext_meta = meta.get("ext", {}) if isinstance(meta.get("ext", {}), dict) else {}
+            numeric_slots.append(
+                {
+                    "family": family,
+                    "value": float(numeric_value),
+                    "semantic_kind": "time_like"
+                    if any(
+                        key in ext_meta
+                        for key in (
+                            "time_bucket_id",
+                            "time_bucket_ref_object_id",
+                            "time_bucket_center_sec",
+                            "time_basis",
+                            "delta_sec",
+                            "delta_value",
+                        )
+                    )
+                    else "",
+                }
+            )
+        result = {
             "fuzzy_signature": "||".join(signature for signature in normalized_group_signatures if signature),
             "numeric_slots": numeric_slots,
             "grouped_display_text": grouped_display_text,
             "display_template": display_template or grouped_display_text,
+        }
+        if cache_key and isinstance(metadata_cache, dict):
+            metadata_cache[cache_key] = self._clone_structure_fuzzy_metadata(result)
+            self._increment_runtime_metric("structure_fuzzy_metadata_cache_store_count", 1)
+        return result
+
+    def _structure_fuzzy_metadata_cache_key(
+        self,
+        *,
+        structure_obj: dict | None,
+        runtime_bound_attribute_units: list[dict] | None = None,
+    ) -> tuple | None:
+        if not isinstance(structure_obj, dict):
+            return None
+        structure_id = str(structure_obj.get("id", "") or "")
+        if not structure_id:
+            return None
+        structure = structure_obj.get("structure", {}) if isinstance(structure_obj.get("structure", {}), dict) else {}
+        signature = str(structure.get("content_signature", "") or "")
+        updated_at = int(structure_obj.get("updated_at", 0) or 0)
+        attr_key: tuple = ()
+        if runtime_bound_attribute_units:
+            attr_parts = []
+            for unit in runtime_bound_attribute_units:
+                if not isinstance(unit, dict):
+                    continue
+                family = str(unit.get("attribute_name", "") or "")
+                value = str(unit.get("attribute_value", "") or "")
+                meta = unit.get("meta", {}) if isinstance(unit.get("meta", {}), dict) else {}
+                ext = meta.get("ext", {}) if isinstance(meta.get("ext", {}), dict) else {}
+                time_marker = "|".join(
+                    f"{key}={ext.get(key)}"
+                    for key in (
+                        "time_bucket_id",
+                        "time_bucket_ref_object_id",
+                        "time_bucket_center_sec",
+                        "time_basis",
+                        "delta_sec",
+                        "delta_value",
+                    )
+                    if key in ext
+                )
+                attr_parts.append((family, value, time_marker))
+            attr_key = tuple(sorted(attr_parts))
+        return (structure_id, signature, updated_at, attr_key)
+
+    @staticmethod
+    def _clone_structure_fuzzy_metadata(metadata: dict) -> dict:
+        if not isinstance(metadata, dict):
+            return {
+                "fuzzy_signature": "",
+                "numeric_slots": [],
+                "grouped_display_text": "",
+                "display_template": "",
+            }
+        return {
+            "fuzzy_signature": str(metadata.get("fuzzy_signature", "") or ""),
+            "numeric_slots": [
+                dict(slot)
+                for slot in metadata.get("numeric_slots", [])
+                if isinstance(slot, dict)
+            ] if isinstance(metadata.get("numeric_slots", []), list) else [],
+            "grouped_display_text": str(metadata.get("grouped_display_text", "") or ""),
+            "display_template": str(metadata.get("display_template", "") or ""),
         }
 
     @staticmethod
@@ -1123,6 +1457,263 @@ class StructureRetrievalEngine:
             return float(text)
         except ValueError:
             return None
+
+    @staticmethod
+    def _normalize_runtime_family_patterns(patterns_raw) -> list[str]:
+        if not isinstance(patterns_raw, (list, tuple)):
+            return []
+        return [str(pattern).strip() for pattern in patterns_raw if str(pattern).strip()]
+
+    @classmethod
+    def _match_runtime_family_pattern(cls, family: str, patterns: list[str]) -> tuple[bool, int, str]:
+        normalized_family = str(family or "").strip()
+        normalized_patterns = cls._normalize_runtime_family_patterns(patterns)
+        if not normalized_family or not normalized_patterns:
+            return False, len(normalized_patterns), ""
+        for index, pattern in enumerate(normalized_patterns):
+            if pattern.endswith("*"):
+                prefix = pattern[:-1].strip()
+                if prefix and normalized_family.startswith(prefix):
+                    return True, index, pattern
+            elif normalized_family == pattern:
+                return True, index, pattern
+        return False, len(normalized_patterns), ""
+
+    def _runtime_family_patterns_from_config(self, config_key: str, *, fallback_key: str | None = None) -> list[str]:
+        patterns = self._normalize_runtime_family_patterns(self._config.get(config_key, []))
+        if patterns or not fallback_key:
+            return patterns
+        return self._normalize_runtime_family_patterns(self._config.get(fallback_key, []))
+
+    def _runtime_attribute_priority_meta(self, unit: dict, patterns: list[str]) -> dict:
+        family = str(unit.get("attribute_name", "") or "").strip()
+        matched, priority_rank, matched_pattern = self._match_runtime_family_pattern(family, patterns)
+        meta = unit.get("meta", {}) if isinstance(unit.get("meta", {}), dict) else {}
+        ext = meta.get("ext", {}) if isinstance(meta.get("ext", {}), dict) else {}
+        numeric_value = self._coerce_numeric(unit.get("attribute_value"))
+        abs_value = self._coerce_numeric(ext.get("projection_sort_abs_value"))
+        if abs_value is None and numeric_value is not None:
+            abs_value = abs(float(numeric_value))
+        return {
+            "family": family,
+            "matched": bool(matched),
+            "priority_rank": int(priority_rank),
+            "matched_pattern": str(matched_pattern or ""),
+            "numeric_value": numeric_value,
+            "abs_value": 0.0 if abs_value is None else round(abs(float(abs_value)), 8),
+        }
+
+    def _summarize_runtime_priority_units(self, units: list[dict] | None, patterns: list[str]) -> dict:
+        matched_families: dict[str, dict] = {}
+        matched_patterns: list[str] = []
+        matched_units = 0
+        max_abs_value = 0.0
+        for unit in units or []:
+            if not isinstance(unit, dict):
+                continue
+            priority_meta = self._runtime_attribute_priority_meta(unit, patterns)
+            if not priority_meta.get("matched"):
+                continue
+            matched_units += 1
+            family = str(priority_meta.get("family", "") or "")
+            matched_pattern = str(priority_meta.get("matched_pattern", "") or "")
+            priority_rank = int(priority_meta.get("priority_rank", len(patterns)))
+            abs_value = float(priority_meta.get("abs_value", 0.0) or 0.0)
+            max_abs_value = max(max_abs_value, abs_value)
+            existing = matched_families.get(family)
+            if existing is None or priority_rank < int(existing.get("priority_rank", len(patterns))) or abs_value > float(existing.get("abs_value", 0.0)):
+                matched_families[family] = {
+                    "priority_rank": priority_rank,
+                    "matched_pattern": matched_pattern,
+                    "abs_value": abs_value,
+                }
+            if matched_pattern and matched_pattern not in matched_patterns:
+                matched_patterns.append(matched_pattern)
+        ordered_families = [
+            family
+            for family, _meta in sorted(
+                matched_families.items(),
+                key=lambda item: (
+                    int(item[1].get("priority_rank", len(patterns))),
+                    -float(item[1].get("abs_value", 0.0)),
+                    str(item[0]),
+                ),
+            )
+        ]
+        return {
+            "matched_unit_count": int(matched_units),
+            "matched_family_count": int(len(matched_families)),
+            "matched_families": ordered_families,
+            "matched_patterns": list(matched_patterns),
+            "best_priority_rank": min(
+                [int(meta.get("priority_rank", len(patterns))) for meta in matched_families.values()] or [len(patterns)]
+            ),
+            "max_abs_value": round(float(max_abs_value), 8),
+        }
+
+    def _summarize_fragment_runtime_priority(self, fragment: dict, patterns: list[str]) -> dict:
+        fragment_units: list[dict] = []
+        for group in fragment.get("sequence_groups", []) if isinstance(fragment.get("sequence_groups", []), list) else []:
+            if not isinstance(group, dict):
+                continue
+            for unit in group.get("units", []) if isinstance(group.get("units", []), list) else []:
+                if not isinstance(unit, dict):
+                    continue
+                fragment_units.append(unit)
+        return self._summarize_runtime_priority_units(fragment_units, patterns)
+
+    def _build_internal_runtime_attribute_groups(
+        self,
+        *,
+        owner_id: str,
+        owner_kind: str,
+        runtime_bound_attribute_units: list[dict] | None,
+        start_group_index: int,
+        origin_frame_id: str,
+        force_include: bool = False,
+    ) -> list[dict]:
+        if (not force_include) and (not bool(self._config.get("internal_fragment_include_runtime_bound_attributes", True))):
+            return []
+        max_count = max(0, int(self._config.get("internal_fragment_runtime_attribute_max_count", 8) or 8))
+        if max_count <= 0:
+            return []
+        numeric_only = bool(self._config.get("internal_fragment_runtime_attribute_numeric_only", True))
+        priority_enabled = bool(self._config.get("internal_fragment_runtime_attribute_priority_enabled", True))
+        sort_by_abs_value = bool(self._config.get("internal_fragment_runtime_attribute_sort_by_abs_value_desc", True))
+        priority_patterns = self._runtime_family_patterns_from_config(
+            "internal_fragment_runtime_attribute_priority_patterns",
+            fallback_key=None,
+        )
+        groups: list[dict] = []
+        seen: set[tuple[str, str, str, str]] = set()
+        owner_label = str(owner_id or owner_kind or "runtime")
+        ranked_units: list[tuple[int, float, int, str, float | None, dict, dict, dict, str]] = []
+        for raw_index, attr_unit in enumerate(runtime_bound_attribute_units or []):
+            if not isinstance(attr_unit, dict):
+                continue
+            family = str(attr_unit.get("attribute_name", "") or "").strip()
+            if not family:
+                continue
+            numeric_value = self._coerce_numeric(attr_unit.get("attribute_value"))
+            if numeric_only and numeric_value is None:
+                continue
+            meta = attr_unit.get("meta", {}) if isinstance(attr_unit.get("meta", {}), dict) else {}
+            ext_meta = meta.get("ext", {}) if isinstance(meta.get("ext", {}), dict) else {}
+            priority_rank = len(priority_patterns)
+            matched_pattern = ""
+            if priority_enabled and priority_patterns:
+                matched, priority_rank, matched_pattern = self._match_runtime_family_pattern(family, priority_patterns)
+                if not matched:
+                    priority_rank = len(priority_patterns)
+            sort_value = -abs(float(numeric_value)) if (sort_by_abs_value and numeric_value is not None) else 0.0
+            ranked_units.append(
+                (
+                    int(priority_rank),
+                    float(sort_value),
+                    int(raw_index),
+                    family,
+                    numeric_value,
+                    meta,
+                    ext_meta,
+                    dict(attr_unit),
+                    matched_pattern,
+                )
+            )
+        ranked_units.sort(key=lambda item: (item[0], item[1], item[2]))
+        for priority_rank, _sort_value, raw_index, family, numeric_value, meta, ext_meta, attr_unit, matched_pattern in ranked_units:
+            if len(groups) >= max_count:
+                break
+            discrete_value = "" if numeric_value is not None else str(attr_unit.get("attribute_value", "") or "").strip()
+            dedupe_key = (
+                family,
+                f"{round(float(numeric_value), 8):.8f}" if numeric_value is not None else discrete_value,
+                str(ext_meta.get("time_bucket_id", "") or ""),
+                str(ext_meta.get("time_basis", "") or ""),
+            )
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            if numeric_value is not None:
+                token = f"{family}:{round(float(numeric_value), 6)}"
+                attribute_value = round(float(numeric_value), 8)
+                value_type = "numerical"
+            else:
+                raw_token = str(
+                    attr_unit.get("token", "")
+                    or attr_unit.get("display_text", "")
+                    or attr_unit.get("raw", "")
+                    or ""
+                ).strip()
+                attribute_value = attr_unit.get("attribute_value")
+                token = raw_token or (f"{family}:{attribute_value}" if attribute_value not in {None, ""} else family)
+                value_type = str(attr_unit.get("value_type", "discrete") or "discrete")
+            group_index = int(start_group_index + len(groups))
+            unit_id = f"internal_attr::{owner_kind}::{owner_label}::{family}::{group_index}::{raw_index}"
+            unit_meta = dict(meta)
+            unit_ext = unit_meta.get("ext", {}) if isinstance(unit_meta.get("ext", {}), dict) else {}
+            unit_ext = dict(unit_ext)
+            unit_ext["projection_priority_rank"] = int(priority_rank)
+            if matched_pattern:
+                unit_ext["projection_priority_pattern"] = str(matched_pattern)
+            if numeric_value is not None:
+                unit_ext["projection_sort_abs_value"] = round(abs(float(numeric_value)), 8)
+            unit_meta["ext"] = unit_ext
+            unit = {
+                "unit_id": unit_id,
+                "object_type": "sa",
+                "token": token,
+                "display_text": token,
+                "unit_role": "attribute",
+                "unit_signature": f"A:{family}",
+                "sequence_index": 0,
+                "group_index": group_index,
+                "source_group_index": group_index,
+                "source_type": "internal_runtime_attribute",
+                "origin_frame_id": origin_frame_id,
+                "er": 0.0,
+                "ev": 0.0,
+                "total_energy": 0.0,
+                "is_punctuation": False,
+                "display_visible": True,
+                "is_placeholder": False,
+                "bundle_id": "",
+                "bundle_anchor_unit_id": "",
+                "bundle_anchor_signature": "",
+                "bundle_signature": "",
+                "bundle_member_unit_ids": [],
+                "bundle_member_signatures": [],
+                "attribute_name": family,
+                "attribute_value": attribute_value,
+                "value_type": value_type,
+                "meta": unit_meta,
+            }
+            groups.append(
+                {
+                    "group_index": group_index,
+                    "source_group_index": group_index,
+                    "source_type": "internal_runtime_attribute",
+                    "origin_frame_id": origin_frame_id,
+                    "tokens": [token],
+                    "units": [unit],
+                    "csa_bundles": [],
+                }
+            )
+        return groups
+
+    @staticmethod
+    def _collect_runtime_bound_attribute_units_for_structure_ids(
+        *,
+        structure_ids: list[str],
+        runtime_bound_attribute_map: dict[str, list[dict]] | None,
+    ) -> list[dict]:
+        if not runtime_bound_attribute_map:
+            return []
+        collected: list[dict] = []
+        for structure_id in structure_ids:
+            for unit in runtime_bound_attribute_map.get(str(structure_id), []) or []:
+                if isinstance(unit, dict):
+                    collected.append(dict(unit))
+        return collected
 
     def _make_placeholder_unit(self, *, placeholder_token: str, order_index: int, origin_frame_id: str) -> dict:
         return {
@@ -1179,6 +1770,16 @@ class StructureRetrievalEngine:
         now_ms: int,
     ) -> dict | None:
         ranked = []
+        anchor_bonus_enabled = bool(self._config.get("structure_anchor_runtime_family_bonus_enabled", True))
+        anchor_bonus_patterns = self._runtime_family_patterns_from_config(
+            "structure_anchor_runtime_family_bonus_patterns",
+            fallback_key="internal_fragment_runtime_attribute_priority_patterns",
+        )
+        anchor_bonus_value = max(0.0, float(self._config.get("structure_anchor_runtime_family_bonus_value", 0.55) or 0.55))
+        anchor_bonus_abs_gain = max(0.0, float(self._config.get("structure_anchor_runtime_family_bonus_abs_gain", 0.05) or 0.05))
+        anchor_bonus_abs_value_cap = max(0.0, float(self._config.get("structure_anchor_runtime_family_bonus_abs_value_cap", 2.0) or 2.0))
+        anchor_bonus_max_families = max(1, int(self._config.get("structure_anchor_runtime_family_bonus_max_families", 2) or 2))
+        anchor_priority_rank_gain = max(0.0, float(self._config.get("structure_anchor_runtime_family_priority_rank_gain", 0.45) or 0.45))
         for item in cam_items:
             if skip_structure_ids and item["structure_id"] in skip_structure_ids:
                 continue
@@ -1194,14 +1795,38 @@ class StructureRetrievalEngine:
                 runtime_weight=float(runtime_stats["runtime_weight"]),
                 temp_fatigue=temp_fatigue,
             )
-            ranked.append((score, item["order_index"], temp_fatigue, runtime_stats, item))
+            runtime_priority = self._summarize_runtime_priority_units(
+                item.get("runtime_bound_attribute_units", []) or [],
+                anchor_bonus_patterns,
+            )
+            runtime_family_bonus = 0.0
+            if anchor_bonus_enabled and int(runtime_priority.get("matched_family_count", 0) or 0) > 0:
+                rank_scale = 1.0
+                if anchor_bonus_patterns:
+                    max_rank = max(1, len(anchor_bonus_patterns) - 1)
+                    best_rank = max(0, min(max_rank, int(runtime_priority.get("best_priority_rank", len(anchor_bonus_patterns)) or len(anchor_bonus_patterns))))
+                    rank_scale += anchor_priority_rank_gain * (float(max_rank - best_rank) / float(max_rank))
+                runtime_family_bonus = (
+                    anchor_bonus_value
+                    * min(anchor_bonus_max_families, int(runtime_priority.get("matched_family_count", 0) or 0))
+                    * rank_scale
+                )
+                if float(runtime_priority.get("max_abs_value", 0.0) or 0.0) > 0.0 and anchor_bonus_abs_gain > 0.0:
+                    runtime_family_bonus += anchor_bonus_abs_gain * min(
+                        float(runtime_priority.get("max_abs_value", 0.0) or 0.0),
+                        anchor_bonus_abs_value_cap,
+                    )
+            ranked.append((score + runtime_family_bonus, item["order_index"], temp_fatigue, runtime_stats, item, score, runtime_family_bonus, runtime_priority))
         if not ranked:
             return None
         ranked.sort(key=lambda payload: (-payload[0], payload[1]))
-        score, _, temp_fatigue, runtime_stats, item = ranked[0]
+        score, _, temp_fatigue, runtime_stats, item, base_score, runtime_family_bonus, runtime_priority = ranked[0]
         return {
             **item,
             "anchor_score": round(float(score), 8),
+            "anchor_score_base": round(float(base_score), 8),
+            "anchor_runtime_family_bonus": round(float(runtime_family_bonus), 8),
+            "anchor_runtime_priority_families": list(runtime_priority.get("matched_families", [])),
             "temp_anchor_fatigue": round(float(temp_fatigue), 8),
             "runtime_weight": runtime_stats["runtime_weight"],
         }
@@ -1322,6 +1947,9 @@ class StructureRetrievalEngine:
             "runtime_weight": round(float(anchor_item.get("runtime_weight", 1.0)), 8),
             "temp_anchor_fatigue": round(float(anchor_item.get("temp_anchor_fatigue", 0.0)), 8),
             "anchor_score": round(float(anchor_item.get("anchor_score", 0.0)), 8),
+            "anchor_score_base": round(float(anchor_item.get("anchor_score_base", 0.0)), 8),
+            "anchor_runtime_family_bonus": round(float(anchor_item.get("anchor_runtime_family_bonus", 0.0)), 8),
+            "anchor_runtime_priority_families": list(anchor_item.get("anchor_runtime_priority_families", [])),
         }
 
     def _resolve_anchor_chain_match(
@@ -1526,6 +2154,52 @@ class StructureRetrievalEngine:
             )
         return candidates
 
+    @staticmethod
+    def _merge_match_context_payload(base_payload: dict | None, entry: dict | None = None) -> dict | None:
+        if not isinstance(base_payload, dict) and not isinstance(entry, dict):
+            return None
+        payload = dict(base_payload or {})
+        if not isinstance(entry, dict):
+            return payload
+        entry_ext = dict(entry.get("ext", {}) or {}) if isinstance(entry.get("ext"), dict) else {}
+        payload["match_entry"] = dict(entry)
+        base_ext = dict(payload.get("ext", {}) or {}) if isinstance(payload.get("ext"), dict) else {}
+        merged_ext = dict(base_ext)
+        merged_ext.update(entry_ext)
+        if merged_ext:
+            payload["ext"] = merged_ext
+        meta = dict(payload.get("meta", {}) or {}) if isinstance(payload.get("meta"), dict) else {}
+        meta_ext = dict(meta.get("ext", {}) or {}) if isinstance(meta.get("ext"), dict) else {}
+        meta_ext.update(entry_ext)
+        if meta_ext:
+            meta["ext"] = meta_ext
+            payload["meta"] = meta
+        for key in (
+            "source_em_id",
+            "memory_id",
+            "source_memory_created_at",
+            "memory_created_at",
+            "created_at",
+            "updated_at",
+            "last_updated_at",
+            "residual_origin_kind",
+            "residual_kind",
+        ):
+            if payload.get(key) not in (None, "", [], {}):
+                continue
+            value = entry.get(key)
+            if value in (None, "", [], {}):
+                value = entry_ext.get(key)
+            if value not in (None, "", [], {}):
+                payload[key] = value
+        if payload.get("object_type") in (None, ""):
+            residual_kind = str(payload.get("residual_origin_kind", "") or entry_ext.get("residual_origin_kind", "") or "")
+            source_em_id = str(payload.get("source_em_id", "") or entry_ext.get("source_em_id", "") or "")
+            memory_id = str(payload.get("memory_id", "") or entry_ext.get("memory_id", "") or "")
+            if source_em_id.startswith("em_") or memory_id.startswith("em_") or "memory" in residual_kind:
+                payload["object_type"] = "em"
+        return payload
+
     def _collect_numeric_bucket_group_candidates(
         self,
         *,
@@ -1619,15 +2293,14 @@ class StructureRetrievalEngine:
             required_ids = list(candidate.get("required_ids", []) or group_obj.get("required_structure_ids", []))
             min_required = max(1, int(min_required_count))
             skip_reason = ""
+            required_counts_covered = self._structure_id_counts_cover(
+                required_counts=self._count_structure_ids(required_ids),
+                available_counts=runtime_structure_counts,
+            )
             if len(required_ids) < min_required:
                 skip_reason = "below_min_required_count"
             elif anchor_structure_id not in required_ids:
                 skip_reason = "missing_anchor_structure"
-            elif not self._structure_id_counts_cover(
-                required_counts=self._count_structure_ids(required_ids),
-                available_counts=runtime_structure_counts,
-            ):
-                skip_reason = "required_structure_ids_not_covered"
             if skip_reason:
                 detail = self._build_group_skip_detail(
                     candidate=candidate,
@@ -1660,7 +2333,6 @@ class StructureRetrievalEngine:
                 int(common_part.get("common_length", 0)) > 0
                 and not common_part.get("residual_existing_signature", "")
                 and matched_existing_length >= existing_length
-                and bool(common_part.get("bundle_constraints_ok_existing_included", True))
             )
             contains_anchor = anchor_structure_id in matched_current_ids
             wave_similarity = self._wave_similarity(
@@ -1678,13 +2350,60 @@ class StructureRetrievalEngine:
                 structure_ratio=structure_ratio,
                 wave_similarity=wave_similarity,
             )
-            eligible = bool(
-                full_structure_included
+            context_support_hint = min(
+                1.0,
+                0.2
+                + (0.2 if candidate.get("owner_id", "") else 0.0)
+                + (0.15 if candidate.get("entry_id", "") else 0.0)
+                + (0.45 * max(0.0, min(1.0, float(path_strength) / max(1.0, float(path_strength) + 1.0)))),
+            )
+            v2_breakdown = self._build_group_match_score_v2_breakdown(
+                base_score=base_similarity,
+                matched_existing_units=self._collect_matched_units_from_common_part(group_profile, common_part, use_existing_side=True),
+                matched_incoming_units=matched_current_units,
+                bundle_constraints={
+                    "exact": bool(common_part.get("bundle_constraints_ok_exact", True)),
+                    "existing_included": bool(common_part.get("bundle_constraints_ok_existing_included", True)),
+                    "incoming_included": bool(common_part.get("bundle_constraints_ok_incoming_included", True)),
+                },
+                full_structure_included=full_structure_included,
+                context_payload=self._merge_match_context_payload(group_obj, candidate.get("entry_ref")),
+                context_support_hint=context_support_hint,
+                runtime_weight=float(candidate.get("group_runtime_weight", 1.0)),
+                entry_runtime_weight=float(candidate.get("entry_runtime_weight", 1.0)),
+                energy_profile_hint=wave_similarity,
+            )
+            blended_base_similarity = self._blend_v2_match_score(
+                legacy_score=base_similarity,
+                v2_score=float(v2_breakdown.get("score", base_similarity)),
+            )
+            soft_partial_enabled = bool(self._config.get("soft_partial_match_competition_enabled", True))
+            soft_partial_min_score = max(0.0, float(self._config.get("match_scoring_v2_min_score", 0.18) or 0.0))
+            soft_partial_eligible = bool(
+                soft_partial_enabled
+                and int(common_part.get("common_length", 0)) > 0
                 and contains_anchor
                 and len(required_ids) >= max(1, int(min_required_count))
+                and not full_structure_included
+                and float(blended_base_similarity) >= soft_partial_min_score
             )
-            competition_score = self._apply_runtime_modulation(
+            eligible = bool(
+                contains_anchor
+                and len(required_ids) >= max(1, int(min_required_count))
+                and (full_structure_included or soft_partial_eligible)
+            )
+            if not required_counts_covered and not eligible:
+                skip_reason = "required_structure_ids_not_covered"
+            competition_score_legacy = self._apply_runtime_modulation(
                 base_similarity=base_similarity,
+                path_strength=path_strength,
+            ) if eligible else 0.0
+            competition_score_v2 = self._apply_runtime_modulation(
+                base_similarity=float(v2_breakdown.get("score", 0.0)),
+                path_strength=path_strength,
+            ) if eligible else 0.0
+            competition_score = self._apply_runtime_modulation(
+                base_similarity=blended_base_similarity,
                 path_strength=path_strength,
             ) if eligible else 0.0
             detail = {
@@ -1697,18 +2416,26 @@ class StructureRetrievalEngine:
                 "entry_runtime_weight": round(float(candidate.get("entry_runtime_weight", 1.0)), 8),
                 "path_strength": round(float(path_strength), 8),
                 "base_similarity": round(float(base_similarity), 8),
+                "base_similarity_legacy": round(float(base_similarity), 8),
+                "base_similarity_v2": round(float(v2_breakdown.get("score", 0.0)), 8),
                 "coverage_ratio": round(float(coverage_ratio), 8),
                 "structure_ratio": round(float(structure_ratio), 8),
                 "wave_similarity": round(float(wave_similarity), 8),
                 "score": round(float(competition_score), 8),
                 "competition_score": round(float(competition_score), 8),
+                "competition_score_legacy": round(float(competition_score_legacy), 8),
+                "competition_score_v2": round(float(competition_score_v2), 8),
                 "similarity": round(float(competition_score), 8),
                 "full_structure_included": full_structure_included,
                 "contains_anchor": contains_anchor,
                 "eligible": eligible,
+                "soft_partial_eligible": soft_partial_eligible,
+                "eligibility_reason": "full_structure_included" if full_structure_included else ("soft_partial_score" if soft_partial_eligible else "not_eligible"),
+                "skip_reason": str(skip_reason or ""),
                 "common_part": common_part,
                 "chain_depth": int(parent_match.get("chain_depth", 0) + 1 if parent_match else 1),
             }
+            detail.update(self._flatten_match_score_v2(v2_breakdown))
             candidate_details.append(detail)
             if not eligible:
                 continue
@@ -1718,7 +2445,11 @@ class StructureRetrievalEngine:
                     "display_text": self._group_display_text(group_obj),
                     "required_ids": required_ids,
                     "competition_score": round(float(competition_score), 8),
+                    "competition_score_legacy": round(float(competition_score_legacy), 8),
+                    "competition_score_v2": round(float(competition_score_v2), 8),
                     "base_similarity": round(float(base_similarity), 8),
+                    "base_similarity_legacy": round(float(base_similarity), 8),
+                    "base_similarity_v2": round(float(v2_breakdown.get("score", 0.0)), 8),
                     "coverage_ratio": round(float(coverage_ratio), 8),
                     "structure_ratio": round(float(structure_ratio), 8),
                     "wave_similarity": round(float(wave_similarity), 8),
@@ -1731,6 +2462,7 @@ class StructureRetrievalEngine:
                     "owner_id": candidate.get("owner_id", ""),
                     "path_entries": list(parent_match.get("path_entries", [])) if parent_match else [],
                 }
+                best.update(self._flatten_match_score_v2(v2_breakdown))
                 best["path_entries"].append(
                     {
                         "owner_kind": candidate.get("owner_kind", ""),
@@ -1893,6 +2625,71 @@ class StructureRetrievalEngine:
         adjustment = float(self._config.get("structure_path_runtime_gain", 0.3)) * runtime_signal * base * (1.0 - base)
         adjusted = base + adjustment
         return round(max(0.0, min(1.0, adjusted)), 8)
+
+    def _build_group_match_score_v2_breakdown(
+        self,
+        *,
+        base_score: float,
+        matched_existing_units: list[dict],
+        matched_incoming_units: list[dict],
+        bundle_constraints: dict | None,
+        full_structure_included: bool,
+        context_payload: dict | None,
+        context_support_hint: float | None = None,
+        runtime_weight: float = 1.0,
+        entry_runtime_weight: float = 1.0,
+        energy_profile_hint: float | None = None,
+    ) -> dict[str, float | int]:
+        return build_match_score_v2(
+            config=self._config,
+            base_score=base_score,
+            matched_existing_units=matched_existing_units,
+            matched_incoming_units=matched_incoming_units,
+            bundle_constraints=bundle_constraints,
+            full_structure_included=full_structure_included,
+            context_payload=context_payload,
+            context_support_hint=context_support_hint,
+            runtime_weight=runtime_weight,
+            entry_runtime_weight=entry_runtime_weight,
+            energy_profile_hint=energy_profile_hint,
+            now_ms=self._runtime_match_now_ms,
+        )
+
+    def _blend_v2_match_score(self, *, legacy_score: float, v2_score: float) -> float:
+        legacy = max(0.0, min(1.0, float(legacy_score)))
+        v2 = max(0.0, min(1.0, float(v2_score)))
+        if not bool(self._config.get("match_scoring_v2_enabled", True)):
+            return round(legacy, 8)
+        if bool(self._config.get("match_scoring_v2_shadow_only", False)):
+            return round(legacy, 8)
+        blend = max(0.0, min(1.0, float(self._config.get("match_scoring_v2_blend_weight", 0.35))))
+        return round((legacy * (1.0 - blend)) + (v2 * blend), 8)
+
+    @staticmethod
+    def _flatten_match_score_v2(breakdown: dict[str, Any]) -> dict[str, float | int]:
+        return {
+            "v2_score": round(float(breakdown.get("score", 0.0)), 8),
+            "v2_base_score": round(float(breakdown.get("base_score", 0.0)), 8),
+            "v2_blended_component_mean": round(float(breakdown.get("blended_component_mean", 0.0)), 8),
+            "v2_numeric_score": round(float(breakdown.get("numeric_score", -1.0)), 8),
+            "v2_numeric_family_count": int(breakdown.get("numeric_family_count", 0)),
+            "v2_numeric_time_like_score": round(float(breakdown.get("numeric_time_like_score", -1.0)), 8),
+            "v2_numeric_time_like_family_count": int(breakdown.get("numeric_time_like_family_count", 0)),
+            "v2_numeric_time_like_wildcard_applied": bool(breakdown.get("numeric_time_like_wildcard_applied", False)),
+            "v2_numeric_time_like_weight": round(float(breakdown.get("numeric_time_like_weight", 0.0)), 8),
+            "v2_order_alignment_score": round(float(breakdown.get("order_alignment_score", -1.0)), 8),
+            "v2_attribute_anchor_score": round(float(breakdown.get("attribute_anchor_score", -1.0)), 8),
+            "v2_context_support_score": round(float(breakdown.get("context_support_score", -1.0)), 8),
+            "v2_energy_profile_score": round(float(breakdown.get("energy_profile_score", -1.0)), 8),
+            "v2_structure_inclusion_score": round(float(breakdown.get("structure_inclusion_score", 0.0)), 8),
+            "v2_time_factor_soft_bonus": round(float(breakdown.get("time_factor_soft_bonus", 1.0)), 8),
+            "v2_time_factor_applied": bool(breakdown.get("time_factor_applied", False)),
+            "v2_time_factor_similarity": round(float(breakdown.get("time_factor_similarity", 0.0)), 8),
+            "v2_time_factor_target_interval_sec": round(float(breakdown.get("time_factor_target_interval_sec", -1.0)), 8),
+            "v2_time_factor_memory_age_sec": round(float(breakdown.get("time_factor_memory_age_sec", -1.0)), 8),
+            "v2_available_component_count": int(breakdown.get("available_component_count", 0)),
+            "v2_threshold_margin": round(float(breakdown.get("threshold_margin", 0.0)), 8),
+        }
 
     def _wave_similarity(
         self,
@@ -2138,11 +2935,11 @@ class StructureRetrievalEngine:
         now_ms = int(time.time() * 1000)
         stats = group_obj.setdefault("stats", {})
         self._weight.decay_group(group_obj, now_ms=now_ms, round_step=1)
-        er_gain = max(0.0, float(matched_er_total)) * max(0.0, float(match_score)) * float(self._config.get("base_weight_er_gain", 0.08))
-        ev_wear = max(0.0, float(matched_ev_total)) * max(0.0, float(match_score)) * float(self._config.get("base_weight_ev_wear", 0.03))
-        stats["base_weight"] = round(
-            max(float(self._config.get("weight_floor", 0.05)), float(stats.get("base_weight", 1.0)) + er_gain - ev_wear),
-            8,
+        stats["base_weight"] = self._weight.update_base_weight_by_support(
+            current_base_weight=stats.get("base_weight", None),
+            reality_support=max(0.0, float(matched_er_total)),
+            virtual_support=max(0.0, float(matched_ev_total)),
+            match_score=max(0.0, float(match_score)),
         )
         self._weight.refresh_recent_state(stats, now_ms=now_ms, strength=max(float(self._config.get("recency_gain_refresh_floor", 0.45)), float(match_score)))
         self._weight.apply_match_fatigue(stats, strength=match_score)
@@ -2202,12 +2999,18 @@ class StructureRetrievalEngine:
             match_score=max(0.0, float(match_score)),
             now_ms=now_ms,
         )
-        delta_weight = max(0.0, float(delta_er)) * float(self._config.get("base_weight_er_gain", 0.08)) - max(0.0, float(delta_ev)) * float(self._config.get("base_weight_ev_wear", 0.03))
-        entry["base_weight"] = round(
-            max(float(self._config.get("weight_floor", 0.05)), float(entry.get("base_weight", 1.0)) + delta_weight),
-            8,
+        entry["base_weight"] = self._weight.update_base_weight_by_support(
+            current_base_weight=entry.get("base_weight", None),
+            reality_support=max(0.0, float(delta_er)),
+            virtual_support=max(0.0, float(delta_ev)),
+            match_score=max(0.0, float(match_score)),
         )
         entry["last_updated_at"] = now_ms
+
+    @staticmethod
+    def _mark_owner_context_dirty(owner_ctx: dict) -> None:
+        if isinstance(owner_ctx, dict):
+            owner_ctx["_dirty"] = True
 
     def _smooth_profile_merge(self, *, existing: dict[str, float], observed: dict[str, float], alpha: float) -> dict[str, float]:
         keys = set(existing.keys()) | set(observed.keys())
@@ -2366,6 +3169,7 @@ class StructureRetrievalEngine:
                 group_store=group_store,
                 cut_engine=cut_engine,
             )
+            self._mark_owner_context_dirty(owner_ctx)
             summary["actions"].append(
                 self._build_raw_residual_action(
                     action_type="reinforce_raw_residual",
@@ -2398,6 +3202,7 @@ class StructureRetrievalEngine:
                 delta_ev=0.0,
                 match_score=1.0,
             )
+            self._mark_owner_context_dirty(owner_ctx)
             child_ctx = self._open_owner_context(
                 owner_kind="sg",
                 owner_id=exact_item.get("group_id", ""),
@@ -2437,6 +3242,7 @@ class StructureRetrievalEngine:
                     / max(1.0, float(parent_group.get("path_strength", 1.0))),
                 ),
             )
+            self._mark_owner_context_dirty(owner_ctx)
             child_ctx = self._open_owner_context(
                 owner_kind="sg",
                 owner_id=parent_group.get("group_id", ""),
@@ -2544,13 +3350,16 @@ class StructureRetrievalEngine:
                 summary["new_group_ids"].append(common_group_id)
                 summary["new_group_details"].append(self._build_group_debug_payload(common_group, structure_store, cut_engine))
             self._remove_local_item(owner_ctx=owner_ctx, item=overlap_item)
+            self._mark_owner_context_dirty(owner_ctx)
             self._append_group_entry(
                 owner_ctx=owner_ctx,
                 group_obj=common_group,
                 relative_profile=common_relative_profile,
-                base_weight=max(
-                    float(self._config.get("weight_floor", 0.05)),
-                    float(overlap_item.get("base_weight", 1.0)) + self._profile_total_energy(residual_profile) * float(self._config.get("base_weight_er_gain", 0.08)),
+                base_weight=self._weight.update_base_weight_by_support(
+                    current_base_weight=overlap_item.get("base_weight", 0.0),
+                    reality_support=self._profile_total_energy(residual_profile),
+                    virtual_support=0.0,
+                    match_score=1.0,
                 ),
             )
 
@@ -2586,8 +3395,9 @@ class StructureRetrievalEngine:
                         owner_ctx=common_ctx,
                         group_obj=overlap_item.get("group_obj", {}),
                         relative_profile=existing_child_profile,
-                        base_weight=max(float(self._config.get("weight_floor", 0.05)), float(overlap_item.get("base_weight", 1.0))),
+                        base_weight=max(0.0, float(overlap_item.get("base_weight", 0.0))),
                     )
+                    self._mark_owner_context_dirty(common_ctx)
 
             if overlap_item.get("item_kind") == "raw_residual" and common_ctx:
                 existing_child_profile = self._build_descend_relative_profile(
@@ -2651,6 +3461,7 @@ class StructureRetrievalEngine:
             group_store=group_store,
             cut_engine=cut_engine,
         )
+        self._mark_owner_context_dirty(owner_ctx)
         summary["actions"].append(
             self._build_raw_residual_action(
                 action_type="append_raw_residual",
@@ -2672,9 +3483,7 @@ class StructureRetrievalEngine:
             existing_length = self._profile_unit_count(existing_profile)
             if common_part.get("residual_existing_signature", ""):
                 continue
-            # CSA 门控：existing_profile 中的 CSA bundle 必须被 residual_profile 的某一个 bundle 完整覆盖。
-            if not bool(common_part.get("bundle_constraints_ok_existing_included", True)):
-                continue
+            bundle_gate_existing_included = bool(common_part.get("bundle_constraints_ok_existing_included", True))
             if int(common_part.get("matched_existing_unit_count", 0)) < max(1, existing_length):
                 continue
             if self._profiles_fuzzy_equivalent(
@@ -2684,15 +3493,21 @@ class StructureRetrievalEngine:
             ):
                 continue
             candidate_key = (
+                1 if bundle_gate_existing_included else 0,
                 len(item.get("group_obj", {}).get("required_structure_ids", [])),
                 float(item.get("entry_runtime_weight", 0.0)),
             )
             current_key = (
+                1 if best.get("bundle_gate_existing_included", False) else 0,
                 len(best.get("group_obj", {}).get("required_structure_ids", [])),
                 float(best.get("entry_runtime_weight", 0.0)),
             ) if best else None
             if best is None or candidate_key > current_key:
-                best = {**item, "common_part": common_part}
+                best = {
+                    **item,
+                    "common_part": common_part,
+                    "bundle_gate_existing_included": bundle_gate_existing_included,
+                }
         return best
 
     def _find_best_overlap_candidate(self, *, owner_ctx: dict, residual_profile: dict, local_items: list[dict], cut_engine) -> dict | None:
@@ -2796,8 +3611,6 @@ class StructureRetrievalEngine:
             int(common_part.get("common_length", 0)) > 0
             and not common_part.get("residual_existing_signature", "")
             and int(common_part.get("matched_existing_unit_count", 0)) >= self._profile_unit_count(required_profile)
-            # CSA 门控：required_profile 中的 CSA bundle 必须被 container_profile 的某一个 bundle 完整覆盖。
-            and bool(common_part.get("bundle_constraints_ok_existing_included", True))
         )
 
     def _list_local_storage_items(self, *, owner_ctx: dict, structure_store, group_store, cut_engine) -> list[dict]:
@@ -2818,7 +3631,7 @@ class StructureRetrievalEngine:
                     "profile": profiles.get("raw_profile", {}),
                     "canonical_profile": profiles.get("canonical_profile", {}),
                     "raw_profile": profiles.get("raw_profile", {}),
-                    "base_weight": float(entry.get("base_weight", 1.0)),
+                    "base_weight": float(entry.get("base_weight", 0.0)),
                     "entry_runtime_weight": self._weight.entry_runtime_weight(entry),
                     "observed_energy_profile": dict(entry.get("observed_energy_profile", {})),
                 }
@@ -2841,7 +3654,7 @@ class StructureRetrievalEngine:
                     "signature": relative_profile.get("content_signature", ""),
                     "profile": relative_profile,
                     "relative_profile": relative_profile,
-                    "base_weight": float(entry.get("base_weight", 1.0)),
+                    "base_weight": float(entry.get("base_weight", 0.0)),
                     "entry_runtime_weight": self._weight.entry_runtime_weight(entry),
                     "path_strength": self._path_strength(
                         group_runtime_weight=self._preview_group_stats(group_obj, now_ms=int(time.time() * 1000))["runtime_weight"],
@@ -2941,8 +3754,30 @@ class StructureRetrievalEngine:
             group_store=group_store,
             cut_engine=cut_engine,
         )
+        owner_id = str(owner_ctx.get("owner_id", "") or "")
+        owner_kind = str(owner_ctx.get("owner_kind", "") or "")
+        entry_id = next_id("sgr")
+        entry_ext = merge_context_metadata(
+            {
+                "relation_type": "structure_raw_residual",
+                "owner_kind": owner_kind,
+                "owner_id": owner_id,
+                "round_index": round_index,
+                "source_em_id": episodic_memory_id,
+                "source_memory_created_at": int(time.time() * 1000),
+            },
+            context_ref_object_id=owner_id,
+            context_ref_object_type=owner_kind,
+            context_owner_structure_id=owner_id if owner_kind == "st" else "",
+            parent_ids=[owner_id] if owner_id else [],
+        )
+        entry_ext = merge_residual_metadata(
+            entry_ext,
+            residual_origin_kind="structure_raw_residual",
+            residual_origin_entry_id=entry_id,
+        )
         entry = {
-            "entry_id": next_id("sgr"),
+            "entry_id": entry_id,
             "entry_type": "raw_residual",
             "content_signature": residual_profile.get("content_signature", ""),
             "display_text": residual_profile.get("display_text", ""),
@@ -2952,7 +3787,12 @@ class StructureRetrievalEngine:
             "canonical_display_text": canonical_profile.get("display_text", ""),
             "canonical_flat_tokens": list(canonical_profile.get("flat_tokens", [])),
             "canonical_sequence_groups": list(canonical_profile.get("sequence_groups", [])),
-            "base_weight": round(max(float(self._config.get("weight_floor", 0.05)), 1.0 + self._profile_total_energy(canonical_profile) * float(self._config.get("base_weight_er_gain", 0.08))), 8),
+            "base_weight": self._weight.update_base_weight_by_support(
+                current_base_weight=None,
+                reality_support=self._profile_total_energy(canonical_profile),
+                virtual_support=0.0,
+                match_score=1.0,
+            ),
             "recent_gain": self._weight._target_recent_gain(strength=1.0),
             "fatigue": 0.0,
             "runtime_er": round(self._profile_total_energy(canonical_profile), 8),
@@ -2965,14 +3805,10 @@ class StructureRetrievalEngine:
             "observed_energy_profile": dict(full_energy_profile),
             "sample_count": 1,
             "memory_refs": [episodic_memory_id] if episodic_memory_id else [],
-            "ext": {
-                "relation_type": "structure_raw_residual",
-                "owner_kind": owner_ctx.get("owner_kind", ""),
-                "owner_id": owner_ctx.get("owner_id", ""),
-                "round_index": round_index,
-            },
+            "ext": entry_ext,
         }
         owner_ctx.setdefault("residual_table", []).append(entry)
+        self._mark_owner_context_dirty(owner_ctx)
         return entry
 
     def _append_group_entry(self, *, owner_ctx: dict, group_obj: dict, relative_profile: dict, base_weight: float) -> dict:
@@ -2984,15 +3820,13 @@ class StructureRetrievalEngine:
             if existing.get("relative_content_signature", "") != signature:
                 continue
             existing["base_weight"] = round(
-                max(
-                    float(self._config.get("weight_floor", 0.05)),
-                    float(existing.get("base_weight", 1.0))
-                    + float(base_weight) * float(self._config.get("structure_group_entry_reinforce_ratio", 0.15)),
-                ),
+                max(0.0, float(existing.get("base_weight", 0.0)))
+                + max(0.0, float(base_weight)) * float(self._config.get("structure_group_entry_reinforce_ratio", 0.15)),
                 8,
             )
             self._weight.refresh_recent_state(existing, now_ms=int(time.time() * 1000), strength=1.0)
             existing["last_updated_at"] = int(time.time() * 1000)
+            self._mark_owner_context_dirty(owner_ctx)
             return existing
         entry = {
             "entry_id": next_id("sge"),
@@ -3005,7 +3839,7 @@ class StructureRetrievalEngine:
             "relative_content_signature": signature,
             "relative_flat_tokens": list(relative_profile.get("flat_tokens", [])),
             "relative_sequence_groups": list(relative_profile.get("sequence_groups", [])),
-            "base_weight": round(max(float(self._config.get("weight_floor", 0.05)), float(base_weight)), 8),
+            "base_weight": round(max(0.0, float(base_weight)), 8),
             "recent_gain": self._weight._target_recent_gain(strength=1.0),
             "fatigue": 0.0,
             "runtime_er": 0.0,
@@ -3022,6 +3856,7 @@ class StructureRetrievalEngine:
             },
         }
         owner_ctx.setdefault("group_table", []).append(entry)
+        self._mark_owner_context_dirty(owner_ctx)
         return entry
 
     def _find_or_create_common_group(
@@ -3089,7 +3924,29 @@ class StructureRetrievalEngine:
             group_store.update(group_obj)
             return {"created": False, "group_obj": group_obj}
 
-        for existing_group in group_store.iter_items():
+        indexed_candidates = []
+        candidate_seen: set[str] = set()
+        candidate_limit = max(1, int(self._config.get("fallback_scan_hard_limit", 200) or 200))
+        if hasattr(group_store, "query_by_signature"):
+            indexed_candidates.extend(group_store.query_by_signature(full_signature, limit=candidate_limit))
+        if hasattr(group_store, "query_by_required_structures"):
+            indexed_candidates.extend(group_store.query_by_required_structures(required_ids, limit=candidate_limit))
+        if hasattr(group_store, "get_recent"):
+            recent_limit = max(0, min(candidate_limit, int(self._config.get("common_group_recent_fallback_limit", 32) or 32)))
+            indexed_candidates.extend(group_store.get_recent(recent_limit))
+        elif (
+            not indexed_candidates
+            and bool(self._config.get("allow_global_scan_on_runtime_path", False))
+            and hasattr(group_store, "iter_items")
+        ):
+            indexed_candidates.extend(group_store.iter_items()[:candidate_limit])
+
+        for existing_group in indexed_candidates:
+            group_id = str(existing_group.get("id", "") or "")
+            if group_id and group_id in candidate_seen:
+                continue
+            if group_id:
+                candidate_seen.add(group_id)
             existing_signature = str(existing_group.get("group_structure", {}).get("content_signature", ""))
             existing_full_profile = self._group_full_profile(
                 group_obj=existing_group,
@@ -3425,6 +4282,7 @@ class StructureRetrievalEngine:
                 "memory_table": structure_db.get("group_memory_table", []),
                 "used_fallback": bool(pointer_info.get("used_fallback")),
                 "resolved_db_id": structure_db.get("structure_db_id", ""),
+                "_dirty": False,
             }
 
         if owner_kind == "sg":
@@ -3451,11 +4309,14 @@ class StructureRetrievalEngine:
                 "memory_table": local_db.get("memory_table", []),
                 "used_fallback": False,
                 "resolved_db_id": owner_id,
+                "_dirty": False,
             }
         return None
 
     def _persist_owner_context(self, owner_ctx: dict, *, structure_store, group_store) -> None:
         if not owner_ctx:
+            return
+        if not bool(owner_ctx.get("_dirty", False)):
             return
         self._trim_owner_tables(owner_ctx)
         if owner_ctx.get("owner_kind") == "st":
@@ -3466,6 +4327,7 @@ class StructureRetrievalEngine:
             structure_db["group_residual_table"] = list(owner_ctx.get("residual_table", []))
             structure_db["group_memory_table"] = list(owner_ctx.get("memory_table", []))
             structure_store.update_db(structure_db)
+            owner_ctx["_dirty"] = False
             return
         if owner_ctx.get("owner_kind") == "sg":
             group_obj = owner_ctx.get("group_obj")
@@ -3476,6 +4338,7 @@ class StructureRetrievalEngine:
             local_db["residual_table"] = list(owner_ctx.get("residual_table", []))
             local_db["memory_table"] = list(owner_ctx.get("memory_table", []))
             group_store.update(group_obj)
+            owner_ctx["_dirty"] = False
 
     def _trim_owner_tables(self, owner_ctx: dict) -> None:
         group_limit = max(8, int(self._config.get("group_table_soft_limit", 128)))
@@ -3489,7 +4352,7 @@ class StructureRetrievalEngine:
             owner_ctx.get("group_table", []),
             key=lambda entry: (
                 -float(self._weight.entry_runtime_weight(entry)),
-                -float(entry.get("base_weight", 1.0)),
+                -float(entry.get("base_weight", 0.0)),
                 str(entry.get("entry_id", "")),
             ),
         )[:group_limit]
@@ -3497,7 +4360,7 @@ class StructureRetrievalEngine:
             owner_ctx.get("residual_table", []),
             key=lambda entry: (
                 -float(self._weight.entry_runtime_weight(entry)),
-                -float(entry.get("base_weight", 1.0)),
+                -float(entry.get("base_weight", 0.0)),
                 str(entry.get("entry_id", "")),
             ),
         )[:residual_limit]
@@ -3530,6 +4393,7 @@ class StructureRetrievalEngine:
             entry["last_updated_at"] = now_ms
             entry["round_index"] = round_index
             entry["event_kind"] = event_kind
+            self._mark_owner_context_dirty(owner_ctx)
             return
         owner_ctx.setdefault("memory_table", []).append(
             {
@@ -3541,6 +4405,7 @@ class StructureRetrievalEngine:
                 "last_updated_at": now_ms,
             }
         )
+        self._mark_owner_context_dirty(owner_ctx)
 
     def _ensure_group_entry_schema(self, entry: dict) -> None:
         now_ms = int(time.time() * 1000)
@@ -3554,7 +4419,7 @@ class StructureRetrievalEngine:
         entry.setdefault("relative_content_signature", entry.get("content_signature", ""))
         entry.setdefault("relative_flat_tokens", [])
         entry.setdefault("relative_sequence_groups", [])
-        entry.setdefault("base_weight", 1.0)
+        entry.setdefault("base_weight", 0.0)
         entry.setdefault("recent_gain", self._weight._target_recent_gain(strength=1.0))
         entry.setdefault("fatigue", 0.0)
         entry.setdefault("runtime_er", 0.0)
@@ -3578,7 +4443,7 @@ class StructureRetrievalEngine:
         entry.setdefault("canonical_display_text", "")
         entry.setdefault("canonical_flat_tokens", [])
         entry.setdefault("canonical_sequence_groups", [])
-        entry.setdefault("base_weight", 1.0)
+        entry.setdefault("base_weight", 0.0)
         entry.setdefault("recent_gain", self._weight._target_recent_gain(strength=1.0))
         entry.setdefault("fatigue", 0.0)
         entry.setdefault("runtime_er", 0.0)
@@ -3592,6 +4457,11 @@ class StructureRetrievalEngine:
         entry.setdefault("sample_count", 1)
         entry.setdefault("memory_refs", [])
         entry.setdefault("ext", {})
+        entry["ext"] = merge_context_metadata(entry.get("ext", {}))
+        entry["ext"] = merge_residual_metadata(
+            entry["ext"],
+            residual_origin_entry_id=entry.get("entry_id", ""),
+        )
 
     def _remove_local_item(self, *, owner_ctx: dict, item: dict) -> None:
         entry_id = str(item.get("entry_id", ""))
@@ -3756,7 +4626,10 @@ class StructureRetrievalEngine:
             )
             stored_ids = self._extract_structure_ids_from_profile(stored_profile)
             if stored_ids == required_ids and len(stored_ids) == len(required_ids):
-                return stored_profile
+                return self._enrich_profile_structure_units(
+                    profile=stored_profile,
+                    structure_store=structure_store,
+                )
         units = []
         for order_index, structure_id in enumerate(required_ids):
             structure_obj = structure_store.get(structure_id) if structure_store is not None else None
@@ -3800,6 +4673,95 @@ class StructureRetrievalEngine:
         if display_text:
             profile["display_text"] = display_text
         return profile
+
+    def _enrich_profile_structure_units(self, *, profile: dict, structure_store) -> dict:
+        if structure_store is None or not isinstance(profile, dict):
+            return profile
+        sequence_groups = []
+        touched = False
+        for raw_group in profile.get("sequence_groups", []):
+            if not isinstance(raw_group, dict):
+                sequence_groups.append(raw_group)
+                continue
+            cloned_group = dict(raw_group)
+            cloned_units = []
+            for raw_unit in raw_group.get("units", []):
+                if not isinstance(raw_unit, dict):
+                    cloned_units.append(raw_unit)
+                    continue
+                cloned_unit = dict(raw_unit)
+                structure_id = str(cloned_unit.get("unit_id", "") or cloned_unit.get("token", "") or "")
+                unit_signature = str(cloned_unit.get("unit_signature", "") or "")
+                if structure_id and (
+                    str(cloned_unit.get("object_type", "") or "") == "st"
+                    or unit_signature.startswith("ST:")
+                ):
+                    structure_obj = structure_store.get(structure_id)
+                    if structure_obj is not None:
+                        existing_structure_numeric_slots = [
+                            dict(slot)
+                            for slot in cloned_unit.get("structure_numeric_slots", [])
+                            if isinstance(slot, dict)
+                        ] if isinstance(cloned_unit.get("structure_numeric_slots", []), list) else []
+                        existing_average_numeric_slots = [
+                            dict(slot)
+                            for slot in cloned_unit.get("average_numeric_slots", [])
+                            if isinstance(slot, dict)
+                        ] if isinstance(cloned_unit.get("average_numeric_slots", []), list) else []
+                        fuzzy_metadata = self._build_structure_fuzzy_metadata(structure_obj)
+                        merged_numeric_slots = []
+                        seen_numeric_slots: set[tuple[str, float, str]] = set()
+                        for slot in [
+                            *[dict(slot) for slot in fuzzy_metadata.get("numeric_slots", []) if isinstance(slot, dict)],
+                            *existing_structure_numeric_slots,
+                        ]:
+                            family = str(slot.get("family", "") or "")
+                            value = self._coerce_numeric(slot.get("value"))
+                            semantic_kind = str(slot.get("semantic_kind", "") or "")
+                            if not family or value is None:
+                                continue
+                            signature = (family, round(float(value), 8), semantic_kind)
+                            if signature in seen_numeric_slots:
+                                continue
+                            seen_numeric_slots.add(signature)
+                            merged_numeric_slots.append(
+                                {
+                                    "family": family,
+                                    "value": round(float(value), 8),
+                                    **({"semantic_kind": semantic_kind} if semantic_kind else {}),
+                                }
+                            )
+                        cloned_unit["structure_display_text"] = self._structure_display_text(structure_obj)
+                        cloned_unit["structure_grouped_display_text"] = (
+                            fuzzy_metadata.get("grouped_display_text", "")
+                            or cloned_unit.get("display_text", "")
+                            or structure_id
+                        )
+                        cloned_unit["structure_sequence_groups"] = [
+                            dict(group)
+                            for group in (structure_obj.get("structure", {}) or {}).get("sequence_groups", [])
+                            if isinstance(group, dict)
+                        ]
+                        cloned_unit["structure_display_template"] = (
+                            fuzzy_metadata.get("display_template", "")
+                            or cloned_unit["structure_grouped_display_text"]
+                        )
+                        cloned_unit["structure_fuzzy_signature"] = (
+                            fuzzy_metadata.get("fuzzy_signature", "")
+                            or unit_signature
+                        )
+                        cloned_unit["structure_numeric_slots"] = merged_numeric_slots
+                        if existing_average_numeric_slots:
+                            cloned_unit["average_numeric_slots"] = existing_average_numeric_slots
+                        touched = True
+                cloned_units.append(cloned_unit)
+            cloned_group["units"] = cloned_units
+            sequence_groups.append(cloned_group)
+        if not touched:
+            return profile
+        enriched = dict(profile)
+        enriched["sequence_groups"] = sequence_groups
+        return enriched
 
     @staticmethod
     def _structure_display_text(structure_obj: dict | None) -> str:
@@ -3955,6 +4917,8 @@ class StructureRetrievalEngine:
         total_er: float,
         total_ev: float,
         ext: dict | None = None,
+        runtime_bound_attribute_units: list[dict] | None = None,
+        force_runtime_attribute_groups: bool = False,
     ) -> dict | None:
         profile_data = dict(profile or {})
         sequence_groups = [
@@ -3963,6 +4927,18 @@ class StructureRetrievalEngine:
             if isinstance(group, dict)
         ]
         flat_tokens = [str(token) for token in (profile_data.get("flat_tokens", []) or []) if str(token)]
+        runtime_attribute_groups = self._build_internal_runtime_attribute_groups(
+            owner_id=owner_id,
+            owner_kind=owner_kind,
+            runtime_bound_attribute_units=runtime_bound_attribute_units,
+            start_group_index=len(sequence_groups),
+            origin_frame_id=str(source_group_id or owner_id or source_phase),
+            force_include=force_runtime_attribute_groups,
+        )
+        if runtime_attribute_groups:
+            sequence_groups.extend(runtime_attribute_groups)
+            for group in runtime_attribute_groups:
+                flat_tokens.extend([str(token) for token in (group.get("tokens", []) or []) if str(token)])
         if not sequence_groups and flat_tokens:
             sequence_groups = [
                 {
@@ -3975,6 +4951,18 @@ class StructureRetrievalEngine:
         total_energy = round(max(0.0, float(total_er)) + max(0.0, float(total_ev)), 8)
         if total_energy <= 0.0 or not sequence_groups:
             return None
+        fragment_ext = dict(ext or {})
+        if runtime_attribute_groups:
+            fragment_ext.setdefault("runtime_bound_attribute_unit_count", int(len(runtime_attribute_groups)))
+            fragment_ext.setdefault(
+                "runtime_bound_attribute_names",
+                [
+                    str(unit.get("attribute_name", ""))
+                    for group in runtime_attribute_groups
+                    for unit in (group.get("units", []) or [])
+                    if isinstance(unit, dict) and str(unit.get("attribute_name", ""))
+                ],
+            )
         return {
             "fragment_id": next_id("sif"),
             "source_group_id": source_group_id,
@@ -3988,7 +4976,7 @@ class StructureRetrievalEngine:
             "er_hint": round(max(0.0, float(total_er)), 8),
             "ev_hint": round(max(0.0, float(total_ev)), 8),
             "energy_hint": total_energy,
-            "ext": dict(ext or {}),
+            "ext": fragment_ext,
         }
 
     def _build_attention_landscape_fragment(
@@ -4161,6 +5149,7 @@ class StructureRetrievalEngine:
         fallback_total_er: float,
         fallback_total_ev: float,
         cut_engine,
+        runtime_bound_attribute_units: list[dict] | None = None,
     ) -> list[dict]:
         if not bool(self._config.get("internal_storage_projection_enabled", True)):
             return []
@@ -4212,6 +5201,7 @@ class StructureRetrievalEngine:
                 profile=profile,
                 total_er=er_total,
                 total_ev=ev_total,
+                runtime_bound_attribute_units=runtime_bound_attribute_units,
                 ext={
                     "storage_owner_kind": str(storage_summary.get("owner_kind", "") or ""),
                     "storage_owner_id": str(storage_summary.get("owner_id", "") or ""),
@@ -4237,6 +5227,162 @@ class StructureRetrievalEngine:
         candidates.sort(key=lambda item: (int(item[0]), float(item[2]), -int(item[1])), reverse=True)
         return [dict(item[3]) for item in candidates[:max_fragments]]
 
+    def _build_cam_runtime_priority_fragments(
+        self,
+        *,
+        cam_items: list[dict],
+        budget_er_map: dict[str, float],
+        budget_ev_map: dict[str, float],
+        existing_fragments: list[dict],
+    ) -> tuple[list[dict], dict]:
+        enabled = bool(self._config.get("internal_cam_runtime_priority_projection_enabled", True))
+        if not enabled:
+            return [], {"enabled": False, "fragment_count": 0, "projected_family_count": 0, "candidate_count": 0}
+        patterns = self._runtime_family_patterns_from_config(
+            "internal_cam_runtime_priority_projection_patterns",
+            fallback_key="internal_fragment_runtime_attribute_priority_patterns",
+        )
+        if not patterns:
+            return [], {"enabled": True, "fragment_count": 0, "projected_family_count": 0, "candidate_count": 0, "reason": "no_patterns"}
+        ratio = max(0.0, float(self._config.get("internal_cam_runtime_priority_projection_ratio", 0.08) or 0.08))
+        min_energy = max(0.0, float(self._config.get("internal_cam_runtime_priority_projection_min_energy", 0.05) or 0.05))
+        max_fragments = max(0, int(self._config.get("internal_cam_runtime_priority_projection_max_fragments", 2) or 2))
+        require_unrepresented = bool(self._config.get("internal_cam_runtime_priority_projection_require_unrepresented", True))
+        if ratio <= 0.0 or max_fragments <= 0:
+            return [], {"enabled": True, "fragment_count": 0, "projected_family_count": 0, "candidate_count": 0, "reason": "ratio_or_cap_zero"}
+
+        represented_by_structure: dict[str, set[str]] = {}
+        for fragment in existing_fragments or []:
+            if not isinstance(fragment, dict):
+                continue
+            ext = fragment.get("ext", {}) if isinstance(fragment.get("ext", {}), dict) else {}
+            fragment_families = {
+                str(name)
+                for name in (ext.get("runtime_bound_attribute_names", []) or [])
+                if str(name)
+            }
+            if not fragment_families:
+                continue
+            candidate_ids = [
+                str(ext.get("runtime_priority_parent_structure_id", "") or ""),
+                str(ext.get("storage_owner_id", "") or ""),
+                str(fragment.get("source_structure_id", "") or ""),
+            ]
+            for structure_id in candidate_ids:
+                if not structure_id:
+                    continue
+                represented_by_structure.setdefault(structure_id, set()).update(fragment_families)
+
+        ranked_candidates: list[tuple[int, float, float, int, dict, list[dict], list[str]]] = []
+        for raw_index, item in enumerate(cam_items or []):
+            if not isinstance(item, dict):
+                continue
+            structure_id = str(item.get("structure_id", "") or "")
+            if not structure_id:
+                continue
+            remaining_er = max(0.0, float(budget_er_map.get(structure_id, 0.0)))
+            remaining_ev = max(0.0, float(budget_ev_map.get(structure_id, 0.0)))
+            total_energy = round(remaining_er + remaining_ev, 8)
+            if total_energy < min_energy:
+                continue
+            runtime_units = [dict(unit) for unit in (item.get("runtime_bound_attribute_units", []) or []) if isinstance(unit, dict)]
+            if not runtime_units:
+                continue
+            priority_summary = self._summarize_runtime_priority_units(runtime_units, patterns)
+            candidate_families = list(priority_summary.get("matched_families", []))
+            if not candidate_families:
+                continue
+            if require_unrepresented:
+                represented = represented_by_structure.get(structure_id, set())
+                candidate_families = [family for family in candidate_families if family not in represented]
+                if not candidate_families:
+                    continue
+            filtered_units = [
+                unit
+                for unit in runtime_units
+                if str(unit.get("attribute_name", "") or "") in set(candidate_families)
+            ]
+            if not filtered_units:
+                continue
+            best_rank = len(patterns)
+            max_abs_value = 0.0
+            for unit in filtered_units:
+                meta = self._runtime_attribute_priority_meta(unit, patterns)
+                best_rank = min(best_rank, int(meta.get("priority_rank", len(patterns))))
+                max_abs_value = max(max_abs_value, float(meta.get("abs_value", 0.0) or 0.0))
+            ranked_candidates.append(
+                (
+                    int(best_rank),
+                    -float(total_energy),
+                    -float(max_abs_value),
+                    int(raw_index),
+                    dict(item),
+                    filtered_units,
+                    list(candidate_families),
+                )
+            )
+        ranked_candidates.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+
+        fragments: list[dict] = []
+        projected_family_total = 0
+        projected_units_total = 0
+        chosen_rows: list[dict] = []
+        for best_rank, _neg_energy, _neg_abs, raw_index, item, filtered_units, candidate_families in ranked_candidates[:max_fragments]:
+            structure_id = str(item.get("structure_id", "") or "")
+            remaining_er = max(0.0, float(budget_er_map.get(structure_id, 0.0)))
+            remaining_ev = max(0.0, float(budget_ev_map.get(structure_id, 0.0)))
+            projected_er = round(remaining_er * ratio, 8)
+            projected_ev = round(remaining_ev * ratio, 8)
+            if projected_er + projected_ev <= 0.0:
+                continue
+            fragment = self._build_internal_fragment_from_profile(
+                owner_id=f"runtime_priority::{structure_id}",
+                owner_kind="runtime_priority_sidepath",
+                source_group_id="",
+                source_phase="cam_runtime_priority_sidepath",
+                display_text=str(item.get("display_text", "") or structure_id),
+                profile={"sequence_groups": [], "flat_tokens": []},
+                total_er=projected_er,
+                total_ev=projected_ev,
+                runtime_bound_attribute_units=filtered_units,
+                force_runtime_attribute_groups=True,
+                ext={
+                    "runtime_priority_parent_structure_id": structure_id,
+                    "runtime_priority_projected_families": list(candidate_families),
+                    "runtime_priority_candidate_rank": int(best_rank),
+                    "runtime_priority_projection_ratio": round(float(ratio), 8),
+                    "runtime_priority_projection_source": "cam_sidepath",
+                },
+            )
+            if fragment is None:
+                continue
+            fragments.append(fragment)
+            projected_family_total += len(candidate_families)
+            projected_units_total += len(filtered_units)
+            represented_by_structure.setdefault(structure_id, set()).update(candidate_families)
+            chosen_rows.append(
+                {
+                    "structure_id": structure_id,
+                    "family_count": int(len(candidate_families)),
+                    "unit_count": int(len(filtered_units)),
+                    "families": list(candidate_families),
+                    "candidate_rank": int(best_rank),
+                    "projected_er": projected_er,
+                    "projected_ev": projected_ev,
+                    "raw_index": int(raw_index),
+                }
+            )
+        return fragments, {
+            "enabled": True,
+            "candidate_count": int(len(ranked_candidates)),
+            "fragment_count": int(len(fragments)),
+            "projected_family_count": int(projected_family_total),
+            "projected_unit_count": int(projected_units_total),
+            "projection_ratio": round(float(ratio), 8),
+            "require_unrepresented": bool(require_unrepresented),
+            "items": chosen_rows[: min(16, len(chosen_rows))],
+        }
+
     def _build_internal_group_fragment(
         self,
         *,
@@ -4249,6 +5395,7 @@ class StructureRetrievalEngine:
         group_store,
         cut_engine,
         profile_cache: dict[str, list[dict]] | None = None,
+        runtime_bound_attribute_units: list[dict] | None = None,
     ) -> dict | None:
         group_id = str(group_obj.get("id", "") or "")
         if not group_id:
@@ -4274,6 +5421,7 @@ class StructureRetrievalEngine:
             total_er=consumed_er,
             total_ev=consumed_ev,
             ext={"required_structure_ids": list(required_ids)},
+            runtime_bound_attribute_units=runtime_bound_attribute_units,
         )
 
     def _build_internal_fragments(
@@ -4288,6 +5436,7 @@ class StructureRetrievalEngine:
         group_store,
         cut_engine,
         profile_cache: dict[str, list[dict]] | None = None,
+        runtime_bound_attribute_map: dict[str, list[dict]] | None = None,
     ) -> list[dict]:
         fragments = []
         for structure_id in structure_ids:
@@ -4315,6 +5464,7 @@ class StructureRetrievalEngine:
                 profile=restored_profile,
                 total_er=total_er,
                 total_ev=total_ev,
+                runtime_bound_attribute_units=list(runtime_bound_attribute_map.get(str(structure_id), []) or []) if runtime_bound_attribute_map else None,
             )
             if fragment is not None:
                 fragments.append(fragment)
@@ -4419,6 +5569,16 @@ class StructureRetrievalEngine:
         w_cp = float(self._config.get("internal_resolution_value_weight_cp_abs", 0.35) or 0.35)
         w_rw = float(self._config.get("internal_resolution_value_weight_runtime_weight", 0.15) or 0.15)
         focus_gamma = float(self._config.get("internal_resolution_focus_credit_gamma", 0.25) or 0.25)
+        runtime_family_bonus_enabled = bool(self._config.get("internal_resolution_runtime_family_bonus_enabled", True))
+        runtime_family_bonus_patterns = self._runtime_family_patterns_from_config(
+            "internal_resolution_runtime_family_bonus_patterns",
+            fallback_key="internal_fragment_runtime_attribute_priority_patterns",
+        )
+        runtime_family_bonus_value = max(0.0, float(self._config.get("internal_resolution_runtime_family_bonus_value", 0.35) or 0.35))
+        runtime_family_bonus_abs_gain = max(0.0, float(self._config.get("internal_resolution_runtime_family_bonus_abs_gain", 0.08) or 0.08))
+        runtime_family_bonus_abs_value_cap = max(0.0, float(self._config.get("internal_resolution_runtime_family_bonus_abs_value_cap", 2.0) or 2.0))
+        runtime_family_bonus_max_families = max(1, int(self._config.get("internal_resolution_runtime_family_bonus_max_families", 2) or 2))
+        runtime_family_priority_rank_gain = max(0.0, float(self._config.get("internal_resolution_runtime_family_priority_rank_gain", 0.45) or 0.45))
 
         # Gather fragment stats (raw unit counts + value/cost).
         infos: list[dict] = []
@@ -4449,9 +5609,32 @@ class StructureRetrievalEngine:
             runtime_weight = float(cam.get("runtime_weight", 1.0) or 1.0)
             focus_credit = float(self._internal_resolution_focus_credit.get(sid, 0.0) or 0.0)
             focus_multiplier = 1.0 + max(0.0, float(focus_gamma)) * max(0.0, focus_credit)
+            runtime_priority = self._summarize_fragment_runtime_priority(fragment, runtime_family_bonus_patterns)
+            runtime_priority_family_count = int(runtime_priority.get("matched_family_count", 0) or 0)
+            runtime_priority_unit_count = int(runtime_priority.get("matched_unit_count", 0) or 0)
+            runtime_priority_max_abs_value = float(runtime_priority.get("max_abs_value", 0.0) or 0.0)
+            runtime_priority_best_rank = int(runtime_priority.get("best_priority_rank", len(runtime_family_bonus_patterns)))
 
             # Value uses only runtime signals (energy/cp/runtime_weight), no token semantics.
             value = max(0.0, w_energy * energy) + max(0.0, w_cp * cp_abs) + max(0.0, w_rw * runtime_weight)
+            runtime_family_bonus = 0.0
+            if runtime_family_bonus_enabled and runtime_priority_family_count > 0:
+                rank_scale = 1.0
+                if runtime_family_bonus_patterns:
+                    max_rank = max(1, len(runtime_family_bonus_patterns) - 1)
+                    best_rank = max(0, min(max_rank, runtime_priority_best_rank))
+                    rank_scale += runtime_family_priority_rank_gain * (float(max_rank - best_rank) / float(max_rank))
+                runtime_family_bonus = (
+                    runtime_family_bonus_value
+                    * min(runtime_family_bonus_max_families, runtime_priority_family_count)
+                    * rank_scale
+                )
+                if runtime_priority_max_abs_value > 0.0 and runtime_family_bonus_abs_gain > 0.0:
+                    runtime_family_bonus += runtime_family_bonus_abs_gain * min(
+                        runtime_priority_max_abs_value,
+                        runtime_family_bonus_abs_value_cap,
+                    )
+            value += runtime_family_bonus
             value_eff = value * focus_multiplier
 
             cost = max(1, raw_units_eff)
@@ -4474,6 +5657,13 @@ class StructureRetrievalEngine:
                     "focus_credit": focus_credit,
                     "focus_multiplier": focus_multiplier,
                     "value_eff": value_eff,
+                    "runtime_family_bonus": round(float(runtime_family_bonus), 8),
+                    "runtime_priority_family_count": int(runtime_priority_family_count),
+                    "runtime_priority_unit_count": int(runtime_priority_unit_count),
+                    "runtime_priority_best_rank": int(runtime_priority_best_rank),
+                    "runtime_priority_max_abs_value": round(float(runtime_priority_max_abs_value), 8),
+                    "runtime_priority_families": list(runtime_priority.get("matched_families", [])),
+                    "runtime_priority_patterns": list(runtime_priority.get("matched_patterns", [])),
                     "weight_base": (value_eff / float(cost_eff)) if cost_eff > 0 else float(value_eff),
                     "richness_score": float(value_eff) * math.pow(max(1.0, float(cost)), max(0.0, float(self._config.get("internal_resolution_structure_richness_power", 0.5) or 0.5))),
                     "max_k_eff": max_k_eff,
@@ -4495,6 +5685,17 @@ class StructureRetrievalEngine:
             }
 
         raw_total_units_all_candidates = int(raw_total_units)
+        runtime_priority_structure_count_total = sum(
+            1 for info in infos if int(info.get("runtime_priority_family_count", 0) or 0) > 0
+        )
+        runtime_priority_family_match_total_candidates = sum(
+            int(info.get("runtime_priority_family_count", 0) or 0)
+            for info in infos
+        )
+        runtime_family_bonus_total_candidates = round(
+            sum(float(info.get("runtime_family_bonus", 0.0) or 0.0) for info in infos),
+            8,
+        )
         # Sort by weight_base for deterministic allocation.
         infos.sort(key=lambda it: (float(it.get("weight_base", 0.0) or 0.0), float(it.get("value_eff", 0.0) or 0.0)), reverse=True)
         structure_count_total = len(infos)
@@ -4627,6 +5828,9 @@ class StructureRetrievalEngine:
         trimmed: list[dict] = []
         per_structure: list[dict] = []
         selected_total_units = 0
+        selected_attribute_unit_total = 0
+        selected_priority_attribute_unit_total = 0
+        rescued_priority_attribute_unit_total = 0
 
         by_sid = {str(f.get("source_structure_id", "")) or str(f.get("display_text", "")): dict(f) for f in fragments}
         for it in infos:
@@ -4644,14 +5848,24 @@ class StructureRetrievalEngine:
                 focus_credit=float(it.get("focus_credit", 0.0) or 0.0),
             )
             selected_total_units += int(trim_info.get("selected_unit_count", 0) or 0)
+            selected_attribute_unit_total += int(trim_info.get("selected_attribute_unit_count", 0) or 0)
+            selected_priority_attribute_unit_total += int(trim_info.get("selected_priority_attribute_unit_count", 0) or 0)
+            rescued_priority_attribute_unit_total += int(trim_info.get("rescued_priority_attribute_count", 0) or 0)
             trimmed.append(trimmed_fragment)
             per_structure.append(
                 {
                     "structure_id": sid,
                     "raw_unit_count": int(it.get("raw_unit_count", 0) or 0),
                     "selected_unit_count": int(trim_info.get("selected_unit_count", 0) or 0),
+                    "selected_attribute_unit_count": int(trim_info.get("selected_attribute_unit_count", 0) or 0),
+                    "selected_priority_attribute_unit_count": int(trim_info.get("selected_priority_attribute_unit_count", 0) or 0),
+                    "rescued_priority_attribute_count": int(trim_info.get("rescued_priority_attribute_count", 0) or 0),
                     "target_unit_count": int(target_k),
                     "focus_credit": round(float(it.get("focus_credit", 0.0) or 0.0), 8),
+                    "runtime_family_bonus": round(float(it.get("runtime_family_bonus", 0.0) or 0.0), 8),
+                    "runtime_priority_family_count": int(it.get("runtime_priority_family_count", 0) or 0),
+                    "runtime_priority_unit_count": int(it.get("runtime_priority_unit_count", 0) or 0),
+                    "runtime_priority_best_rank": int(it.get("runtime_priority_best_rank", len(runtime_family_bonus_patterns)) or len(runtime_family_bonus_patterns)),
                     "cursor_before": int(trim_info.get("cursor_before", 0) or 0),
                     "cursor_after": int(trim_info.get("cursor_after", 0) or 0),
                 }
@@ -4664,6 +5878,17 @@ class StructureRetrievalEngine:
             sid = str(f.get("source_structure_id", "")) or str(f.get("display_text", ""))
             final_fragments.append(trimmed_by_sid.get(sid, f))
 
+        runtime_priority_structure_count_selected = sum(
+            1 for info in infos if int(info.get("runtime_priority_family_count", 0) or 0) > 0
+        )
+        runtime_priority_family_match_total = sum(
+            int(info.get("runtime_priority_family_count", 0) or 0)
+            for info in infos
+        )
+        runtime_family_bonus_total = round(
+            sum(float(info.get("runtime_family_bonus", 0.0) or 0.0) for info in infos),
+            8,
+        )
         summary = {
             "enabled": True,
             "detail_budget": int(detail_budget),
@@ -4678,9 +5903,18 @@ class StructureRetrievalEngine:
             "selection_mode": selection_mode,
             "rich_candidate_count": int(rich_candidate_count),
             "rich_selected_count": int(rich_selected_count),
+            "runtime_priority_structure_count_total_candidates": int(runtime_priority_structure_count_total),
+            "runtime_priority_structure_count": int(runtime_priority_structure_count_selected),
+            "runtime_priority_family_match_total_candidates": int(runtime_priority_family_match_total_candidates),
+            "runtime_priority_family_match_total": int(runtime_priority_family_match_total),
+            "runtime_family_bonus_total_candidates": round(float(runtime_family_bonus_total_candidates), 8),
+            "runtime_family_bonus_total": round(float(runtime_family_bonus_total), 8),
             "raw_unit_count": int(raw_total_units),
             "raw_unit_count_total_candidates": int(raw_total_units_all_candidates),
             "selected_unit_count": int(selected_total_units),
+            "selected_attribute_unit_count": int(selected_attribute_unit_total),
+            "selected_priority_attribute_unit_count": int(selected_priority_attribute_unit_total),
+            "rescued_priority_attribute_unit_count": int(rescued_priority_attribute_unit_total),
             "min_per_structure": int(min_per_structure),
             "base_max_per_structure": int(base_max_per_structure),
             "cost_cap": int(cost_cap),
@@ -4818,11 +6052,41 @@ class StructureRetrievalEngine:
         for idx, entry in enumerate(flat):
             entry["flat_index"] = int(idx)
 
+        runtime_attr_rescue_enabled = bool(self._config.get("internal_resolution_runtime_attribute_rescue_enabled", True))
+        runtime_attr_patterns = self._runtime_family_patterns_from_config(
+            "internal_resolution_runtime_attribute_rescue_patterns",
+            fallback_key="internal_fragment_runtime_attribute_priority_patterns",
+        )
+        runtime_attr_score_bonus = max(0.0, float(self._config.get("internal_resolution_runtime_attribute_score_bonus", 0.75) or 0.75))
+        runtime_attr_abs_gain = max(0.0, float(self._config.get("internal_resolution_runtime_attribute_abs_gain", 0.1) or 0.1))
+        runtime_attr_abs_value_cap = max(0.0, float(self._config.get("internal_resolution_runtime_attribute_abs_value_cap", 2.0) or 2.0))
+        runtime_attr_priority_rank_gain = max(0.0, float(self._config.get("internal_resolution_runtime_attribute_priority_rank_gain", 0.35) or 0.35))
+        runtime_attr_rescue_ratio = max(0.0, min(1.0, float(self._config.get("internal_resolution_runtime_attribute_rescue_ratio", 0.25) or 0.25)))
+        runtime_attr_rescue_min_slots = max(0, int(self._config.get("internal_resolution_runtime_attribute_rescue_min_slots", 1) or 1))
+        runtime_attr_rescue_max_slots = max(runtime_attr_rescue_min_slots, int(self._config.get("internal_resolution_runtime_attribute_rescue_max_slots", 2) or 2))
+        priority_attribute_entries: list[dict] = []
+        attribute_candidate_count = 0
+        for entry in flat:
+            unit = entry["unit"]
+            if str(entry.get("unit_role", "")) == "attribute":
+                attribute_candidate_count += 1
+            priority_meta = self._runtime_attribute_priority_meta(unit, runtime_attr_patterns)
+            entry["priority_runtime_attribute"] = bool(priority_meta.get("matched", False))
+            entry["priority_runtime_attribute_rank"] = int(priority_meta.get("priority_rank", len(runtime_attr_patterns)))
+            entry["priority_runtime_attribute_pattern"] = str(priority_meta.get("matched_pattern", "") or "")
+            entry["priority_runtime_attribute_abs_value"] = round(float(priority_meta.get("abs_value", 0.0) or 0.0), 8)
+            if bool(entry.get("priority_runtime_attribute")):
+                priority_attribute_entries.append(entry)
+
         target_unit_count = int(max(1, min(raw_unit_count, int(target_unit_count or 1))))
         if raw_unit_count <= target_unit_count:
             return fragment, {
                 "raw_unit_count": raw_unit_count,
                 "selected_unit_count": raw_unit_count,
+                "selected_attribute_unit_count": int(attribute_candidate_count),
+                "selected_priority_attribute_unit_count": int(len(priority_attribute_entries)),
+                "rescued_priority_attribute_count": 0,
+                "priority_attribute_candidate_count": int(len(priority_attribute_entries)),
                 "cursor_before": int(self._internal_resolution_cursor.get(sid, 0) or 0),
                 "cursor_after": int(self._internal_resolution_cursor.get(sid, 0) or 0),
             }
@@ -4876,8 +6140,22 @@ class StructureRetrievalEngine:
             unit_energy = max(0.0, unit_energy)
             fscale = fatigue_scale(sig) if sig else 1.0
             pos_bonus = 1.0 / math.sqrt(1.0 + float(idx))
+            runtime_attr_bonus = 0.0
+            if bool(entry.get("priority_runtime_attribute")):
+                rank_scale = 1.0
+                if runtime_attr_patterns:
+                    max_rank = max(1, len(runtime_attr_patterns) - 1)
+                    best_rank = max(0, min(max_rank, int(entry.get("priority_runtime_attribute_rank", len(runtime_attr_patterns)) or len(runtime_attr_patterns))))
+                    rank_scale += runtime_attr_priority_rank_gain * (float(max_rank - best_rank) / float(max_rank))
+                runtime_attr_bonus = runtime_attr_score_bonus * rank_scale
+                if runtime_attr_abs_gain > 0.0:
+                    runtime_attr_bonus += runtime_attr_abs_gain * min(
+                        float(entry.get("priority_runtime_attribute_abs_value", 0.0) or 0.0),
+                        runtime_attr_abs_value_cap,
+                    )
             entry["fatigue_scale"] = fscale
-            entry["score"] = (1.0 + unit_energy) * fscale * (0.85 + 0.15 * pos_bonus)
+            entry["runtime_attr_bonus"] = round(float(runtime_attr_bonus), 8)
+            entry["score"] = (1.0 + unit_energy) * fscale * (0.85 + 0.15 * pos_bonus) + runtime_attr_bonus
 
         # Anchors: prefer non-attribute units when available (structural role, not token semantics).
         stable_anchor_count = int(self._config.get("internal_resolution_stable_anchor_count", 1) or 1)
@@ -4893,8 +6171,35 @@ class StructureRetrievalEngine:
             candidates = list(flat)
         candidates.sort(key=lambda e: (-float(e.get("score", 0.0) or 0.0), int(e.get("sequence_index", 0)), str(e.get("unit_id", ""))))
         selected_idx: set[int] = set()
+        anchor_selected_idx: set[int] = set()
         for e in candidates[:anchor_target]:
-            selected_idx.add(int(e.get("flat_index", 0) or 0))
+            index = int(e.get("flat_index", 0) or 0)
+            selected_idx.add(index)
+            anchor_selected_idx.add(index)
+
+        rescued_priority_idx: set[int] = set()
+        if runtime_attr_rescue_enabled and priority_attribute_entries:
+            desired_rescue_slots = max(runtime_attr_rescue_min_slots, int(round(float(target_unit_count) * runtime_attr_rescue_ratio)))
+            desired_rescue_slots = min(runtime_attr_rescue_max_slots, desired_rescue_slots)
+            available_rescue_slots = max(0, target_unit_count - len(anchor_selected_idx))
+            rescue_target = min(len(priority_attribute_entries), available_rescue_slots, desired_rescue_slots)
+            priority_attribute_entries.sort(
+                key=lambda e: (
+                    int(e.get("priority_runtime_attribute_rank", len(runtime_attr_patterns))),
+                    -float(e.get("priority_runtime_attribute_abs_value", 0.0) or 0.0),
+                    -float(e.get("score", 0.0) or 0.0),
+                    int(e.get("sequence_index", 0)),
+                    str(e.get("unit_id", "")),
+                )
+            )
+            for entry in priority_attribute_entries:
+                if len(rescued_priority_idx) >= rescue_target:
+                    break
+                index = int(entry.get("flat_index", 0) or 0)
+                if index in selected_idx:
+                    continue
+                selected_idx.add(index)
+                rescued_priority_idx.add(index)
 
         # Detail fill: walk from cursor, skipping zero-fatigue units, then fall back to top scores.
         need = int(target_unit_count - len(selected_idx))
@@ -4931,7 +6236,8 @@ class StructureRetrievalEngine:
             selected_idx |= must_include
             # Enforce hard cap by removing lowest-score non-must units.
             while len(selected_idx) > target_unit_count:
-                removable = [i for i in selected_idx if i not in must_include]
+                protected_idx = set(must_include) | set(rescued_priority_idx)
+                removable = [i for i in selected_idx if i not in protected_idx]
                 if not removable:
                     break
                 removable.sort(key=lambda i: (float(flat[i].get("score", 0.0) or 0.0), -int(flat[i].get("sequence_index", 0))))
@@ -5006,6 +6312,10 @@ class StructureRetrievalEngine:
             "raw_unit_cap": int(flat_cap),
             "raw_unit_capped": bool(capped),
             "selected_unit_count": int(sum(len(g.get("units", [])) for g in new_groups if isinstance(g, dict))),
+            "selected_attribute_unit_count": int(sum(1 for i in selected_idx if str(flat[i].get("unit_role", "")) == "attribute")),
+            "selected_priority_attribute_unit_count": int(sum(1 for i in selected_idx if bool(flat[i].get("priority_runtime_attribute")))),
+            "rescued_priority_attribute_count": int(len(rescued_priority_idx)),
+            "priority_attribute_candidate_count": int(len(priority_attribute_entries)),
             "target_unit_count": int(target_unit_count),
             "cursor_before": int(cursor_before),
             "cursor_after": int(cursor_after_total),
@@ -5018,6 +6328,10 @@ class StructureRetrievalEngine:
             "raw_unit_cap": int(flat_cap),
             "raw_unit_capped": bool(capped),
             "selected_unit_count": int(new_fragment["ext"]["internal_resolution"]["selected_unit_count"]),
+            "selected_attribute_unit_count": int(new_fragment["ext"]["internal_resolution"]["selected_attribute_unit_count"]),
+            "selected_priority_attribute_unit_count": int(new_fragment["ext"]["internal_resolution"]["selected_priority_attribute_unit_count"]),
+            "rescued_priority_attribute_count": int(new_fragment["ext"]["internal_resolution"]["rescued_priority_attribute_count"]),
+            "priority_attribute_candidate_count": int(new_fragment["ext"]["internal_resolution"]["priority_attribute_candidate_count"]),
             "cursor_before": int(cursor_before),
             "cursor_after": int(cursor_after_total),
         }
@@ -5075,7 +6389,7 @@ class StructureRetrievalEngine:
             "content_signature": group_structure.get("content_signature", profile.get("content_signature", "")),
             "temporal_signature": group_structure.get("temporal_signature", group_structure.get("content_signature", profile.get("content_signature", ""))),
             "flat_tokens": list(profile.get("flat_tokens", [])),
-            "base_weight": round(float(stats.get("base_weight", 1.0)), 8),
+            "base_weight": round(float(stats.get("base_weight", 0.0)), 8),
             "recent_gain": round(float(stats.get("recent_gain", 1.0)), 8),
             "fatigue": round(float(stats.get("fatigue", 0.0)), 8),
             "runtime_weight": round(float(stats.get("runtime_weight", 1.0)), 8),

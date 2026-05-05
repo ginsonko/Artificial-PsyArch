@@ -248,7 +248,9 @@ def _evaluate_condition_item(item: dict[str, Any], *, report: dict[str, Any], me
         return cur == target, {"metric": metric, "current": cur, "target": target}
     if kind == "action_executed_kind_min":
         action_kind = str(item.get("action_kind", "") or "").strip()
-        metric_key = f"action_executed_{action_kind}"
+        metric_key = f"action_executed_{action_kind}_source_visible"
+        if metric_key not in metrics:
+            metric_key = f"action_executed_{action_kind}"
         cur = int(metrics.get(metric_key, 0) or 0)
         target = int(item.get("min_count", 1) or 1)
         return cur >= target, {"metric": metric_key, "current": cur, "target": target}

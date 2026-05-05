@@ -161,7 +161,11 @@ def format_sequence_groups(groups: list[dict]) -> str:
     for group in groups or []:
         if not isinstance(group, dict):
             continue
-        text = format_group_display(group)
+        text = ""
+        if group.get("_cut_engine_normalized") or str(group.get("group_signature", "") or ""):
+            text = str(group.get("display_text", "") or "")
+        if not text:
+            text = format_group_display(group)
         if text:
             parts.append(text)
     return " / ".join(parts)

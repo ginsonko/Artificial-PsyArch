@@ -27,8 +27,8 @@
         <a href="#inspector">检视器</a>
         <a href="#settings">设置</a>
         <a href="#innate_rules">先天规则</a>
+        <a href="/next/">新版研究仪表盘（/next）</a>
         <a href="/experiment.html">实验与论文图表</a>
-        <a href="#placeholders">预留模块</a>
       </nav>
       <button id="shutdownBtn" class="ghost danger full">关闭本地观测台</button>
     </aside>
@@ -37,7 +37,7 @@
       <section id="overview" class="hero panel">
         <div class="eyebrow">AP Prototype Observatory</div>
         <h2>面向研究与联调的实时观测前端</h2>
-        <p>这里统一展示文本感受器、状态池、结构级查存、刺激级查存、感应赋能、HDB 与未来模块占位，并允许直接在前端触发运行与查看细节。</p>
+        <p>这里统一展示文本感受器、状态池、结构级查存、刺激级查存、感应赋能、HDB 与运行态联调信息，并允许直接在前端触发运行与查看细节。</p>
         <div id="overviewCards" class="card-grid"></div>
       </section>
 
@@ -125,8 +125,8 @@
         <div class="section-head"><h3>最近文本感受器输入</h3><span id="sensorMeta" class="meta"></span></div>
         <div id="sensorCards" class="card-grid compact"></div>
         <div class="dual-grid">
-          <div class="subpanel"><h4>特征刺激元（SA）/ 切分结果</h4><div id="sensorUnits"></div></div>
-          <div class="subpanel"><h4>刺激组与 Echo</h4><div id="sensorGroups"></div></div>
+          <div class="subpanel"><h4>特征刺激元（SA）/ 切分结果</h4><div id="sensorUnits" class="scroll-shell"></div></div>
+          <div class="subpanel"><h4>刺激组与 Echo</h4><div id="sensorGroups" class="scroll-shell"></div></div>
         </div>
       </section>
 
@@ -134,16 +134,16 @@
         <div class="section-head"><h3>时间感受器（Time Sensor）</h3><span id="timeSensorMeta" class="meta"></span></div>
         <div class="note-box">
           <div><strong>说明</strong></div>
-          <div class="soft-note">对齐理论 4.2.6~4.2.7（原型落地口径）：当记忆被重新接触（MAP=记忆赋能池）并发生记忆反哺时，系统会根据“当前时间 - 记忆时间戳”计算时间间隔，并以“数值桶节点（时间感受 SA）”的形式为相邻桶赋能（双表赋能）。同时，同一时间感受也会作为“运行态属性刺激元”绑定到本轮记忆反哺投影的能量波峰对象上（锚点），便于 IESM 以“对象 + 时间感受”作为参数触发回忆（recall）等行动。两种形态不冲突：时间感受既可作为独立 SA 进入状态池参与查存，也可作为属性绑定进入 CSA/结构学习。</div>
+          <div class="soft-note">对齐理论 4.2.6~4.2.7（原型落地口径）：当记忆被重新接触并进入当前记忆路径后，系统会根据“当前时间 - 记忆时间戳”计算时间间隔，并以“数值桶节点（时间感受 SA）”的形式为相邻桶赋能（双表赋能）。同时，同一时间感受也会作为“运行态属性刺激元”绑定到本轮时间显著对象上（锚点），便于 IESM 以“对象 + 时间感受”作为参数触发回忆（recall）等行动。两种形态不冲突：时间感受既可作为独立 SA 进入状态池参与查存，也可作为属性绑定进入 CSA/结构学习。</div>
         </div>
         <div class="dual-grid">
           <div class="subpanel">
             <h4>本 tick 时间感受绑定（运行态属性）</h4>
-            <div id="timeSensorBuckets" class="stack"></div>
+            <div id="timeSensorBuckets" class="stack scroll-shell"></div>
           </div>
           <div class="subpanel">
-            <h4>参与计算的记忆样本（来自 MAP）</h4>
-            <div id="timeSensorMemories" class="stack"></div>
+            <h4>参与计算的记忆样本（来自当前记忆路径）</h4>
+            <div id="timeSensorMemories" class="stack scroll-shell"></div>
           </div>
         </div>
       </section>
@@ -152,7 +152,7 @@
         <div class="section-head"><h3>最新流程日志</h3><span id="flowMeta" class="meta"></span></div>
         <div id="flowTimeline" class="timeline"></div>
         <div class="dual-grid">
-          <div class="subpanel"><h4>最近轮次</h4><div id="recentCycles"></div></div>
+          <div class="subpanel"><h4>最近轮次</h4><div id="recentCycles" class="scroll-shell"></div></div>
           <details class="details-panel subpanel">
             <summary><h4>高级调试：最近一次操作返回</h4></summary>
             <div class="details-body">
@@ -218,17 +218,17 @@
         <div class="dual-grid">
           <div class="subpanel">
             <h4>行动器注册表（Executors Registry）</h4>
-            <div id="actionRuntimeExecutors" class="stack"></div>
+            <div id="actionRuntimeExecutors" class="stack scroll-shell"></div>
           </div>
           <div class="subpanel">
             <h4>行动节点列表（Action Nodes / Drive）</h4>
-            <div id="actionRuntimeNodes" class="stack"></div>
+            <div id="actionRuntimeNodes" class="stack scroll-shell"></div>
           </div>
         </div>
         <div class="subpanel">
           <h4>最近执行记录（Executed Actions）</h4>
           <div class="soft-note">用于验收：哪些行动被触发、阈值是多少、来源是先天触发（IESM）还是内驱触发（非 IESM）。</div>
-          <div id="actionRuntimeExecuted" class="stack"></div>
+          <div id="actionRuntimeExecuted" class="stack scroll-shell"></div>
         </div>
       </section>
 
@@ -237,7 +237,7 @@
         <div id="stateCards" class="card-grid compact"></div>
         <div class="dual-grid">
           <div class="subpanel"><h4>分类能量</h4><div id="stateEnergyByType"></div></div>
-          <div class="subpanel"><h4>Top 对象</h4><div id="stateItems"></div></div>
+          <div class="subpanel"><h4>Top 对象</h4><div id="stateItems" class="scroll-shell"></div></div>
         </div>
       </section>
 
@@ -245,18 +245,18 @@
         <div class="section-head"><h3>HDB 概览</h3><span id="hdbMeta" class="meta"></span></div>
         <div id="hdbCards" class="card-grid compact"></div>
         <div class="triple-grid">
-          <div class="subpanel"><h4>最近结构</h4><div id="recentStructures"></div></div>
-          <div class="subpanel"><h4>最近结构组</h4><div id="recentGroups"></div></div>
-          <div class="subpanel"><h4>最近情景记忆 / Issue / Repair</h4><div id="recentEpisodic"></div><div id="repairJobs" class="stack"></div><div id="recentIssues" class="stack"></div></div>
+          <div class="subpanel"><h4>最近结构</h4><div id="recentStructures" class="scroll-shell"></div></div>
+          <div class="subpanel"><h4>最近结构组</h4><div id="recentGroups" class="scroll-shell"></div></div>
+          <div class="subpanel"><h4>最近情景记忆 / Issue / Repair</h4><div id="recentEpisodic" class="scroll-shell"></div><div id="repairJobs" class="stack scroll-shell"></div><div id="recentIssues" class="stack scroll-shell"></div></div>
           <div class="subpanel">
             <div class="section-head">
-              <h4>记忆赋能池 / Memory Activation Pool</h4>
+              <h4>残差对象 / MAP 兼容视图</h4>
               <select id="memoryActivationSort">
                 <option value="energy_desc">按能量降序 / Energy ↓</option>
                 <option value="recent_desc">按时间降序 / Recent ↓</option>
               </select>
             </div>
-            <div id="memoryActivationList"></div>
+            <div id="memoryActivationList" class="scroll-shell"></div>
           </div>
         </div>
       </section>
@@ -272,8 +272,8 @@
           <button id="queryEpisodicBtn" class="ghost">最近情景记忆</button>
         </div>
         <div class="dual-grid">
-          <div class="subpanel"><h4>结构详情</h4><div id="structureDetail" class="stack"></div></div>
-          <div class="subpanel"><h4>结构组 / 情景记忆详情</h4><div id="groupDetail" class="stack"></div><div id="episodicDetail" class="stack"></div></div>
+          <div class="subpanel"><h4>结构详情</h4><div id="structureDetail" class="stack scroll-shell"></div></div>
+          <div class="subpanel"><h4>结构组 / 情景记忆详情</h4><div id="groupDetail" class="stack scroll-shell"></div><div id="episodicDetail" class="stack scroll-shell"></div></div>
         </div>
       </section>
 
@@ -298,7 +298,7 @@
         <div class="note-box">
           <div><strong>如何使用</strong></div>
           <div class="soft-note">这里提供两种编辑方式：左侧表单适合快速搭建典型规则；下方 YAML 适合高级自由编辑。保存前建议先校验；模拟会用“最近一轮 cycle”的上下文进行 dry-run（不改变系统状态）。</div>
-          <div class="soft-note">缩写对照：IESM=先天编码脚本管理器；CFS=认知感受信号；ER=实能量；EV=虚能量；CP=认知压（ER-EV）；SP=状态池；MAP=记忆赋能池；NT=情绪递质通道。</div>
+          <div class="soft-note">缩写对照：IESM=先天编码脚本管理器；CFS=认知感受信号；ER=实能量；EV=虚能量；CP=认知压（ER-EV）；SP=状态池；MAP=旧记忆赋能兼容池（默认主链已关闭）；NT=情绪递质通道。</div>
         </div>
         <div id="innateRulesMeta" class="meta"></div>
         <div id="innateRulesFeedback" class="inline-feedback">等待操作…</div>
@@ -344,10 +344,6 @@
         <div id="innateRulesResult" class="result-box">等待操作…</div>
       </section>
 
-      <section id="placeholders" class="panel">
-        <div class="section-head"><h3>预留模块</h3></div>
-        <div id="placeholderCards" class="card-grid"></div>
-      </section>
     </main>
   </div>
 
@@ -382,7 +378,7 @@
         <div class="note-box">
           <div><strong>操作提示</strong></div>
           <div class="soft-note">点击左侧按钮添加节点；拖拽节点移动；点击节点端口连接（先点输出，再点输入）。删除：选中节点后按 Delete/Backspace，或点击节点右上角「删除」，也可点顶部「删除选中」。空格键按住可拖拽平移视图；Ctrl/⌘ + 滚轮可缩放，也可使用顶部缩放滑块与「适配」按钮。窗口太小看不全时可点顶部「全屏」。建议：条件节点接到「条件汇总」节点，再由它连接到动作节点。</div>
-          <div class="soft-note">缩写对照：IESM=先天编码脚本管理器；CFS=认知感受信号；ER=实能量；EV=虚能量；CP=认知压（ER-EV）；SP=状态池；MAP=记忆赋能池；NT=情绪递质通道。</div>
+          <div class="soft-note">缩写对照：IESM=先天编码脚本管理器；CFS=认知感受信号；ER=实能量；EV=虚能量；CP=认知压（ER-EV）；SP=状态池；MAP=旧记忆赋能兼容池（默认主链已关闭）；NT=情绪递质通道。</div>
           <div id="irGraphFeedback" class="inline-feedback">等待操作…</div>
         </div>
         <div id="irGraphLayout" class="ir-graph-layout">

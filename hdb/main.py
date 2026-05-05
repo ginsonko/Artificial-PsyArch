@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import math
 import os
+import threading
 import time
 import traceback
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +34,7 @@ from ._storage_utils import ensure_dir, list_json_files, load_json_file, write_j
 from ._structure_retrieval import StructureRetrievalEngine
 from ._structure_store import StructureStore
 from ._weight_engine import WeightEngine
+from ._context_metadata import merge_context_metadata, merge_residual_metadata
 
 
 def _parse_simple_yaml_scalar(raw: str) -> Any:
@@ -89,11 +92,18 @@ def _load_yaml_config(path: str) -> dict:
 
 _DEFAULT_CONFIG = {
     "data_dir": "",
-    "stimulus_level_max_rounds": 8,
+    "stimulus_level_max_rounds": 48,
     "stimulus_early_stop_enabled": True,
     "stimulus_early_stop_patience_rounds": 2,
     "stimulus_early_stop_min_progress_ratio": 0.10,
     "stimulus_early_stop_high_energy_unit_threshold": 0.25,
+    "stimulus_object_projection_dominance_early_stop_enabled": True,
+    "stimulus_object_projection_dominance_min_rounds": 8,
+    "stimulus_object_projection_dominance_ratio": 1.25,
+    "stimulus_object_projection_dominance_min_remaining_energy": 0.05,
+    "stimulus_object_projection_dominance_require_memory_id_enabled": True,
+    "stimulus_object_projection_dominance_require_transfer_dominance_enabled": True,
+    "stimulus_object_projection_dominance_transfer_ratio": 1.0,
     "structure_level_max_rounds": 4,
     "top_n_attention_stub_default": 16,
     "stimulus_match_transfer_ratio": 1.0,
@@ -101,6 +111,56 @@ _DEFAULT_CONFIG = {
     "stimulus_competition_noise_scale": 0.004,
     "stimulus_competition_half_ratio": 0.1,
     "stimulus_competition_curve_power": 1.2,
+    "stimulus_competition_stimulus_ratio_power": 0.35,
+    "stimulus_competition_structure_ratio_power": 0.85,
+    "stimulus_competition_attribute_ratio_power": 1.0,
+    "stimulus_transfer_curve_enabled": True,
+    "stimulus_transfer_curve_half_score": 0.12,
+    "stimulus_transfer_curve_power": 0.38,
+    "stimulus_transfer_curve_normalize_at_one": True,
+    "stimulus_anchor_owner_residual_presence_cache_enabled": True,
+    "stimulus_anchor_owner_residual_presence_shared_cache_enabled": True,
+    "stimulus_round_debug_full_text_rounds": 8,
+    "stimulus_round_debug_token_preview_limit": 24,
+    "stimulus_round_debug_candidate_detail_limit": 16,
+    "stimulus_round_debug_shadow_candidate_detail_limit": 8,
+    "match_scoring_v2_enabled": True,
+    "match_scoring_v2_shadow_only": False,
+    "match_scoring_v2_blend_weight": 0.35,
+    "match_scoring_v2_min_score": 0.18,
+    "soft_partial_match_competition_enabled": True,
+    "match_scoring_v2_noise_mid": 0.02,
+    "match_scoring_v2_noise_scale": 0.01,
+    "match_scoring_v2_half_ratio": 0.14,
+    "match_scoring_v2_curve_power": 1.25,
+    "match_scoring_v2_base_weight": 0.42,
+    "match_scoring_v2_numeric_weight": 0.16,
+    "match_scoring_v2_order_weight": 0.16,
+    "match_scoring_v2_attribute_weight": 0.12,
+    "match_scoring_v2_context_weight": 0.07,
+    "match_scoring_v2_energy_weight": 0.07,
+    "match_scoring_v2_inclusion_weight": 0.08,
+    "match_scoring_v2_numeric_coverage_power": 1.0,
+    "residual_memory_as_structure_enabled": True,
+    "residual_memory_as_structure_shadow_mode": False,
+    "residual_memory_runtime_object_type": "em",
+    "unified_numeric_scoring_enabled": True,
+    "attribute_soft_scoring_enabled": True,
+    "sequence_soft_scoring_enabled": True,
+    "time_factor_soft_bonus_enabled": True,
+    "time_like_memory_wildcard_enabled": True,
+    "stimulus_residual_memory_shadow_v2_enabled": True,
+    "stimulus_residual_memory_shadow_skip_when_promotion_disabled_enabled": True,
+    "stimulus_residual_memory_promotion_enabled": False,
+    "stimulus_residual_memory_promotion_require_time_signal": True,
+    "stimulus_residual_memory_promotion_min_v2_score": 0.28,
+    "stimulus_residual_memory_promotion_max_candidates_per_owner": 1,
+    "stimulus_local_child_candidate_max_per_owner": 48,
+    "stimulus_best_match_candidate_max_per_owner": 64,
+    "stimulus_shadow_raw_residual_candidate_max_per_owner": 32,
+    "time_factor_soft_bonus_max_factor": 1.35,
+    "time_factor_soft_bonus_abs_tolerance": 0.35,
+    "time_factor_soft_bonus_rel_tolerance": 0.55,
     "stimulus_residual_min_energy": 0.12,
     "stimulus_attribute_energy_scale": 0.22,
     "stimulus_placeholder_energy_scale": 1.0,
@@ -108,7 +168,25 @@ _DEFAULT_CONFIG = {
     "stimulus_anchor_ev_weight": 0.9,
     "stimulus_anchor_external_bonus": 0.08,
     "stimulus_anchor_non_punctuation_bonus": 0.05,
+    "stimulus_anchor_hidden_attribute_score_scale": 0.22,
+    "stimulus_anchor_existing_structure_bonus": 0.18,
+    "stimulus_anchor_owner_residual_bonus": 0.85,
+    "stimulus_anchor_owner_residual_bonus_energy_half": 0.12,
+    "stimulus_anchor_current_packet_preseed_penalty": 0.12,
+    "stimulus_anchor_left_to_right_bias_enabled": True,
+    "stimulus_anchor_left_to_right_bias_rounds": 1,
+    "stimulus_anchor_group_position_penalty": 0.35,
+    "stimulus_anchor_sequence_position_penalty": 0.18,
     "stimulus_anchor_punctuation_penalty": 0.35,
+    "stimulus_anchor_fatigue_enabled": True,
+    "stimulus_anchor_fatigue_decay_per_tick": 0.90,
+    "stimulus_anchor_fatigue_step": 0.75,
+    "stimulus_anchor_fatigue_cap": 32.0,
+    "stimulus_anchor_fatigue_floor_scale": 0.03,
+    "stimulus_anchor_fatigue_keep_ticks": 256,
+    "stimulus_anchor_fatigue_max_entries": 4096,
+    "stimulus_anchor_same_packet_repeat_fatigue_enabled": True,
+    "stimulus_anchor_same_packet_repeat_fatigue_step": 2.5,
     "stimulus_residual_projection_ratio": 0.16,
     "stimulus_atomic_seed_confidence": 0.95,
     "stimulus_anchor_seed_confidence": 0.9,
@@ -132,6 +210,20 @@ _DEFAULT_CONFIG = {
     "structure_anchor_temp_fatigue_step": 0.55,
     "structure_anchor_temp_fatigue_base": 0.7,
     "structure_anchor_temp_fatigue_rho_gain": 0.6,
+    "structure_anchor_runtime_family_bonus_enabled": False,
+    "structure_anchor_runtime_family_bonus_patterns": [
+        "teacher_reward_signal",
+        "teacher_punish_signal",
+        "reward_signal",
+        "punish_signal",
+        "cfs_*",
+        "时间感受",
+    ],
+    "structure_anchor_runtime_family_bonus_value": 0.55,
+    "structure_anchor_runtime_family_bonus_abs_gain": 0.05,
+    "structure_anchor_runtime_family_bonus_abs_value_cap": 2.0,
+    "structure_anchor_runtime_family_bonus_max_families": 2,
+    "structure_anchor_runtime_family_priority_rank_gain": 0.45,
     "structure_wave_similarity_floor": 0.35,
     "structure_descend_match_floor": 0.35,
     "structure_bias_er_ratio": 0.18,
@@ -193,6 +285,36 @@ _DEFAULT_CONFIG = {
     "internal_resolution_focus_credit_decay": 0.90,
     "internal_resolution_focus_credit_cap": 6.0,
     "internal_resolution_focus_credit_gamma": 0.25,
+    "internal_resolution_runtime_family_bonus_enabled": True,
+    "internal_resolution_runtime_family_bonus_patterns": [
+        "teacher_reward_signal",
+        "teacher_punish_signal",
+        "reward_signal",
+        "punish_signal",
+        "cfs_*",
+        "时间感受",
+    ],
+    "internal_resolution_runtime_family_bonus_value": 0.35,
+    "internal_resolution_runtime_family_bonus_abs_gain": 0.08,
+    "internal_resolution_runtime_family_bonus_abs_value_cap": 2.0,
+    "internal_resolution_runtime_family_bonus_max_families": 2,
+    "internal_resolution_runtime_family_priority_rank_gain": 0.45,
+    "internal_resolution_runtime_attribute_rescue_enabled": True,
+    "internal_resolution_runtime_attribute_rescue_patterns": [
+        "teacher_reward_signal",
+        "teacher_punish_signal",
+        "reward_signal",
+        "punish_signal",
+        "cfs_*",
+        "时间感受",
+    ],
+    "internal_resolution_runtime_attribute_rescue_ratio": 0.25,
+    "internal_resolution_runtime_attribute_rescue_min_slots": 1,
+    "internal_resolution_runtime_attribute_rescue_max_slots": 2,
+    "internal_resolution_runtime_attribute_score_bonus": 0.75,
+    "internal_resolution_runtime_attribute_abs_gain": 0.10,
+    "internal_resolution_runtime_attribute_abs_value_cap": 2.0,
+    "internal_resolution_runtime_attribute_priority_rank_gain": 0.35,
     # When structure-level fails to hit an existing group, we still want the
     # freshly canonicalized residual runtime context to become endogenous
     # stimulus. This keeps "active landscape -> internal stimulus" alive even
@@ -200,28 +322,102 @@ _DEFAULT_CONFIG = {
     "internal_storage_projection_enabled": True,
     "internal_storage_projection_ratio": 0.14,
     "internal_storage_projection_max_fragments_per_round": 1,
+    "internal_fragment_include_runtime_bound_attributes": False,
+    "internal_fragment_runtime_attribute_numeric_only": True,
+    "internal_fragment_runtime_attribute_max_count": 8,
+    "internal_fragment_runtime_attribute_priority_enabled": True,
+    "internal_fragment_runtime_attribute_sort_by_abs_value_desc": True,
+    "internal_fragment_runtime_attribute_priority_patterns": [
+        "teacher_reward_signal",
+        "teacher_punish_signal",
+        "reward_signal",
+        "punish_signal",
+        "cfs_*",
+        "时间感受",
+    ],
+    # CAM runtime-priority side-path:
+    # when a high-priority runtime family is visible on a CAM structure but has
+    # not been represented by the already-built internal fragments, emit a very
+    # small attribute-only fragment so teacher / reward / punish / CFS / time
+    # signals still have a chance to survive into the next tick's endogenous
+    # stimulus without forcibly perturbing the main anchor competition.
+    "internal_cam_runtime_priority_projection_enabled": True,
+    "internal_cam_runtime_priority_projection_patterns": [
+        "teacher_reward_signal",
+        "teacher_punish_signal",
+        "reward_signal",
+        "punish_signal",
+        "cfs_*",
+        "时间感受",
+    ],
+    "internal_cam_runtime_priority_projection_ratio": 0.08,
+    "internal_cam_runtime_priority_projection_min_energy": 0.05,
+    "internal_cam_runtime_priority_projection_max_fragments": 2,
+    "internal_cam_runtime_priority_projection_require_unrepresented": True,
     "internal_attention_landscape_enabled": True,
     "internal_attention_landscape_ratio": 0.08,
     "min_cut_common_length": 2,
     "enable_goal_b_char_sa_string_mode": False,
+    "internal_stimulus_flatten_to_single_cooccurrence_group_enabled": True,
     "goal_b_string_seed_soft_max_units": 32,
     "goal_b_string_seed_min_avg_unit_energy_for_long": 0.18,
     "goal_b_string_seed_require_single_source_for_long": True,
+    "stimulus_goal_b_string_seed_context_free_identity_enabled": True,
+    "stimulus_residual_common_context_free_identity_enabled": True,
+    "stimulus_residual_common_require_owner_prefix_alignment_enabled": True,
     "stimulus_residual_common_soft_max_units": 28,
     "stimulus_residual_common_min_avg_unit_energy_for_long": 0.18,
-    "diff_table_soft_limit": 128,
-    "group_table_soft_limit": 128,
+    "stimulus_memory_structure_energy_profile_mode": "runtime_projection_energy",
+    "owner_db_persistence_trim_enabled": False,
+    "owner_db_runtime_budget_enabled": True,
+    "owner_db_runtime_recent_budget": 50,
+    "owner_db_runtime_strong_budget": 28,
+    "owner_db_runtime_explore_budget": 50,
+    "diff_table_soft_limit": 0,
+    "group_table_soft_limit": 0,
     "ev_propagation_threshold": 0.12,
     "er_induction_threshold": 0.15,
-    "ev_propagation_ratio": 0.28,
-    "er_induction_ratio": 0.22,
-    "induction_target_top_k": 8,
+    "induction_source_effective_energy_prefilter_enabled": True,
+    "ev_propagation_ratio": 1.0,
+    "er_induction_ratio": 1.0,
+    "induction_energy_graph_v2_enabled": True,
+    "induction_energy_graph_v2_max_rounds": 1,
+    "induction_energy_graph_v2_root_er_decay_ratio": 0.82,
+    "induction_energy_graph_v2_root_source_ev_ratio": 1.0,
+    "induction_energy_graph_v2_frontier_ev_ratio": 1.0,
+    "induction_energy_graph_v2_er_round_ratio": 1.0,
+    "induction_energy_graph_v2_min_frontier_ev": 0.05,
+    "induction_energy_graph_v2_min_budget": 0.03,
+    "induction_energy_graph_v2_max_frontier_nodes_per_source": 0,
+    "induction_energy_graph_v2_target_top_k": 0,
+    "induction_target_top_k": 0,
+    "induction_filter_nonprojectable_targets": True,
+    "induction_min_entry_base_weight": 0.001,
+    "induction_min_source_base_weight": 0.0,
+    "induction_min_projected_delta_ev": 0.0,
+    "induction_raw_residual_existing_structure_projection_enabled": True,
+    "induction_raw_residual_structure_share": 1.0,
+    "induction_raw_residual_structure_target_top_k": 1,
+    "induction_raw_residual_group_component_projection_enabled": True,
+    "induction_raw_residual_component_target_top_k": 3,
+    "induction_raw_residual_component_min_group_units": 3,
+    "induction_raw_residual_projection_drop_owner_placeholder_enabled": True,
+    "induction_raw_residual_materialized_structure_context_free_identity_enabled": True,
+    "induction_raw_residual_static_cache_enabled": True,
+    "induction_raw_residual_projection_profile_cache_enabled": True,
+    "induction_raw_residual_candidate_static_cache_enabled": False,
+    "induction_full_inclusion_shared_cache_enabled": True,
     "memory_activation_decay_round_ratio_ev": 0.88,
     "memory_activation_prune_threshold_ev": 0.05,
     "memory_activation_event_history_limit": 24,
     "runtime_memory_display_max_chars": 240,
     "base_weight_er_gain": 0.08,
     "base_weight_ev_wear": 0.03,
+    "base_weight_ev_wear_mode": "multiplicative",
+    "base_weight_storage_floor": 0.0,
+    "base_weight_new_default": 0.0,
+    "ev_only_creation_base_weight": 0.0,
+    "residual_base_weight_initial_bias": 0.0,
     "weight_floor": 0.05,
     "recency_gain_boost": 0.08,
     "recency_gain_peak": 10.0,
@@ -245,11 +441,45 @@ _DEFAULT_CONFIG = {
     "fallback_scan_hard_limit": 200,
     "allow_global_scan_on_runtime_path": False,
     "lru_db_cache_size": 64,
+    "exact_lookup_cache_size": 8192,
+    "shared_runtime_cache_max_entries": 16384,
+    "normalize_sequence_groups_cache_max_entries": 8192,
+    "normalize_sequence_groups_cache_shallow_copy_enabled": True,
+    "normalize_sequence_groups_cache_zero_copy_enabled": False,
+    "structure_fuzzy_metadata_runtime_cache_enabled": True,
     "numeric_bucket_max_per_family": 16,
     "numeric_bucket_neighbor_count": 2,
     "numeric_bucket_creation_abs_gap": 0.2,
     "numeric_bucket_creation_rel_gap": 0.35,
     "numeric_match_abs_tolerance": 0.2,
+    "numeric_bucket_synthetic_lookup_rebuild_enabled": False,
+    "numeric_bucket_lazy_rebuild_enabled": True,
+    "stimulus_atomic_structure_cross_tick_cache_enabled": False,
+    "stimulus_atomic_structure_cross_tick_cache_max_entries": 2048,
+    "stimulus_atomic_preseed_context_free_identity_enabled": True,
+    "stimulus_atomic_preseed_defer_current_packet_matching_enabled": True,
+    "stimulus_atomic_preseed_unique_context_direct_create_enabled": True,
+    "stimulus_owner_local_residual_shared_index_cache_enabled": True,
+    "maximum_common_part_cache_enabled": True,
+    "maximum_common_part_exact_fast_path_enabled": True,
+    "maximum_common_part_full_inclusion_fast_path_enabled": True,
+    "maximum_common_part_single_group_fast_path_enabled": True,
+    "maximum_common_group_ordered_subsequence_fast_path_enabled": True,
+    "maximum_common_part_cache_max_entries": 4096,
+    "maximum_common_part_cache_deepcopy_enabled": False,
+    "structure_store_backend": "sqlite",
+    "structure_store_sqlite_path": "",
+    "structure_store_sqlite_compression_enabled": True,
+    "structure_store_sqlite_compression_min_bytes": 4096,
+    "structure_store_sqlite_compression_level": 1,
+    "structure_store_sqlite_import_legacy_json_on_empty_enabled": True,
+    "deferred_persistence_enabled": True,
+    "deferred_persistence_flush_interval_calls": 0,
+    "deferred_persistence_parallel_flush_enabled": True,
+    "deferred_persistence_parallel_flush_min_items": 64,
+    "deferred_persistence_parallel_flush_workers": 8,
+    "compact_sequence_groups_for_persistence_enabled": False,
+    "common_group_length_cache_max_entries": 4096,
     "numeric_match_rel_tolerance": 0.35,
     "numeric_match_min_similarity": 0.4,
     "self_check_default_scope": "quick",
@@ -259,7 +489,7 @@ _DEFAULT_CONFIG = {
     "max_repair_runtime_ms": 30000,
     "enable_background_repair": True,
     "detail_log_dump_cut_summary": True,
-    "detail_log_dump_group_match_profile": True,
+    "detail_log_dump_group_match_profile": False,
     "detail_log_dump_pointer_fallback": True,
     "log_dir": "",
     "log_max_file_bytes": 5 * 1024 * 1024,
@@ -299,9 +529,11 @@ class HDB:
         self._repair.set_issue_callback(self._register_issue)
         self._load_repair_jobs()
         self._total_calls = 0
+        self._deferred_persistence_call_counter = 0
         # Idle consolidation last result snapshot (for observability/UI); safe to keep in memory.
         self._idle_consolidation_count_total = 0
         self._last_idle_consolidation: dict | None = None
+        self._idle_consolidation_lock = threading.RLock()
 
     def _build_config(self, config_override: dict | None) -> dict:
         config = dict(_DEFAULT_CONFIG)
@@ -327,12 +559,27 @@ class HDB:
             ensure_dir(path)
         return paths
 
+    def _should_flush_deferred_persistence(self) -> bool:
+        """Decide whether this hot-path HDB stage should flush pending JSON writes."""
+        try:
+            raw_interval = self._config.get("deferred_persistence_flush_interval_calls", 1)
+            interval = int(1 if raw_interval is None else raw_interval)
+        except Exception:
+            interval = 1
+        if interval <= 0:
+            return False
+        if interval <= 1:
+            return True
+        self._deferred_persistence_call_counter = int(getattr(self, "_deferred_persistence_call_counter", 0) or 0) + 1
+        return (self._deferred_persistence_call_counter % interval) == 0
+
     def run_structure_level_retrieval_storage(
         self,
         *,
         state_snapshot: dict,
         trace_id: str,
         tick_id: str | None = None,
+        now_ms: int | None = None,
         attention_mode: str = "top_n_stub",
         top_n: int = 16,
         enable_storage: bool = True,
@@ -354,21 +601,28 @@ class HDB:
             effective_max_rounds = (
                 int(max_rounds) if max_rounds is not None else int(self._config.get("structure_level_max_rounds", 4))
             )
-            result = self._structure_retrieval.run(
-                state_snapshot=state_snapshot,
-                trace_id=trace_id,
-                tick_id=tick_id,
-                structure_store=self._structure_store,
-                group_store=self._group_store,
-                pointer_index=self._pointer_index,
-                cut_engine=self._cut,
-                episodic_store=self._episodic_store,
-                attention_mode=attention_mode,
-                top_n=top_n,
-                enable_storage=enable_storage,
-                enable_new_group_creation=enable_new_group_creation,
-                max_rounds=effective_max_rounds,
+            batch_ctx = (
+                self._structure_store.batch_persistence(flush=self._should_flush_deferred_persistence())
+                if bool(self._config.get("deferred_persistence_enabled", True))
+                else nullcontext()
             )
+            with batch_ctx:
+                result = self._structure_retrieval.run(
+                    state_snapshot=state_snapshot,
+                    trace_id=trace_id,
+                    tick_id=tick_id,
+                    structure_store=self._structure_store,
+                    group_store=self._group_store,
+                    pointer_index=self._pointer_index,
+                    cut_engine=self._cut,
+                    episodic_store=self._episodic_store,
+                    attention_mode=attention_mode,
+                    top_n=top_n,
+                    enable_storage=enable_storage,
+                    enable_new_group_creation=enable_new_group_creation,
+                    max_rounds=effective_max_rounds,
+                    now_ms=now_ms,
+                )
             if result.get("fallback_used"):
                 self._register_issue({"issue_type": "pointer_fallback_runtime", "target_id": "", "repair_suggestion": ["rebuild_pointer"]})
             self._logger.brief(
@@ -405,6 +659,7 @@ class HDB:
         stimulus_packet: dict,
         trace_id: str,
         tick_id: str | None = None,
+        now_ms: int | None = None,
         top_n_attention_stub: int | None = None,
         source_module: str = "state_pool",
         enable_storage: bool = True,
@@ -423,18 +678,42 @@ class HDB:
             effective_max_rounds = (
                 int(max_rounds) if max_rounds is not None else int(self._config.get("stimulus_level_max_rounds", 6))
             )
-            result = self._stimulus.run(
-                stimulus_packet=stimulus_packet,
-                trace_id=trace_id,
-                tick_id=tick_id,
-                structure_store=self._structure_store,
-                pointer_index=self._pointer_index,
-                cut_engine=self._cut,
-                episodic_store=self._episodic_store,
-                enable_storage=enable_storage,
-                enable_new_structure_creation=enable_new_structure_creation,
-                max_rounds=effective_max_rounds,
+            previous_tick_number = self._config.get("_current_tick_number")
+            if isinstance(metadata, dict) and metadata.get("tick_number") is not None:
+                self._config["_current_tick_number"] = int(metadata.get("tick_number") or 0)
+            batch_ctx = (
+                self._structure_store.batch_persistence(flush=self._should_flush_deferred_persistence())
+                if bool(self._config.get("deferred_persistence_enabled", True))
+                else nullcontext()
             )
+            try:
+                with batch_ctx:
+                    if hasattr(self._cut, "reset_runtime_metrics"):
+                        self._cut.reset_runtime_metrics()
+                    result = self._stimulus.run(
+                        stimulus_packet=stimulus_packet,
+                        trace_id=trace_id,
+                        tick_id=tick_id,
+                        structure_store=self._structure_store,
+                        pointer_index=self._pointer_index,
+                        cut_engine=self._cut,
+                        episodic_store=self._episodic_store,
+                        enable_storage=enable_storage,
+                        enable_new_structure_creation=enable_new_structure_creation,
+                        max_rounds=effective_max_rounds,
+                        now_ms=now_ms,
+                    )
+                    cut_metrics = self._cut.pop_runtime_metrics() if hasattr(self._cut, "pop_runtime_metrics") else {}
+                    if isinstance(cut_metrics, dict) and isinstance(result, dict):
+                        metrics = result.setdefault("metrics", {})
+                        if isinstance(metrics, dict):
+                            for key, value in cut_metrics.items():
+                                metrics[str(key)] = int(metrics.get(str(key), 0) or 0) + int(value or 0)
+            finally:
+                if previous_tick_number is None:
+                    self._config.pop("_current_tick_number", None)
+                else:
+                    self._config["_current_tick_number"] = previous_tick_number
             if result.get("fallback_used"):
                 self._register_issue({"issue_type": "pointer_fallback_runtime", "target_id": "", "repair_suggestion": ["rebuild_pointer"]})
             self._logger.brief(
@@ -485,18 +764,32 @@ class HDB:
         if not enable_ev_propagation and not enable_er_induction:
             return self._make_error_response("run_induction_propagation", "INPUT_VALIDATION_ERROR", "至少启用一种感应赋能模式", "At least one induction mode must be enabled", trace_id, tick_id, start_time)
         try:
-            result = self._induction.run(
-                state_snapshot=state_snapshot,
-                trace_id=trace_id,
-                tick_id=tick_id,
-                structure_store=self._structure_store,
-                episodic_store=self._episodic_store,
-                pointer_index=self._pointer_index,
-                cut_engine=self._cut,
-                max_source_items=max_source_items,
-                enable_ev_propagation=enable_ev_propagation,
-                enable_er_induction=enable_er_induction,
+            batch_ctx = (
+                self._structure_store.batch_persistence(flush=self._should_flush_deferred_persistence())
+                if bool(self._config.get("deferred_persistence_enabled", True))
+                else nullcontext()
             )
+            with batch_ctx:
+                if hasattr(self._cut, "reset_runtime_metrics"):
+                    self._cut.reset_runtime_metrics()
+                result = self._induction.run(
+                    state_snapshot=state_snapshot,
+                    trace_id=trace_id,
+                    tick_id=tick_id,
+                    structure_store=self._structure_store,
+                    episodic_store=self._episodic_store,
+                    pointer_index=self._pointer_index,
+                    cut_engine=self._cut,
+                    max_source_items=max_source_items,
+                    enable_ev_propagation=enable_ev_propagation,
+                    enable_er_induction=enable_er_induction,
+                )
+                cut_metrics = self._cut.pop_runtime_metrics() if hasattr(self._cut, "pop_runtime_metrics") else {}
+                if isinstance(cut_metrics, dict) and isinstance(result, dict):
+                    metrics = result.setdefault("metrics", {})
+                    if isinstance(metrics, dict):
+                        for key, value in cut_metrics.items():
+                            metrics[str(key)] = int(metrics.get(str(key), 0) or 0) + int(value or 0)
             if result.get("fallback_used"):
                 self._register_issue({"issue_type": "pointer_fallback_runtime", "target_id": "", "repair_suggestion": ["rebuild_pointer"]})
             self._logger.brief(
@@ -576,7 +869,7 @@ class HDB:
                 group_obj = self._group_store.get(group_id) if group_id else None
                 if group_obj:
                     enriched_entry["group_stats"] = {
-                        "base_weight": round(float(group_obj.get("stats", {}).get("base_weight", 1.0)), 8),
+                        "base_weight": round(float(group_obj.get("stats", {}).get("base_weight", 0.0)), 8),
                         "recent_gain": round(float(group_obj.get("stats", {}).get("recent_gain", 1.0)), 8),
                         "fatigue": round(float(group_obj.get("stats", {}).get("fatigue", 0.0)), 8),
                     }
@@ -681,6 +974,8 @@ class HDB:
         reason: str = "idle_consolidation",
         rebuild_pointer_index: bool = True,
         apply_soft_limits: bool = True,
+        batch_limit: int | None = None,
+        progress_callback: Any | None = None,
     ) -> dict:
         """
         Idle-time consolidation / compaction for HDB.
@@ -710,7 +1005,19 @@ class HDB:
             pointer_before = {}
 
         if apply_soft_limits:
-            for structure_db in list(self._structure_store.iter_structure_dbs()):
+            selected_structure_dbs: list[dict] = []
+            normalized_batch_limit = int(batch_limit) if batch_limit is not None else 0
+            if normalized_batch_limit > 0 and hasattr(self._structure_store, "get_recent_structures"):
+                for structure_obj in self._structure_store.get_recent_structures(normalized_batch_limit):
+                    structure_id = str(structure_obj.get("id", "") or "")
+                    structure_db = self._structure_store.get_db_by_owner(structure_id) if structure_id else None
+                    if isinstance(structure_db, dict):
+                        selected_structure_dbs.append(structure_db)
+            else:
+                selected_structure_dbs = list(self._structure_store.iter_structure_dbs())
+
+            selected_db_total = len(selected_structure_dbs)
+            for structure_db in selected_structure_dbs:
                 if not isinstance(structure_db, dict):
                     continue
                 scanned_db_count += 1
@@ -730,8 +1037,39 @@ class HDB:
                     trimmed_diff_total += max(0, int(before_diff) - int(after_diff))
                     trimmed_group_total += max(0, int(before_group) - int(after_group))
                     self._structure_store.update_db(structure_db)
+                if callable(progress_callback) and (
+                    scanned_db_count == 1
+                    or scanned_db_count == selected_db_total
+                    or scanned_db_count % 10 == 0
+                ):
+                    try:
+                        progress_callback(
+                            {
+                                "phase": "soft_limits",
+                                "scanned_structure_db_count": int(scanned_db_count),
+                                "selected_structure_db_total": int(selected_db_total),
+                                "updated_structure_db_count": int(updated_db_count),
+                                "trimmed_diff_entry_total": int(trimmed_diff_total),
+                                "trimmed_group_entry_total": int(trimmed_group_total),
+                            }
+                        )
+                    except Exception:
+                        pass
 
         if rebuild_pointer_index:
+            if callable(progress_callback):
+                try:
+                    progress_callback(
+                        {
+                            "phase": "rebuild_pointer_index",
+                            "scanned_structure_db_count": int(scanned_db_count),
+                            "updated_structure_db_count": int(updated_db_count),
+                            "trimmed_diff_entry_total": int(trimmed_diff_total),
+                            "trimmed_group_entry_total": int(trimmed_group_total),
+                        }
+                    )
+                except Exception:
+                    pass
             try:
                 self._pointer_index.rebuild_from_store(self._structure_store)
             except Exception:
@@ -749,6 +1087,7 @@ class HDB:
             "timestamp_ms": now_ms,
             "rebuild_pointer_index": bool(rebuild_pointer_index),
             "apply_soft_limits": bool(apply_soft_limits),
+            "batch_limit": int(batch_limit) if batch_limit is not None else 0,
             "pointer_index_before": pointer_before,
             "pointer_index_after": pointer_after,
             "scanned_structure_db_count": int(scanned_db_count),
@@ -773,11 +1112,38 @@ class HDB:
             interface="idle_consolidate_hdb",
         )
         try:
-            self._idle_consolidation_count_total = int(getattr(self, "_idle_consolidation_count_total", 0) or 0) + 1
-            self._last_idle_consolidation = dict(resp)
+            with self._idle_consolidation_lock:
+                self._idle_consolidation_count_total = int(getattr(self, "_idle_consolidation_count_total", 0) or 0) + 1
+                self._last_idle_consolidation = dict(resp)
         except Exception:
             pass
         return resp
+
+    def update_idle_consolidation_progress(
+        self,
+        *,
+        status: str,
+        job_id: str = "",
+        request: dict[str, Any] | None = None,
+        progress: dict[str, Any] | None = None,
+        error: str = "",
+    ) -> None:
+        payload = {
+            "success": not bool(error),
+            "code": "OK" if not error else "ERROR",
+            "message": "HDB 闲时整理进度 / HDB idle consolidation progress",
+            "interface": "idle_consolidate_hdb",
+            "data": {
+                "job_id": str(job_id or ""),
+                "status": str(status or ""),
+                "request": dict(request or {}),
+                "progress": dict(progress or {}),
+                "error": str(error or ""),
+                "timestamp_ms": int(time.time() * 1000),
+            },
+        }
+        with self._idle_consolidation_lock:
+            self._last_idle_consolidation = payload
 
     def _reset_runtime_state(self) -> dict:
         structure_runtime = {}
@@ -788,12 +1154,24 @@ class HDB:
         if hasattr(self._stimulus, "clear_runtime_state"):
             stimulus_runtime = dict(self._stimulus.clear_runtime_state() or {})
 
+        induction_runtime = {}
+        if hasattr(self._induction, "clear_runtime_state"):
+            induction_runtime = dict(self._induction.clear_runtime_state() or {})
+
+        shared_runtime_cache = {}
+        if hasattr(self._structure_store, "clear_shared_runtime_cache"):
+            shared_runtime_cache = dict(self._structure_store.clear_shared_runtime_cache() or {})
+
         self._idle_consolidation_count_total = 0
-        self._last_idle_consolidation = None
+        with self._idle_consolidation_lock:
+            self._last_idle_consolidation = None
         self._total_calls = 0
+        self._deferred_persistence_call_counter = 0
         return {
             "structure_retrieval": structure_runtime,
             "stimulus_retrieval": stimulus_runtime,
+            "induction": induction_runtime,
+            "shared_runtime_cache": shared_runtime_cache,
             "idle_consolidation_cleared": True,
             "total_calls_reset": True,
         }
@@ -1767,8 +2145,22 @@ class HDB:
     def merge_stimulus_packets(self, external_packet: dict | None, internal_packet: dict | None, trace_id: str, tick_id: str | None = None) -> dict:
         return self._cut.merge_stimulus_packets(external_packet, internal_packet, trace_id=trace_id, tick_id=tick_id or trace_id)
 
-    def make_runtime_structure_object(self, structure_id: str, er: float, ev: float, reason: str = "hdb_projection") -> dict | None:
-        return self._structure_store.make_runtime_object(structure_id, er=er, ev=ev, reason=reason)
+    def make_runtime_structure_object(
+        self,
+        structure_id: str,
+        er: float,
+        ev: float,
+        reason: str = "hdb_projection",
+        *,
+        structure_obj: dict | None = None,
+    ) -> dict | None:
+        return self._structure_store.make_runtime_object(
+            structure_id,
+            er=er,
+            ev=ev,
+            reason=reason,
+            structure_obj=structure_obj,
+        )
 
     def make_runtime_group_object(self, group_id: str, er: float, ev: float, reason: str = "hdb_group_projection") -> dict | None:
         group_obj = self._group_store.get(group_id)
@@ -1817,12 +2209,31 @@ class HDB:
         reason: str = "hdb_memory_projection",
         display_text: str = "",
         backing_structure_id: str = "",
+        runtime_object_type: str = "",
     ) -> dict | None:
         episodic_obj = self._episodic_store.get(memory_id)
         if episodic_obj is None:
             return None
+        ext = dict(episodic_obj.get("meta", {}).get("ext", {}) or {})
+        memory_material = dict(ext.get("memory_material", {}) or {})
+        grouped_display_text = str(memory_material.get("grouped_display_text", "") or "")
+        sequence_groups = list(memory_material.get("sequence_groups", []) or [])
+        structure_refs = list(episodic_obj.get("structure_refs", []) or [])
+        group_refs = list(episodic_obj.get("group_refs", []) or [])
+        context_ref_id = str(backing_structure_id or (structure_refs[0] if structure_refs else "")).strip()
+        context_ref_type = "st" if context_ref_id.startswith("st") else ""
+        context_text = grouped_display_text or str(display_text or "")
+        if context_ref_id:
+            structure_obj = self._structure_store.get(context_ref_id)
+            if isinstance(structure_obj, dict):
+                context_text = str(
+                    (structure_obj.get("structure", {}) or {}).get("display_text", "")
+                    or context_text
+                    or context_ref_id
+                )
         full_runtime_display = (
             str(display_text or "")
+            or grouped_display_text
             or str(episodic_obj.get("meta", {}).get("ext", {}).get("display_text", ""))
             or str(episodic_obj.get("event_summary", ""))
             or str(memory_id)
@@ -1831,6 +2242,81 @@ class HDB:
         runtime_display = full_runtime_display
         if len(runtime_display) > max_display_chars:
             runtime_display = f"{runtime_display[:max_display_chars]}...(len={len(full_runtime_display)})"
+        requested_object_type = str(
+            runtime_object_type or self._config.get("residual_memory_runtime_object_type", "em") or "em"
+        ).strip().lower()
+        if requested_object_type not in {"st", "em"}:
+            requested_object_type = "st"
+        runtime_ext_base = merge_context_metadata(
+            {
+                "source_em_id": memory_id,
+                "source_memory_created_at": int(episodic_obj.get("created_at", 0) or 0),
+                "context_text": context_text or context_ref_id or runtime_display,
+                "memory_kind": str(memory_material.get("memory_kind", "") or ""),
+                "residual_memory_as_structure": True,
+                "memory_projection_object_type_requested": requested_object_type,
+                "memory_projection_backing_structure_id": context_ref_id,
+            },
+            context_ref_object_id=context_ref_id,
+            context_ref_object_type=context_ref_type,
+            context_owner_structure_id=context_ref_id if context_ref_type == "st" else "",
+            parent_ids=structure_refs,
+        )
+        runtime_ext_base = merge_residual_metadata(
+            runtime_ext_base,
+            residual_origin_kind="memory_runtime_projection",
+            residual_origin_entry_id=memory_id,
+        )
+        runtime_memory = {
+            "memory_id": memory_id,
+            "event_summary": episodic_obj.get("event_summary", ""),
+            "structure_refs": structure_refs,
+            "group_refs": group_refs,
+            "backing_structure_id": str(backing_structure_id or ""),
+            "grouped_display_text": grouped_display_text,
+            "semantic_grouped_display_text": grouped_display_text,
+            "sequence_groups": sequence_groups,
+            "display_text": runtime_display,
+            "full_display_text": full_runtime_display,
+            "memory_created_at": int(episodic_obj.get("created_at", 0) or 0),
+        }
+        runtime_source = {
+            "module": __module_name__,
+            "interface": "make_runtime_memory_object",
+            "origin": reason or "hdb_memory_projection",
+            "origin_id": memory_id,
+            "parent_ids": structure_refs,
+        }
+        runtime_meta = {
+            "confidence": 1.0,
+            "field_registry_version": __schema_version__,
+            "debug": {},
+        }
+        if requested_object_type == "st" and context_ref_id:
+            runtime_structure = self.make_runtime_structure_object(
+                context_ref_id,
+                er=er,
+                ev=ev,
+                reason=reason,
+            )
+            if isinstance(runtime_structure, dict):
+                runtime_ext = dict(runtime_ext_base)
+                runtime_ext["memory_projection_object_type_actual"] = "st"
+                runtime_meta_with_ext = dict(runtime_meta)
+                runtime_meta_with_ext["ext"] = dict(runtime_ext)
+                runtime_structure = dict(runtime_structure)
+                runtime_structure["source"] = dict(runtime_source)
+                runtime_structure["ext"] = dict(runtime_ext)
+                runtime_structure["meta"] = runtime_meta_with_ext
+                runtime_structure["memory"] = dict(runtime_memory)
+                runtime_structure["created_at"] = episodic_obj.get("created_at", int(time.time() * 1000))
+                runtime_structure["updated_at"] = int(time.time() * 1000)
+                return runtime_structure
+        runtime_ext = dict(runtime_ext_base)
+        runtime_ext["memory_projection_object_type_actual"] = "em"
+        if requested_object_type == "st":
+            runtime_ext["memory_projection_runtime_fallback"] = "legacy_em_fallback_missing_backing_structure"
+        runtime_meta["ext"] = dict(runtime_ext)
         return {
             "id": memory_id,
             "object_type": "em",
@@ -1844,22 +2330,10 @@ class HDB:
                 "er": round(float(er), 6),
                 "ev": round(float(ev), 6),
             },
-            "memory": {
-                "memory_id": memory_id,
-                "event_summary": episodic_obj.get("event_summary", ""),
-                "structure_refs": list(episodic_obj.get("structure_refs", [])),
-                "group_refs": list(episodic_obj.get("group_refs", [])),
-                "backing_structure_id": str(backing_structure_id or ""),
-                "display_text": runtime_display,
-                "full_display_text": full_runtime_display,
-            },
-            "source": {
-                "module": __module_name__,
-                "interface": "make_runtime_memory_object",
-                "origin": reason or "hdb_memory_projection",
-                "origin_id": memory_id,
-                "parent_ids": list(episodic_obj.get("structure_refs", [])),
-            },
+            "memory": runtime_memory,
+            "source": runtime_source,
+            "ext": runtime_ext,
+            "meta": runtime_meta,
             "created_at": episodic_obj.get("created_at", int(time.time() * 1000)),
             "updated_at": int(time.time() * 1000),
         }
@@ -1896,6 +2370,14 @@ class HDB:
         return self._make_response(True, "OK", "配置热加载完成 / Config hot reload done", data={"applied": applied, "rejected": rejected}, trace_id=trace_id, elapsed_ms=self._elapsed_ms(start_time), interface="reload_config")
 
     def close(self) -> None:
+        try:
+            self._structure_store.flush_pending_persistence()
+        except Exception:
+            pass
+        try:
+            self._structure_store.close()
+        except Exception:
+            pass
         self._save_issue_queue()
         self._logger.close()
 
@@ -1941,7 +2423,7 @@ class HDB:
             "structure_id": structure_id,
             "display_text": structure_obj.get("structure", {}).get("display_text", structure_id),
             "content_signature": structure_obj.get("structure", {}).get("content_signature", ""),
-            "base_weight": round(float(stats.get("base_weight", 1.0)), 8),
+            "base_weight": round(float(stats.get("base_weight", 0.0)), 8),
             "recent_gain": round(float(stats.get("recent_gain", 1.0)), 8),
             "fatigue": round(float(stats.get("fatigue", 0.0)), 8),
             "exists": True,

@@ -361,10 +361,21 @@ button.full { width: 100%; }
 }
 .detail-card.nested { background: rgba(255,255,255,0.90); }
 .detail-card h5 { margin: 0 0 10px; font-size: 14px; }
-.detail-card-body { display: grid; gap: 10px; }
-.detail-card-body > .stack,
-.detail-card-body > .mini-table {
+.detail-card-body {
+  display: grid;
   gap: 10px;
+  max-height: 560px;
+  overflow: auto;
+  padding-right: 4px;
+  scrollbar-gutter: stable;
+}
+.detail-card-body > .stack,
+.detail-card-body > .mini-table,
+.detail-card-body > .kv-list {
+  gap: 10px;
+  max-height: 420px;
+  overflow: auto;
+  padding-right: 4px;
 }
 .logic-strip {
   margin-bottom: 16px;
@@ -1046,6 +1057,17 @@ pre.code {
   margin-top: 12px;
 }
 
+.exp-hidden-chart-list {
+  margin-top: 14px;
+  background: rgba(255,255,255,0.72);
+}
+
+.exp-hidden-chart-list .details-body {
+  max-height: 360px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
 .exp-chart-card {
   display: grid;
   gap: 10px;
@@ -1056,6 +1078,16 @@ pre.code {
   border: 1px solid rgba(21,55,45,0.08);
   background: linear-gradient(180deg, rgba(255,255,255,0.96), rgba(251,248,242,0.9));
   padding: 14px;
+}
+
+.exp-chart-card-collapsed > summary {
+  padding: 0;
+}
+
+.exp-chart-card-collapsed .details-body {
+  margin-top: 10px;
+  display: grid;
+  gap: 10px;
 }
 
 .exp-chart-description {
@@ -1275,6 +1307,56 @@ pre.code {
 
 .exp-chart-open-btn {
   white-space: nowrap;
+}
+
+.exp-perspective-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 0 0 14px;
+}
+
+.exp-perspective-label {
+  font-weight: 700;
+  color: rgba(21,55,45,0.92);
+}
+
+.exp-perspective-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.segmented-btn {
+  border: 1px solid rgba(21,55,45,0.14);
+  background: rgba(255,255,255,0.92);
+  color: rgba(21,55,45,0.88);
+  border-radius: 999px;
+  padding: 7px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease, transform 0.18s ease;
+}
+
+.segmented-btn:hover {
+  transform: translateY(-1px);
+  border-color: rgba(21,55,45,0.22);
+}
+
+.segmented-btn.active {
+  background: linear-gradient(135deg, #1f6f5f, #2f8f83);
+  border-color: transparent;
+  color: #fff;
+  box-shadow: 0 10px 22px rgba(31,111,95,0.18);
+}
+
+.exp-perspective-note {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+  flex: 1 1 280px;
 }
 
 .chart-wrap.clickable {

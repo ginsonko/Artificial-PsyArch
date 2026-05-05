@@ -135,6 +135,59 @@ class TestHDBSelfCheck(unittest.TestCase):
         self.assertIn('dangling_memory_activation_group_ref', issue_types)
         self.assertIn('memory_activation_ref_mismatch', issue_types)
 
+    def test_quick_self_check_uses_recent_indexes_without_full_scan(self):
+        for token in ['甲', '乙', '丙']:
+            result = self.hdb.run_stimulus_level_retrieval_storage(stimulus_packet=self._packet(token), trace_id=f'sc_recent_{token}')
+            self.assertTrue(result['success'])
+
+        def fail_iter_structures():
+            raise AssertionError('quick self-check should use recent structure index')
+
+        def fail_iter_structure_dbs():
+            raise AssertionError('quick self-check should not scan structure DBs for orphan checks')
+
+        def fail_group_iter():
+            raise AssertionError('quick self-check should use recent group index')
+
+        def fail_episodic_iter():
+            raise AssertionError('quick self-check should use recent episodic index')
+
+        def fail_memory_iter():
+            raise AssertionError('quick self-check should use recent memory activation index')
+
+        self.hdb._structure_store.iter_structures = fail_iter_structures
+        self.hdb._structure_store.iter_structure_dbs = fail_iter_structure_dbs
+        self.hdb._group_store.iter_items = fail_group_iter
+        self.hdb._episodic_store.iter_items = fail_episodic_iter
+        self.hdb._memory_activation_store.iter_items = fail_memory_iter
+
+        check_result = self.hdb.self_check_hdb(trace_id='sc_quick_recent', check_scope='quick', max_items=2)
+        self.assertTrue(check_result['success'])
+        self.assertLessEqual(check_result['data']['checked_structure_count'], 2)
+
+    def test_idle_consolidate_batch_limit_uses_recent_structure_dbs(self):
+        created_ids = []
+        for token in ['丁', '戊', '己']:
+            result = self.hdb.run_stimulus_level_retrieval_storage(stimulus_packet=self._packet(token), trace_id=f'sc_idle_{token}')
+            self.assertTrue(result['success'])
+            created_ids.extend(result['data'].get('new_structure_ids') or result['data'].get('seeded_atomic_structure_ids') or [])
+        self.assertGreaterEqual(len(created_ids), 3)
+
+        def fail_iter_structure_dbs():
+            raise AssertionError('batched idle consolidation should use recent structure DBs')
+
+        self.hdb._structure_store.iter_structure_dbs = fail_iter_structure_dbs
+        result = self.hdb.idle_consolidate_hdb(
+            trace_id='sc_idle_batch',
+            reason='unit_test_batched_idle',
+            rebuild_pointer_index=False,
+            apply_soft_limits=True,
+            batch_limit=2,
+        )
+        self.assertTrue(result['success'])
+        self.assertEqual(result['data']['batch_limit'], 2)
+        self.assertLessEqual(result['data']['scanned_structure_db_count'], 2)
+
 
 if __name__ == '__main__':
     unittest.main()

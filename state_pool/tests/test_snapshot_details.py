@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 状态池快照增强测试
 ==================
@@ -7,6 +7,7 @@
 1. CSA 快照必须能展示锚点和属性摘要。
 2. 属性绑定后，快照里必须能看到运行时绑定属性。
 3. Tick 维护必须推进内部 tick 计数，并刷新疲劳等维护字段。
+4. 上下文/残差/记忆来源字段必须稳定透传到快照。
 """
 
 import os
@@ -94,7 +95,7 @@ def test_csa_snapshot_contains_anchor_and_attribute_summary(pool):
     assert "attrs=stimulus_intensity:1.0" in anchor_summary["display_detail"]
 
 
-def test_binding_updates_runtime_attribute_summary(pool):
+def test_binding_default_runtime_mode_inserts_standalone_attribute_state_item(pool):
     packet = build_packet_with_csa_details()
     pool.apply_stimulus_packet(packet, trace_id="bind_trace")
 
@@ -105,9 +106,15 @@ def test_binding_updates_runtime_attribute_summary(pool):
     attribute_sa = {
         "id": "sa_attr_correctness_001",
         "object_type": "sa",
-        "content": {"raw": "correctness:high", "display": "correctness:high", "value_type": "discrete"},
+        "content": {
+            "raw": "correctness:0.6",
+            "display": "correctness:0.6",
+            "value_type": "numerical",
+            "attribute_name": "correctness",
+            "attribute_value": 0.6,
+        },
         "stimulus": {"role": "attribute", "modality": "internal"},
-        "energy": {"er": 0.0, "ev": 0.0},
+        "energy": {"er": 0.0, "ev": 0.6},
     }
     result = pool.bind_attribute_node_to_object(
         target_item_id=sa_items[0]["item_id"],
@@ -118,12 +125,31 @@ def test_binding_updates_runtime_attribute_summary(pool):
     assert result["success"] is True
 
     after_snapshot = pool.get_state_snapshot("snap_bind_after", top_k=20)["data"]["snapshot"]
-    bound_sa = next(item for item in after_snapshot["top_items"] if item["item_id"] == sa_items[0]["item_id"])
-    assert "correctness:high" in bound_sa["bound_attribute_displays"]
-    # 默认不自动创建“绑定型 CSA”state_item；只更新锚点对象的运行态绑定快照即可。
-    assert result["data"]["created_new_csa"] is False
-    assert result["data"]["bound_csa_item_id"] in (None, "")
-    assert "runtime_attrs=correctness:high" in bound_sa["display_detail"]
+    anchor_row = next(item for item in after_snapshot["top_items"] if item["item_id"] == sa_items[0]["item_id"])
+    attr_rows = [
+        item for item in after_snapshot["top_items"]
+        if str(item.get("attribute_name", "")) == "correctness" and str(item.get("role", "")) == "attribute"
+    ]
+    assert attr_rows
+    attr_row = attr_rows[0]
+
+    assert "correctness:0.6" in anchor_row["bound_attribute_displays"]
+    assert anchor_row["runtime_bound_attribute_units"][0]["attribute_name"] == "correctness"
+    assert anchor_row["runtime_bound_attribute_units"][0]["attribute_value"] == pytest.approx(0.6)
+    assert attr_row["display"] == "correctness:0.6"
+    assert attr_row["all_attribute_names"] == ["correctness"]
+    assert attr_row["attribute_value"] == pytest.approx(0.6)
+    assert attr_row["value_type"] == "numerical"
+    assert attr_row["context_ref_object_id"] == "sa_feature_001"
+    assert attr_row["context_ref_object_type"] == "sa"
+    assert attr_row["ref_snapshot"]["attribute_name"] == "correctness"
+    assert attr_row["ref_snapshot"]["attribute_value"] == pytest.approx(0.6)
+    assert attr_row["ref_snapshot"]["role"] == "attribute"
+
+    summary = after_snapshot["summary"]
+    correctness_totals = summary["bound_attribute_energy_totals"]["correctness"]
+    assert correctness_totals["total_ev"] == pytest.approx(0.6)
+    assert correctness_totals["item_count"] == 1
 
 
 def test_tick_maintenance_advances_tick_counter_and_fatigue(pool):
@@ -141,3 +167,109 @@ def test_tick_maintenance_advances_tick_counter_and_fatigue(pool):
     assert top_item["fatigue"] == pytest.approx(0.0)
 
 
+def test_snapshot_exposes_context_residual_and_memory_origin_fields(pool):
+    now_ms = int(time.time() * 1000)
+    packet = {
+        "id": "spkt_context_fields",
+        "object_type": "stimulus_packet",
+        "sa_items": [
+            {
+                "id": "sa_ctx_anchor",
+                "object_type": "sa",
+                "content": {"raw": "你", "display": "你", "value_type": "discrete"},
+                "stimulus": {"role": "feature", "modality": "text"},
+                "energy": {"er": 1.0, "ev": 0.0},
+                "created_at": now_ms,
+                "updated_at": now_ms,
+            },
+            {
+                "id": "sa_ctx_residual",
+                "object_type": "sa",
+                "content": {"raw": "好", "display": "好", "value_type": "discrete"},
+                "stimulus": {"role": "feature", "modality": "text"},
+                "energy": {"er": 0.7, "ev": 0.0},
+                "ext": {
+                    "context_ref_object_id": "sa_ctx_anchor",
+                    "context_ref_object_type": "sa",
+                    "context_owner_structure_id": "st_ctx_owner",
+                    "context_path_ids": ["st_ctx_owner", "sa_ctx_anchor"],
+                    "residual_origin_kind": "stimulus_raw_residual",
+                    "anchor_memory_id": "em_ctx_001",
+                },
+                "created_at": now_ms,
+                "updated_at": now_ms,
+            },
+        ],
+        "csa_items": [],
+        "trace_id": "context_fields_trace",
+    }
+
+    result = pool.apply_stimulus_packet(packet, trace_id="context_fields_trace")
+    assert result["success"] is True
+
+    snapshot = pool.get_state_snapshot("snap_context_fields", top_k=10)["data"]["snapshot"]
+    target = next(item for item in snapshot["top_items"] if item["ref_object_id"] == "sa_ctx_residual")
+
+    assert target["context_ref_object_id"] == "sa_ctx_anchor"
+    assert target["context_owner_id"] == "st_ctx_owner"
+    assert target["context_text"] == "你"
+    assert target["residual_origin_kind"] == "stimulus_raw_residual"
+    assert target["residual_kind"] == "memory"
+    assert target["source_em_id"] == "em_ctx_001"
+
+    ref_snapshot = target["ref_snapshot"]
+    assert ref_snapshot["context_text"] == "你"
+    assert ref_snapshot["context_owner_id"] == "st_ctx_owner"
+    assert ref_snapshot["residual_kind"] == "memory"
+    assert ref_snapshot["source_em_id"] == "em_ctx_001"
+
+    summary = snapshot["summary"]
+    assert summary["contextual_item_count"] >= 1
+    assert summary["explicit_context_item_count"] >= 1
+    assert summary["multi_context_item_count"] >= 1
+    assert summary["explicit_context_path_depth_mean"] >= 2.0
+
+
+def test_snapshot_summary_exposes_full_pool_energy_totals(pool):
+    now_ms = int(time.time() * 1000)
+    packet = {
+        "id": "spkt_energy_summary",
+        "object_type": "stimulus_packet",
+        "sa_items": [
+            {
+                "id": "sa_energy_a",
+                "object_type": "sa",
+                "content": {"raw": "甲", "display": "甲", "value_type": "discrete"},
+                "stimulus": {"role": "feature", "modality": "text"},
+                "energy": {"er": 0.8, "ev": 0.1},
+                "created_at": now_ms,
+                "updated_at": now_ms,
+            },
+            {
+                "id": "sa_energy_b",
+                "object_type": "sa",
+                "content": {"raw": "乙", "display": "乙", "value_type": "discrete"},
+                "stimulus": {"role": "feature", "modality": "text"},
+                "energy": {"er": 0.2, "ev": 0.4},
+                "created_at": now_ms,
+                "updated_at": now_ms,
+            },
+        ],
+        "csa_items": [],
+        "trace_id": "energy_summary_trace",
+    }
+
+    result = pool.apply_stimulus_packet(packet, trace_id="energy_summary_trace")
+    assert result["success"] is True
+
+    snapshot = pool.get_state_snapshot("snap_energy_summary", top_k=1)["data"]["snapshot"]
+    summary = snapshot["summary"]
+
+    assert summary["active_item_count"] == 2
+    assert summary["total_er"] == pytest.approx(1.0)
+    assert summary["total_ev"] == pytest.approx(0.5)
+    assert summary["total_energy"] == pytest.approx(1.5)
+    assert summary["total_cp"] == pytest.approx(0.9)
+    assert summary["energy_by_type"]["sa"]["count"] == 2
+    assert summary["energy_by_type"]["sa"]["total_er"] == pytest.approx(1.0)
+    assert summary["energy_by_type"]["sa"]["total_ev"] == pytest.approx(0.5)

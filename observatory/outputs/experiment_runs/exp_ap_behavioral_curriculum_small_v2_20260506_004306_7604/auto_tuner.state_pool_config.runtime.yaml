@@ -1,0 +1,9 @@
+pool_max_items: 3654
+priority_neutralization_min_effect_threshold: 0.05
+default_ev_decay_ratio: 0.995
+default_er_decay_ratio: 0.986
+soft_capacity_start_items: 106
+neutralization_min_effect_threshold: 0.14
+soft_capacity_full_items: 806
+energy_injection_fatigue_same_side_knee_ev: 5.800000000000001
+energy_injection_repeat_fatigue_step: 0.19

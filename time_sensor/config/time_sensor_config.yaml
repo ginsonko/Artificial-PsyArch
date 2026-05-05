@@ -146,7 +146,9 @@ tick_buckets:
 # source_mode:
 # - memory_activation_snapshot: 使用 HDB 的记忆赋能池（MAP）快照作为“被重新接触到的记忆”列表
 #   这是最贴合理论 4.2.6.3 的 MVP：记忆被赋能 -> 依据时间戳生成时间感受。
-source_mode: memory_activation_snapshot
+# - runtime_memory_projection: 使用 StatePool 内 em 运行态对象整理出的快照
+#   这是“关闭专门记忆池后”的主路径：直接根据当前仍在状态池中活跃的 em 估计时间感受。
+source_mode: runtime_memory_projection
 
 # memory_top_k / 取 MAP 前 K 个候选计算时间感受（避免过重）
 memory_top_k: 12
@@ -239,6 +241,44 @@ max_bind_targets_per_memory: 2
 
 # peak_keep_ratio / 波峰保留比例（>= max_delta * ratio 的目标会被视为“同一波峰”）
 peak_keep_ratio: 0.72
+
+# enable_projection_target_bindings / 是否额外把“结构投影目标”也纳入时间感受绑定候选
+# 说明：
+# - 旧路径主要追随 memory feedback 的原子事件峰值，所以时间感受常会停留在 A/B/X 这种底层结构；
+# - 新路径会额外挑选少量 structure projection 目标做镜像绑定，让时间感受更容易进入高阶结构竞争。
+enable_projection_target_bindings: true
+
+# enable_runtime_snapshot_target_bindings / runtime-em 主链是否直接从 memory snapshot 提取结构目标
+# 说明：
+# - 当默认主链已切到 runtime_em_only 时，这个开关允许时间感受直接依赖 runtime memory snapshot 里的 backing structures；
+# - 这样就不需要先经过专门记忆池 / memory_feedback 再反查一次目标。
+enable_runtime_snapshot_target_bindings: true
+
+# runtime_snapshot_target_richness_bias_enabled / runtime-em 目标是否优先更“整体”的结构
+# - true: 同时存在原子结构与父结构时，会结合结构复杂度与当前活跃能量打分，避免总是落到 A/B/X 这类底层结构；
+# - false: 保留旧版“平均分 + 顺序打平”口径。
+runtime_snapshot_target_richness_bias_enabled: true
+
+# runtime_snapshot_target_complexity_bonus_per_token / 每多 1 个 token 的 richness 加成
+runtime_snapshot_target_complexity_bonus_per_token: 0.45
+
+# runtime_snapshot_target_group_bonus / 每多 1 个 sequence_group 的 richness 加成
+runtime_snapshot_target_group_bonus: 0.15
+
+# runtime_snapshot_target_runtime_attr_bonus / 运行态绑定属性数量带来的 richness 加成
+runtime_snapshot_target_runtime_attr_bonus: 0.08
+
+# max_projection_bind_targets_per_memory / 每条记忆最多额外镜像绑定几个 structure projection 目标
+max_projection_bind_targets_per_memory: 1
+
+# projection_target_keep_ratio / structure projection 波峰保留比例
+projection_target_keep_ratio: 0.72
+
+# time_factor_stripped_projection_context_free_identity_enabled / 去时间因子结构使用无上下文身份
+# 说明：
+# - true: 去掉时间感受后的结构用自身完整特征解析身份，源结构只作为 provenance/owner DB 关系；
+# - false: 恢复旧版按源结构上下文区分的投影身份。
+time_factor_stripped_projection_context_free_identity_enabled: true
 
 # max_total_bindings / 单 tick 最大绑定条数（安全刹车）
 max_total_bindings: 12

@@ -42,6 +42,7 @@ then（动作）动作：
 为了更贴合理论 3.10 的“CFS 脚本 + 先天行动触发脚本”的分层，本引擎支持按规则阶段排序执行：
   - phase: cfs（先执行，负责生成认知感受信号）
   - phase: directives（后执行，负责输出 focus/emotion_update/action_trigger/pool_effect 等指令）
+  - phase: emotion_post（可选后置阶段，供“同 tick 池内状态汇总后”再做一次递质调制）
 
 注意：
   - 默认 phase 为 directives。
@@ -69,6 +70,9 @@ RULES_SCHEMA_VERSION = "1.0"
 # Rule id should be stable for auditing and UI references.
 # 规则 id 需要稳定，用于审计与前端引用。
 RULE_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]{2,80}$")
+_EMOTION_UPDATE_META_KEYS = {"from", "match_policy", "max_updates", "max_matches", "channels"}
+_SELECTOR_CACHE_KEY = "_iesm_selector_cache"
+_SELECTOR_CACHE_STATS_KEY = "_iesm_selector_cache_stats"
 
 
 DEFAULT_DOC: dict[str, Any] = {
@@ -350,15 +354,15 @@ def _normalize_rule(raw_rule: dict[str, Any], *, rule_path: str) -> tuple[dict[s
     title = str(raw_rule.get("title", "") or "").strip()
     enabled = bool(raw_rule.get("enabled", True))
 
-    # phase / 阶段：用于控制规则执行顺序（cfs -> directives）
+    # phase / 阶段：用于控制规则执行顺序（cfs -> directives -> emotion_post）
     phase = str(raw_rule.get("phase", "directives") or "directives").strip() or "directives"
-    allowed_phases = {"cfs", "directives"}
+    allowed_phases = {"cfs", "directives", "emotion_post"}
     if phase not in allowed_phases:
         warnings.append(
             _warn(
                 f"{rule_path}.phase",
                 f"unknown phase: {phase}",
-                f"未知 phase：{phase}（建议 cfs 或 directives；已回退为 directives）",
+                f"未知 phase：{phase}（建议 cfs / directives / emotion_post；已回退为 directives）",
             )
         )
         phase = "directives"
@@ -734,7 +738,13 @@ def normalize_actions(raw: Any, *, path: str) -> tuple[list[dict[str, Any]], lis
             # 说明：
             # - 通道名可用缩写（DA/ADR/...）或中文名（多巴胺/皮质醇...）；最终由 EMgr 做归一化与应用。
             payload = copy.deepcopy(val)
-            for ch, delta in payload.items():
+            channel_payload = payload.get("channels") if isinstance(payload.get("channels"), dict) else None
+            if channel_payload is None:
+                if any(str(k) in _EMOTION_UPDATE_META_KEYS for k in payload.keys()):
+                    channel_payload = {str(k): v for k, v in payload.items() if str(k) not in _EMOTION_UPDATE_META_KEYS}
+                else:
+                    channel_payload = payload
+            for ch, delta in (channel_payload or {}).items():
                 if not str(ch):
                     continue
                 # Best-effort warn for obviously invalid values (not a number, not a template).
@@ -743,6 +753,8 @@ def normalize_actions(raw: Any, *, path: str) -> tuple[list[dict[str, Any]], lis
                     s = delta.strip()
                     if s.startswith("{{{") and s.endswith("}}}"):
                         continue
+                elif isinstance(delta, dict):
+                    continue
                 if _coerce_float_maybe(delta) is None:
                     warnings.append(_warn(f"{item_path}.emotion_update.{ch}", "delta should be float or template", "delta 建议为浮点数或模板字符串"))
             actions.append({"emotion_update": payload})
@@ -1132,6 +1144,13 @@ _METRIC_PRESET_MAP: dict[str, dict[str, Any]] = {
         "label_en": "Complexity score (0~1)",
         "group_zh": "全局指标（Global）",
     },
+    "core_complexity_score": {
+        "metric": "pool.core_complexity_score",
+        "mode": "state",
+        "label_zh": "核心繁/简复杂度（core_complexity_score，0~1）",
+        "label_en": "Core complexity score (0~1)",
+        "group_zh": "全局指标（Global）",
+    },
 
     # ------------------------------------------------------------
     # CAM (Current Attention Memory) / 当前注意记忆体指标预设
@@ -1377,6 +1396,8 @@ _METRIC_PRESET_ALIASES: dict[str, str] = {
     "有效波峰数量": "pool_effective_peak_count",
     "繁简综合复杂度": "complexity_score",
     "繁简综合得分": "complexity_score",
+    "核心繁简复杂度": "core_complexity_score",
+    "核心繁简得分": "core_complexity_score",
 
     # CAM（当前注意记忆体）
     "当前注意记忆体大小": "cam_size",
@@ -1710,6 +1731,81 @@ def _resolve_cfs_strength(strength_spec: Any, *, vars_ctx: dict[str, Any]) -> fl
     return _clamp01(out_lo + t * (out_hi - out_lo))
 
 
+def _resolve_numeric_delta_spec(delta_spec: Any, *, vars_ctx: dict[str, Any]) -> float:
+    """
+    Resolve a numeric delta spec for emotion_update.
+    解析 emotion_update 的数值增量描述。
+
+    Supported shapes / 支持形态：
+      1) number / string-number: 直接作为增量
+      2) dict:
+         - from: "match_value" | "var" | <var_name>
+         - var: 变量名（当 from="var" 时使用）
+         - policy: "scale_offset" | "linear_clamp" | "passthrough"
+         - scale / offset: 线性变换（允许负系数）
+         - min / max / out_min / out_max: linear_clamp 输入输出范围
+         - clamp_min / clamp_max: 对最终输出做额外钳制
+         - abs: bool
+    """
+    if delta_spec is None or delta_spec == "":
+        return 0.0
+
+    if isinstance(delta_spec, (int, float)):
+        return float(delta_spec)
+
+    if isinstance(delta_spec, str):
+        v = _coerce_float_maybe(delta_spec)
+        return float(v or 0.0)
+
+    if not isinstance(delta_spec, dict):
+        v = _coerce_float_maybe(delta_spec)
+        return float(v or 0.0)
+
+    src = delta_spec.get("from")
+    if src in {None, "", "match_value"}:
+        base = vars_ctx.get("match_value", 0.0)
+    elif src == "var":
+        base = vars_ctx.get(str(delta_spec.get("var", "") or "").strip(), 0.0)
+    else:
+        base = vars_ctx.get(str(src).strip(), 0.0)
+
+    v0 = _coerce_float_maybe(base)
+    v = float(v0 or 0.0)
+    if bool(delta_spec.get("abs", False)):
+        v = abs(v)
+
+    policy = str(delta_spec.get("policy", "scale_offset") or "scale_offset").strip().lower() or "scale_offset"
+    out = v
+
+    if policy in {"scale_offset", "scale", "affine", "linear"}:
+        scale = _coerce_float_maybe(delta_spec.get("scale", 1.0))
+        offset = _coerce_float_maybe(delta_spec.get("offset", 0.0))
+        out = v * float(scale if scale is not None else 1.0) + float(offset if offset is not None else 0.0)
+    elif policy in {"linear_clamp", "normalized_linear"}:
+        lo = _coerce_float_maybe(delta_spec.get("min", 0.0))
+        hi = _coerce_float_maybe(delta_spec.get("max", 1.0))
+        lo_f = float(lo if lo is not None else 0.0)
+        hi_f = float(hi if hi is not None else 1.0)
+        if hi_f <= lo_f + 1e-12:
+            out = 0.0
+        else:
+            t = (v - lo_f) / (hi_f - lo_f)
+            t = _clamp01(t)
+            out_min = _coerce_float_maybe(delta_spec.get("out_min", 0.0))
+            out_max = _coerce_float_maybe(delta_spec.get("out_max", 1.0))
+            out_lo = float(out_min if out_min is not None else 0.0)
+            out_hi = float(out_max if out_max is not None else 1.0)
+            out = out_lo + t * (out_hi - out_lo)
+
+    clamp_min = _coerce_float_maybe(delta_spec.get("clamp_min", None))
+    clamp_max = _coerce_float_maybe(delta_spec.get("clamp_max", None))
+    if clamp_min is not None:
+        out = max(float(clamp_min), out)
+    if clamp_max is not None:
+        out = min(float(clamp_max), out)
+    return float(out)
+
+
 def _execute_due_scheduled_actions(
     *,
     runtime_state: dict[str, Any],
@@ -1927,19 +2023,89 @@ def _execute_actions(
 
             if key == "emotion_update":
                 payload = spec if isinstance(spec, dict) else {}
-                for ch, delta_raw in payload.items():
-                    ch_name = str(ch or "").strip()
-                    if not ch_name:
-                        continue
-                    dv = _coerce_float_maybe(delta_raw)
-                    if dv is None:
-                        out_audit_notes.append(f"[IESM] emotion_update invalid delta: ch={ch_name} value={delta_raw}")
-                        continue
-                    raw_energy_total += abs(float(dv))
-                    dv2 = float(dv) * float(scale)
-                    if abs(dv2) < 1e-12:
-                        continue
-                    out_emotion_updates[ch_name] = float(out_emotion_updates.get(ch_name, 0.0) or 0.0) + float(dv2)
+                raw_payload = raw_spec if isinstance(raw_spec, dict) else {}
+                structured = bool(raw_payload) and (
+                    isinstance(raw_payload.get("channels"), dict) or any(str(k) in _EMOTION_UPDATE_META_KEYS for k in raw_payload.keys())
+                )
+                if not structured:
+                    for ch, delta_raw in payload.items():
+                        ch_name = str(ch or "").strip()
+                        if not ch_name:
+                            continue
+                        dv = _coerce_float_maybe(delta_raw)
+                        if dv is None:
+                            out_audit_notes.append(f"[IESM] emotion_update invalid delta: ch={ch_name} value={delta_raw}")
+                            continue
+                        raw_energy_total += abs(float(dv))
+                        dv2 = float(dv) * float(scale)
+                        if abs(dv2) < 1e-12:
+                            continue
+                        out_emotion_updates[ch_name] = float(out_emotion_updates.get(ch_name, 0.0) or 0.0) + float(dv2)
+                    continue
+
+                source = str(payload.get("from", "single") or "single").strip().lower() or "single"
+                match_policy = str(payload.get("match_policy", "all") or "all").strip().lower() or "all"
+                max_updates = _coerce_int_maybe(payload.get("max_updates", payload.get("max_matches", 12)))
+                max_updates = max(1, min(64, int(max_updates or 12)))
+
+                rendered_channels = payload.get("channels") if isinstance(payload.get("channels"), dict) else None
+                if rendered_channels is None:
+                    rendered_channels = {str(k): v for k, v in payload.items() if str(k) not in _EMOTION_UPDATE_META_KEYS}
+                raw_channels = raw_payload.get("channels") if isinstance(raw_payload.get("channels"), dict) else None
+                if raw_channels is None:
+                    raw_channels = {str(k): v for k, v in raw_payload.items() if str(k) not in _EMOTION_UPDATE_META_KEYS}
+
+                records: list[dict[str, Any]] = []
+                if source == "metric_matches":
+                    records = [r for r in (matches.get("metric", []) or []) if isinstance(r, dict)]
+                    if match_policy == "strongest":
+                        records = sorted(records, key=lambda r: abs(float(r.get("value", 0.0) or 0.0)), reverse=True)[:1]
+                    elif match_policy == "first":
+                        records = records[:1]
+                    else:
+                        records = records[:max_updates]
+                elif source == "cfs_matches":
+                    records = [r for r in (matches.get("cfs", []) or []) if isinstance(r, dict)]
+                    if match_policy == "strongest":
+                        records = sorted(records, key=lambda r: abs(float(r.get("strength", 0.0) or 0.0)), reverse=True)[:1]
+                    elif match_policy == "first":
+                        records = records[:1]
+                    else:
+                        records = records[:max_updates]
+                else:
+                    records = [{}]
+
+                for rec in records:
+                    local_vars = dict(vars_ctx)
+                    if source == "metric_matches":
+                        local_vars["match_value"] = float(rec.get("value", local_vars.get("match_value", 0.0)) or 0.0)
+                        local_vars["match_item_id"] = str(rec.get("item_id", local_vars.get("match_item_id", "")) or "")
+                        local_vars["match_ref_object_id"] = str(rec.get("ref_object_id", local_vars.get("match_ref_object_id", "")) or "")
+                        local_vars["match_ref_object_type"] = str(rec.get("ref_object_type", local_vars.get("match_ref_object_type", "")) or "")
+                        local_vars["match_display"] = str(rec.get("display", local_vars.get("match_display", "")) or "")
+                        local_vars["match_metric"] = str(rec.get("metric", local_vars.get("match_metric", "")) or "")
+                    elif source == "cfs_matches":
+                        local_vars["match_value"] = float(rec.get("strength", local_vars.get("match_value", 0.0)) or 0.0)
+                        local_vars["match_kind"] = str(rec.get("kind", local_vars.get("match_kind", "")) or "")
+                        local_vars["match_cfs_kind"] = str(rec.get("kind", local_vars.get("match_cfs_kind", "")) or "")
+                        target = rec.get("target") if isinstance(rec.get("target"), dict) else {}
+                        local_vars["match_item_id"] = str(target.get("target_item_id", local_vars.get("match_item_id", "")) or "")
+                        local_vars["match_ref_object_id"] = str(target.get("target_ref_object_id", local_vars.get("match_ref_object_id", "")) or "")
+                        local_vars["match_ref_object_type"] = str(target.get("target_ref_object_type", local_vars.get("match_ref_object_type", "")) or "")
+                        local_vars["match_display"] = str(target.get("target_display", local_vars.get("match_display", "")) or rec.get("target_display", "") or "")
+
+                    payload2 = _render_templates_in_data(raw_channels, vars_ctx=local_vars)
+                    payload2 = payload2 if isinstance(payload2, dict) else dict(rendered_channels or {})
+                    for ch, delta_raw in payload2.items():
+                        ch_name = str(ch or "").strip()
+                        if not ch_name:
+                            continue
+                        dv = _resolve_numeric_delta_spec(delta_raw, vars_ctx=local_vars)
+                        raw_energy_total += abs(float(dv))
+                        dv2 = float(dv) * float(scale)
+                        if abs(dv2) < 1e-12:
+                            continue
+                        out_emotion_updates[ch_name] = float(out_emotion_updates.get(ch_name, 0.0) or 0.0) + float(dv2)
                 continue
 
             if key == "action_trigger":
@@ -1955,11 +2121,139 @@ def _execute_actions(
                 raw_payload = raw_spec if isinstance(raw_spec, dict) else {}
                 from_src = str(raw_payload.get("from", "") or "").strip()
 
-                def _emit_one_trigger(rendered_payload: dict[str, Any], *, fallback_suffix: str) -> None:
+                def _normalize_target_from(v: Any) -> str:
+                    raw = str(v or "").strip().lower()
+                    if raw in {"match", "auto", "metric_match", "cfs_match", "metric_matches", "cfs_matches"}:
+                        return "match"
+                    return ""
+
+                def _extract_match_target_binding(
+                    local_vars_for_target: dict[str, Any] | None,
+                    *,
+                    match_source: str,
+                ) -> dict[str, str]:
+                    local_vars2 = local_vars_for_target if isinstance(local_vars_for_target, dict) else {}
+                    target_ref_object_id = str(local_vars2.get("match_ref_object_id", "") or "").strip()
+                    target_ref_object_type = str(local_vars2.get("match_ref_object_type", "") or "").strip()
+                    target_item_id = str(local_vars2.get("match_item_id", "") or "").strip()
+                    target_display = str(local_vars2.get("match_display", "") or "").strip()
+                    trigger_target_ref = ""
+                    if target_ref_object_id and target_ref_object_type:
+                        trigger_target_ref = f"{target_ref_object_type}:{target_ref_object_id}"
+                    elif target_ref_object_id:
+                        trigger_target_ref = target_ref_object_id
+                    if not target_display:
+                        target_display = target_ref_object_id or target_item_id
+                    return {
+                        "target_ref_object_id": str(target_ref_object_id or ""),
+                        "target_ref_object_type": str(target_ref_object_type or ""),
+                        "target_item_id": str(target_item_id or ""),
+                        "target_display": str(target_display or ""),
+                        "trigger_target_ref": str(trigger_target_ref or ""),
+                        "trigger_target_display": str(target_display or ""),
+                        "target_binding_match_source": str(match_source or ""),
+                    }
+
+                def _payload_has_explicit_target(payload: dict[str, Any]) -> bool:
+                    params_payload = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+                    candidate_values = [
+                        params_payload.get("target_ref_object_id"),
+                        params_payload.get("ref_object_id"),
+                        params_payload.get("target_item_id"),
+                        params_payload.get("item_id"),
+                        params_payload.get("trigger_target_ref"),
+                        params_payload.get("trigger_target"),
+                        params_payload.get("target_ref"),
+                        params_payload.get("anchor_ref"),
+                        payload.get("target_ref_object_id"),
+                        payload.get("ref_object_id"),
+                        payload.get("target_item_id"),
+                        payload.get("item_id"),
+                        payload.get("trigger_target_ref"),
+                        payload.get("trigger_target"),
+                        payload.get("target_ref"),
+                        payload.get("anchor_ref"),
+                    ]
+                    return any(str(v or "").strip() for v in candidate_values)
+
+                def _apply_target_binding(
+                    payload: dict[str, Any],
+                    *,
+                    local_vars_for_target: dict[str, Any] | None,
+                    match_source: str,
+                ) -> None:
+                    requested_from = _normalize_target_from(payload.get("target_from", raw_payload.get("target_from", "")))
+                    params_payload = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+                    if not isinstance(params_payload, dict):
+                        params_payload = {}
+                    else:
+                        params_payload = dict(params_payload)
+                    payload["params"] = params_payload
+
+                    explicit_target_present = _payload_has_explicit_target(payload)
+                    match_binding = _extract_match_target_binding(
+                        local_vars_for_target,
+                        match_source=str(match_source or from_src or ""),
+                    )
+                    binding_applied = False
+                    binding_strategy = "explicit" if explicit_target_present else "none"
+                    binding_reason = "explicit_target_preserved" if explicit_target_present else "not_requested"
+
+                    if requested_from == "match":
+                        binding_strategy = "match"
+                        if explicit_target_present:
+                            binding_reason = "explicit_target_preserved"
+                        else:
+                            if any(
+                                str(match_binding.get(key, "") or "").strip()
+                                for key in ("target_ref_object_id", "target_item_id", "trigger_target_ref")
+                            ):
+                                for key in (
+                                    "target_ref_object_id",
+                                    "target_ref_object_type",
+                                    "target_item_id",
+                                    "target_display",
+                                    "trigger_target_ref",
+                                    "trigger_target_display",
+                                ):
+                                    value = match_binding.get(key, "")
+                                    if str(value or "").strip():
+                                        if not str(params_payload.get(key, "") or "").strip():
+                                            params_payload[key] = value
+                                        if not str(payload.get(key, "") or "").strip():
+                                            payload[key] = value
+                                binding_applied = True
+                                binding_reason = "match_target_bound"
+                            else:
+                                binding_reason = "match_target_unavailable"
+
+                    payload["params"] = params_payload
+                    payload["target_binding_strategy"] = str(binding_strategy or "")
+                    payload["target_binding_requested_from"] = str(requested_from or "")
+                    payload["target_binding_applied"] = bool(binding_applied)
+                    payload["target_binding_reason"] = str(binding_reason or "")
+                    payload["target_binding_match_source"] = str(match_binding.get("target_binding_match_source", "") or "")
+                    payload["target_binding_match_ref_object_id"] = str(match_binding.get("target_ref_object_id", "") or "")
+                    payload["target_binding_match_ref_object_type"] = str(match_binding.get("target_ref_object_type", "") or "")
+                    payload["target_binding_match_item_id"] = str(match_binding.get("target_item_id", "") or "")
+                    payload["target_binding_match_display"] = str(match_binding.get("target_display", "") or "")
+
+                def _emit_one_trigger(
+                    rendered_payload: dict[str, Any],
+                    *,
+                    fallback_suffix: str,
+                    local_vars_for_target: dict[str, Any] | None = None,
+                    match_source: str = "",
+                ) -> None:
                     payload2 = dict(rendered_payload)
+                    _apply_target_binding(
+                        payload2,
+                        local_vars_for_target=local_vars_for_target,
+                        match_source=match_source,
+                    )
                     # Remove control fields so downstream consumers only see the actual trigger schema.
                     # 去掉控制字段，避免下游把它们当作行动参数。
-                    for k in ["from", "match_policy", "max_triggers", "max", "policy"]:
+                    for k in ["from", "match_policy", "max_triggers", "max", "policy", "target_from"]:
                         payload2.pop(k, None)
 
                     # Habituation: scale the action drive gain (soft attenuation).
@@ -2051,14 +2345,24 @@ def _execute_actions(
                         # 按记录逐条渲染模板：让 action_id/gain/params 能绑定到正确对象。
                         rendered = _render_templates_in_data(raw_payload, vars_ctx=local_vars)
                         rendered = rendered if isinstance(rendered, dict) else {}
-                        _emit_one_trigger(rendered, fallback_suffix=fallback_suffix)
+                        _emit_one_trigger(
+                            rendered,
+                            fallback_suffix=fallback_suffix,
+                            local_vars_for_target=local_vars,
+                            match_source=from_src,
+                        )
                         emitted += 1
 
                     continue
 
                 # Legacy single-trigger behavior (templates already rendered by spec above).
                 payload = spec if isinstance(spec, dict) else {}
-                _emit_one_trigger(payload, fallback_suffix=str(idx))
+                _emit_one_trigger(
+                    payload,
+                    fallback_suffix=str(idx),
+                    local_vars_for_target=vars_ctx,
+                    match_source=from_src,
+                )
                 continue
 
             if key == "cfs_emit":
@@ -2150,23 +2454,6 @@ def _execute_actions(
 
                 strength = _resolve_cfs_strength(strength_spec, vars_ctx=local_vars)
                 # Raw energy record first (pre-habituation).
-                if strength < float(min_strength):
-                    # Below min_strength: treat it as a "quiet" state.
-                    #
-                    # IMPORTANT:
-                    # Some rules set `emit_gate.bind_attribute_even_when_skipped=true` so that
-                    # runtime-bound attributes (CFS) can be refreshed/decayed even when we
-                    # do not emit an event (to avoid "peak only" observability).
-                    #
-                    # If we `continue` here, the gate's bind refresh never happens, which
-                    # breaks "dissonance drop -> correctness rise" and makes live_total
-                    # curves stick to stale values until half-life decay catches up.
-                    if bind_attr_specs and emit_gate and bool(emit_gate.get("bind_attribute_even_when_skipped", False)) and scope != "global":
-                        try:
-                            _emit_bind_attribute(strength_value=float(strength))
-                        except Exception:
-                            pass
-                    continue
                 raw_energy_total += float(strength)
                 strength = float(strength) * float(scale)
                 if abs(float(strength)) < 1e-12:
@@ -2757,6 +3044,45 @@ def _numeric_compare(
     return False
 
 
+def _freeze_for_cache(value: Any) -> Any:
+    """Convert nested selector data into a hashable cache key fragment."""
+    if isinstance(value, dict):
+        return tuple((str(k), _freeze_for_cache(v)) for k, v in sorted(value.items(), key=lambda kv: str(kv[0])))
+    if isinstance(value, (list, tuple, set)):
+        return tuple(_freeze_for_cache(v) for v in value)
+    if isinstance(value, float):
+        return round(float(value), 12)
+    if isinstance(value, (str, int, bool)) or value is None:
+        return value
+    return repr(value)
+
+
+def _selector_cache_stats(context: dict[str, Any]) -> dict[str, int]:
+    stats = context.get(_SELECTOR_CACHE_STATS_KEY)
+    if not isinstance(stats, dict):
+        stats = {"hit": 0, "miss": 0}
+        context[_SELECTOR_CACHE_STATS_KEY] = stats
+    return stats  # type: ignore[return-value]
+
+
+def _selector_cache_token(context: dict[str, Any], items_raw: Any) -> tuple[Any, ...]:
+    if isinstance(items_raw, list):
+        try:
+            first = ""
+            last = ""
+            if items_raw:
+                first0 = items_raw[0]
+                last0 = items_raw[-1]
+                if isinstance(first0, dict):
+                    first = str(first0.get("item_id", "") or "")
+                if isinstance(last0, dict):
+                    last = str(last0.get("item_id", "") or "")
+            return (id(items_raw), len(items_raw), first, last)
+        except Exception:
+            return (id(items_raw), len(items_raw))
+    return (id(items_raw), 0)
+
+
 # ----------------------------------------------------------------------
 # Selector / 选择器
 # ----------------------------------------------------------------------
@@ -2779,7 +3105,19 @@ def _select_pool_items(*, context: dict[str, Any], selector: dict[str, Any] | No
           - all: 二者并集（用于“既看体验也看记忆”的规则）
         - require_all: true/false（可选；true 表示必须全部属性都存在）
     """
-    items = list(context.get("pool_items", []) or [])
+    raw_items = context.get("pool_items", []) or []
+    cache_key = (
+        _selector_cache_token(context, raw_items),
+        _freeze_for_cache(selector) if isinstance(selector, dict) else None,
+    )
+    cache = context.get(_SELECTOR_CACHE_KEY)
+    if isinstance(cache, dict) and cache_key in cache:
+        _selector_cache_stats(context)["hit"] = int(_selector_cache_stats(context).get("hit", 0) or 0) + 1
+        return list(cache.get(cache_key) or [])
+
+    _selector_cache_stats(context)["miss"] = int(_selector_cache_stats(context).get("miss", 0) or 0) + 1
+
+    items = list(raw_items)
     items = [it for it in items if isinstance(it, dict)]
 
     # Context-only pseudo types should be opt-in; otherwise they can accidentally match
@@ -2787,8 +3125,16 @@ def _select_pool_items(*, context: dict[str, Any], selector: dict[str, Any] | No
     # 上下文伪类型默认不参与 selector 匹配，必须显式 ref_object_types 才允许。
     context_only_types = {"input"}
 
+    def _store_result(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        cache2 = context.get(_SELECTOR_CACHE_KEY)
+        if isinstance(cache2, dict):
+            if len(cache2) > 256:
+                cache2.clear()
+            cache2[cache_key] = list(rows)
+        return rows
+
     if not selector or not isinstance(selector, dict):
-        return [it for it in items if str(it.get("ref_object_type", "")) not in context_only_types]
+        return _store_result([it for it in items if str(it.get("ref_object_type", "")) not in context_only_types])
 
     mode = str(selector.get("mode", "all") or "all").strip()
 
@@ -2858,13 +3204,13 @@ def _select_pool_items(*, context: dict[str, Any], selector: dict[str, Any] | No
         items = filtered
 
     if mode in {"all", "any"}:
-        return items
+        return _store_result(items)
 
     if mode == "specific_item":
         item_id = str(selector.get("item_id", "") or "").strip()
         if not item_id:
             return []
-        return [it for it in items if str(it.get("item_id", "")) == item_id]
+        return _store_result([it for it in items if str(it.get("item_id", "")) == item_id])
 
     if mode == "specific_ref":
         ref_id = str(selector.get("ref_object_id", "") or "").strip()
@@ -2874,7 +3220,7 @@ def _select_pool_items(*, context: dict[str, Any], selector: dict[str, Any] | No
         out = [it for it in items if str(it.get("ref_object_id", "")) == ref_id]
         if ref_type:
             out = [it for it in out if str(it.get("ref_object_type", "")) == ref_type]
-        return out
+        return _store_result(out)
 
     if mode == "contains_text":
         needle = str(selector.get("contains_text", "") or "").strip()
@@ -2894,7 +3240,7 @@ def _select_pool_items(*, context: dict[str, Any], selector: dict[str, Any] | No
             )
             if needle in hay or needle_low in hay.lower():
                 out.append(it)
-        return out
+        return _store_result(out)
 
     if mode in {
         "has_bound_attribute",
@@ -2967,16 +3313,16 @@ def _select_pool_items(*, context: dict[str, Any], selector: dict[str, Any] | No
             else:
                 if have_set & want_set:
                     out.append(it)
-        return out
+        return _store_result(out)
 
     if mode == "top_n":
         top_n = _coerce_int_maybe(selector.get("top_n", 8))
         top_n = max(1, int(top_n or 8))
         rows = list(items)
         rows.sort(key=lambda it: float(it.get("total_energy", 0.0) or 0.0), reverse=True)
-        return rows[:top_n]
+        return _store_result(rows[:top_n])
 
-    return items
+    return _store_result(items)
 
 
 # ----------------------------------------------------------------------
@@ -3061,8 +3407,14 @@ def _update_metric_history(*, runtime_state: dict[str, Any], tick_index: int, co
         put("emotion.pun", float(emotion.get("pun", 0.0) or 0.0))
 
     stimulus = context.get("stimulus", {}) if isinstance(context.get("stimulus", {}), dict) else {}
-    if "residual_ratio" in stimulus:
-        put("stimulus.residual_ratio", float(stimulus.get("residual_ratio", 0.0) or 0.0))
+    for key, raw_value in stimulus.items():
+        metric_key = str(key or "").strip()
+        if not metric_key:
+            continue
+        value = _coerce_float_maybe(raw_value)
+        if value is None:
+            continue
+        put(f"stimulus.{metric_key}", float(value))
 
     retrieval = context.get("retrieval", {}) if isinstance(context.get("retrieval", {}), dict) else {}
     stim = retrieval.get("stimulus", {}) if isinstance(retrieval.get("stimulus", {}), dict) else {}
@@ -3111,6 +3463,51 @@ def _series_delta(*, store: dict[str, dict[int, float]], series_key: str, tick_i
     if cur is None or prev is None:
         return None
     return float(cur) - float(prev)
+
+
+def _series_delta_with_recent_span(
+    *,
+    store: dict[str, dict[int, float]],
+    series_key: str,
+    tick_index: int,
+    window_ticks: int,
+) -> tuple[float | None, int]:
+    """
+    Best-effort delta using the widest available span inside the recent window.
+    在最近窗口内尽量使用“可获得的最宽时间跨度”计算 delta。
+
+    Why / 目的：
+    - item 级对象在真实运行中可能不会每一拍都存在；
+    - expectation/pressure 的 verified 分支更适合读取“最近几拍内可见的平均变化率”，
+      而不是强依赖“恰好 N tick 前必须有样本”。
+    """
+    span = max(1, int(window_ticks or 1))
+    cur = _history_value_at(store, series_key=series_key, tick=tick_index)
+    if cur is None:
+        return None, span
+    prev = _history_value_at(store, series_key=series_key, tick=tick_index - span)
+    if prev is not None:
+        return float(cur) - float(prev), span
+    series = store.get(series_key)
+    if not isinstance(series, dict) or not series:
+        return None, span
+    lower_tick = int(tick_index) - span
+    candidate_ticks: list[int] = []
+    for raw_tick in series.keys():
+        try:
+            parsed = int(raw_tick)
+        except Exception:
+            continue
+        if lower_tick <= parsed < int(tick_index):
+            candidate_ticks.append(parsed)
+    if not candidate_ticks:
+        return None, span
+    prev_tick = min(candidate_ticks)
+    prev2 = _history_value_at(store, series_key=series_key, tick=prev_tick)
+    if prev2 is None:
+        return None, span
+    actual_span = max(1, int(tick_index) - int(prev_tick))
+    return float(cur) - float(prev2), actual_span
 
 
 def _metric_series_key_for_item(item_id: str, metric_tail: str) -> str:
@@ -3636,6 +4033,10 @@ def _eval_metric_when(
                         "time_bucket_center_sec": it.get("time_bucket_center_sec", None),
                         "time_basis": str(it.get("time_basis", "") or ""),
                         "time_bucket_unit": str(it.get("time_bucket_unit", "") or ""),
+                        "verification_anchor_item_id": str(it.get("verification_anchor_item_id", "") or ""),
+                        "verification_anchor_ref_object_id": str(it.get("verification_anchor_ref_object_id", "") or ""),
+                        "verification_anchor_ref_object_type": str(it.get("verification_anchor_ref_object_type", "") or ""),
+                        "verification_anchor_display": str(it.get("verification_anchor_display", "") or ""),
                     }
                 )
             ok = _numeric_compare(value=float(len(matched_records)), op=op, threshold=threshold, vmin=vmin, vmax=vmax, epsilon=epsilon)
@@ -3650,6 +4051,10 @@ def _eval_metric_when(
             m["vars"]["match_ref_object_id"] = str(primary.get("ref_object_id", "") or "")
             m["vars"]["match_ref_object_type"] = str(primary.get("ref_object_type", "") or "")
             m["vars"]["match_display"] = str(primary.get("display", "") or "")
+            m["vars"]["match_verification_anchor_item_id"] = str(primary.get("verification_anchor_item_id", "") or "")
+            m["vars"]["match_verification_anchor_ref_object_id"] = str(primary.get("verification_anchor_ref_object_id", "") or "")
+            m["vars"]["match_verification_anchor_ref_object_type"] = str(primary.get("verification_anchor_ref_object_type", "") or "")
+            m["vars"]["match_verification_anchor_display"] = str(primary.get("verification_anchor_display", "") or "")
             if capture_as:
                 m["vars"][capture_as] = m["vars"]["match_value"]
                 m["vars"][f"{capture_as}_item_id"] = m["vars"]["match_item_id"]
@@ -3727,17 +4132,16 @@ def _eval_metric_when(
                         value = 0.0
 
             if mode == "avg_rate":
-                d = (
-                    _series_delta(
+                d = None
+                span = max(1, int(window_ticks))
+                if provided_tick_index:
+                    d, span = _series_delta_with_recent_span(
                         store=store,
                         series_key=_metric_series_key_for_item(item_id, tail),
                         tick_index=tick_index,
                         window_ticks=window_ticks,
                     )
-                    if provided_tick_index
-                    else None
-                )
-                value = float(d or 0.0) / float(window_ticks)
+                value = float(d or 0.0) / float(span or window_ticks or 1)
 
             if op == "changed" and mode == "state":
                 # Interpret "changed" as "state differs from previous tick" (delta != 0).
@@ -3790,6 +4194,10 @@ def _eval_metric_when(
                     "time_bucket_center_sec": it.get("time_bucket_center_sec", None),
                     "time_basis": str(it.get("time_basis", "") or ""),
                     "time_bucket_unit": str(it.get("time_bucket_unit", "") or ""),
+                    "verification_anchor_item_id": str(it.get("verification_anchor_item_id", "") or ""),
+                    "verification_anchor_ref_object_id": str(it.get("verification_anchor_ref_object_id", "") or ""),
+                    "verification_anchor_ref_object_type": str(it.get("verification_anchor_ref_object_type", "") or ""),
+                    "verification_anchor_display": str(it.get("verification_anchor_display", "") or ""),
                 }
             )
 
@@ -3813,6 +4221,10 @@ def _eval_metric_when(
         m["vars"]["match_ref_object_id"] = str(primary.get("ref_object_id", "") or "")
         m["vars"]["match_ref_object_type"] = str(primary.get("ref_object_type", "") or "")
         m["vars"]["match_display"] = str(primary.get("display", "") or "")
+        m["vars"]["match_verification_anchor_item_id"] = str(primary.get("verification_anchor_item_id", "") or "")
+        m["vars"]["match_verification_anchor_ref_object_id"] = str(primary.get("verification_anchor_ref_object_id", "") or "")
+        m["vars"]["match_verification_anchor_ref_object_type"] = str(primary.get("verification_anchor_ref_object_type", "") or "")
+        m["vars"]["match_verification_anchor_display"] = str(primary.get("verification_anchor_display", "") or "")
         # Make time-bucket vars available for action_trigger templates (e.g. recall from time-feeling).
         # 让时间桶信息可用于 action_trigger 模板（例如时间感受触发回忆时透传目标时间间隔）。
         tb_ref = str(primary.get("time_bucket_ref_object_id", "") or "").strip()
@@ -4044,6 +4456,7 @@ def evaluate_rules(
     now_ms: int | None,
     runtime_state: dict[str, Any],
     allow_timer: bool = True,
+    allowed_phases: list[str] | tuple[str, ...] | set[str] | None = None,
 ) -> dict[str, Any]:
     """
     Evaluate rules against a single tick context.
@@ -4068,6 +4481,10 @@ def evaluate_rules(
     emitted_cfs_signals: list[dict[str, Any]] = []
     windows = list(state_windows or [])
     context = context if isinstance(context, dict) else {}
+    phase_filter: set[str] | None = None
+    if isinstance(allowed_phases, (list, tuple, set)):
+        normalized = {str(x).strip() for x in allowed_phases if str(x).strip()}
+        phase_filter = normalized or None
 
     triggered_rules: list[dict[str, Any]] = []
     triggered_scripts: list[dict[str, Any]] = []
@@ -4086,6 +4503,13 @@ def evaluate_rules(
             "directives": {"cfs_signals": list(cfs_signals or []), "focus_directives": [], "emotion_updates": {}, "action_triggers": [], "pool_effects": []},
             "audit": {"disabled": True, "elapsed_ms": int((time.time() - start) * 1000)},
         }
+
+    selector_cache_had_prev = _SELECTOR_CACHE_KEY in context
+    selector_stats_had_prev = _SELECTOR_CACHE_STATS_KEY in context
+    selector_cache_prev = context.get(_SELECTOR_CACHE_KEY)
+    selector_stats_prev = context.get(_SELECTOR_CACHE_STATS_KEY)
+    context[_SELECTOR_CACHE_KEY] = {}
+    context[_SELECTOR_CACHE_STATS_KEY] = {"hit": 0, "miss": 0}
 
     last_fired = runtime_state.setdefault("last_fired_tick", {})
     if not isinstance(last_fired, dict):
@@ -4122,8 +4546,8 @@ def evaluate_rules(
             out_audit_notes=audit_notes,
         )
 
-    # Phase ordering / 阶段排序：先执行 cfs，再执行 directives。
-    phase_rank = {"cfs": 0, "directives": 1}
+    # Phase ordering / 阶段排序：先执行 cfs，再执行 directives，再执行 emotion_post。
+    phase_rank = {"cfs": 0, "directives": 1, "emotion_post": 2}
 
     def rule_sort_key(r: dict[str, Any]) -> tuple[int, int, str]:
         phase = str(r.get("phase", "directives") or "directives").strip() or "directives"
@@ -4131,7 +4555,14 @@ def evaluate_rules(
         rid = str(r.get("id", "") or "")
         return (int(phase_rank.get(phase, 99)), int(-pr), rid)
 
-    rules_sorted = sorted([r for r in (doc.get("rules") or []) if isinstance(r, dict)], key=rule_sort_key)
+    rule_candidates = [r for r in (doc.get("rules") or []) if isinstance(r, dict)]
+    if phase_filter is not None:
+        rule_candidates = [
+            r
+            for r in rule_candidates
+            if str(r.get("phase", "directives") or "directives").strip() in phase_filter
+        ]
+    rules_sorted = sorted(rule_candidates, key=rule_sort_key)
 
     for rule in rules_sorted:
         if not bool(rule.get("enabled", True)):
@@ -4230,6 +4661,21 @@ def evaluate_rules(
         merged_by_id[did] = d
     focus_directives = list(merged_by_id.values())
 
+    selector_cache = context.get(_SELECTOR_CACHE_KEY)
+    selector_stats = context.get(_SELECTOR_CACHE_STATS_KEY)
+    selector_cache_size = len(selector_cache) if isinstance(selector_cache, dict) else 0
+    selector_cache_hit = int(selector_stats.get("hit", 0) or 0) if isinstance(selector_stats, dict) else 0
+    selector_cache_miss = int(selector_stats.get("miss", 0) or 0) if isinstance(selector_stats, dict) else 0
+
+    if selector_cache_had_prev:
+        context[_SELECTOR_CACHE_KEY] = selector_cache_prev
+    else:
+        context.pop(_SELECTOR_CACHE_KEY, None)
+    if selector_stats_had_prev:
+        context[_SELECTOR_CACHE_STATS_KEY] = selector_stats_prev
+    else:
+        context.pop(_SELECTOR_CACHE_STATS_KEY, None)
+
     return {
         "enabled": True,
         "tick_index": tick_index,
@@ -4245,6 +4691,7 @@ def evaluate_rules(
         "audit": {
             "elapsed_ms": int((time.time() - start) * 1000),
             "rule_count": len(rules_sorted),
+            "allowed_phases": sorted(list(phase_filter)) if phase_filter else [],
             "triggered_rule_count": len(triggered_rules),
             "triggered_script_count": len(triggered_scripts),
             "cfs_signal_input_count": int(cfs_input_count),
@@ -4254,6 +4701,9 @@ def evaluate_rules(
             "emotion_update_key_count": len(emotion_updates.keys()),
             "action_trigger_count": len(action_triggers),
             "pool_effect_count": len(pool_effects),
+            "selector_cache_hit": selector_cache_hit,
+            "selector_cache_miss": selector_cache_miss,
+            "selector_cache_size": selector_cache_size,
             "notes": audit_notes,
             "trace_id": trace_id,
             "tick_id": tick_id,

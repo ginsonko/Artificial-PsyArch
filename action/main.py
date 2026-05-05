@@ -25,9 +25,11 @@ AP 原型行动模块（Action / Drive）
 from __future__ import annotations
 
 import os
+import re
 import math
 import time
 import traceback
+import difflib
 from typing import Any
 
 from . import __module_name__, __schema_version__, __version__
@@ -93,9 +95,39 @@ _DEFAULT_CONFIG: dict[str, Any] = {
         "SER": +0.06,
         "END": -0.03,
         "COR": +0.30,
+        "NOV": -0.08,
+        "FOC": -0.10,
     },
+    "threshold_scale_by_rwd_pun_enabled": True,
+    "threshold_scale_by_rwd_pun_reward_coef": -0.28,
+    "threshold_scale_by_rwd_pun_punish_coef": +0.34,
+    "threshold_scale_by_rwd_pun_min": 0.60,
+    "threshold_scale_by_rwd_pun_max": 1.45,
     "threshold_scale_min": 0.55,
     "threshold_scale_max": 1.75,
+    "local_drive_modulation_by_rwd_pun_enabled": True,
+    "local_drive_modulation_require_target": True,
+    "local_drive_reward_bonus_coef": 0.45,
+    "local_drive_punish_penalty_coef": 0.55,
+    "local_drive_scale_min": 0.20,
+    "local_drive_scale_max": 1.80,
+    "local_drive_feedback_ev_min": 0.0,
+    "local_drive_feedback_k_pred": 1.0,
+    "local_drive_feedback_k_got": 0.5,
+    "local_drive_feedback_w_pred": 0.7,
+    "local_drive_feedback_w_got": 0.3,
+    "local_drive_feedback_drop_zero_signal_enabled": True,
+    "local_drive_feedback_min_signal": 1e-9,
+    "local_drive_reward_attribute_names": ["reward_signal", "teacher_reward_signal"],
+    "local_drive_punish_attribute_names": ["punish_signal", "teacher_punish_signal"],
+    "local_drive_teacher_feedback_override_enabled": True,
+    "local_drive_teacher_feedback_floor_scale": 1.0,
+    "local_drive_teacher_feedback_cross_suppress_scale": 0.35,
+    "local_drive_feedback_text_fallback_enabled": True,
+    "local_drive_feedback_text_fallback_target_types": ["input"],
+    "local_drive_feedback_text_fallback_min_score": 0.55,
+    "local_drive_feedback_text_fallback_min_chars": 6,
+    "local_drive_feedback_text_fallback_max_candidates": 96,
     "action_fatigue_enabled": True,
     "action_fatigue_decay_ratio": 0.92,
     "action_fatigue_increase_on_execute": 0.35,
@@ -110,6 +142,13 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "diverge_mode_complexity_threshold": 0.25,
     "mode_focus_top_n_scale": 0.70,
     "mode_diverge_top_n_scale": 1.30,
+    # Attention mode changes redistribute a bounded energy resource; they do not
+    # create unlimited multiplicative amplification.
+    "mode_focus_attention_energy_budget_scale": 1.25,
+    "mode_diverge_attention_energy_budget_scale": 0.75,
+    "mode_attention_energy_budget_base": 8.0,
+    "mode_attention_energy_budget_min": 0.0,
+    "mode_attention_energy_budget_max": 24.0,
     "mode_cooldown_ticks": 2,
     # ---- Recall / 回忆行动 ----
     "recall_threshold": 0.40,
@@ -231,6 +270,7 @@ class ActionManager:
                 ),
                 "params_schema": {
                     "disable_threshold_modulation": "true/false（是否禁用阈值调制，便于实验稳定复现）",
+                    "explicit_input_drive_scale": ">=1（明确外源输入目标时，对 drive 增益做额外放大）",
                     "async_delay_ticks": ">=1（异步完成延迟的 tick 数，默认 1）",
                     "feedback_text": "可选：完成时的系统反馈文本（仅用于审计展示）",
                 },
@@ -283,6 +323,7 @@ class ActionManager:
         innate_focus_directives: list[dict] | None = None,
         innate_action_triggers: list[dict] | None = None,
         memory_activation_snapshot: dict | None = None,
+        local_reward_punish_map: dict | None = None,
     ) -> dict:
         start_time = time.time()
 
@@ -328,20 +369,39 @@ class ActionManager:
         drive_max = float(self._config.get("drive_max", 3.0))
         for node in self._nodes.values():
             node["drive"] = max(0.0, min(drive_max, float(node.get("drive", 0.0)) * decay))
-            node["last_update_tick"] = current_tick_number
             # Reset per-tick trigger summary.
             node["tick_gain_total"] = 0.0
+            node["tick_gain_raw_total"] = 0.0
             node["tick_gain_by_source_kind"] = {}
             node["tick_sources"] = []
+            node["tick_local_gain_base_total"] = 0.0
+            node["tick_local_gain_applied_total"] = 0.0
+            node["tick_local_reward_bonus_total"] = 0.0
+            node["tick_local_punish_penalty_total"] = 0.0
+            node["tick_local_modulated_count"] = 0
+            node["tick_local_lookup_hit_count"] = 0
+            node["tick_local_lookup_miss_count"] = 0
+            node["tick_local_lookup_skipped_count"] = 0
+            node["tick_local_target_missing_count"] = 0
+            node["tick_local_disabled_count"] = 0
+            node["tick_consumed_drive_total"] = 0.0
 
             # Local fatigue decay (if enabled) / 行动疲劳衰减
             if bool(self._config.get("action_fatigue_enabled", True)):
                 fr = float(self._config.get("action_fatigue_decay_ratio", 0.92))
                 node["fatigue"] = max(0.0, min(1.0, float(node.get("fatigue", 0.0) or 0.0) * fr))
 
+        # Free capacity before applying new triggers. Idle nodes should not be
+        # allowed to crowd out fresh IESM/tool action triggers.
+        self._prune_idle_nodes(tick_number=current_tick_number)
+
         # ---- Step 3: apply triggers / 搴旂敤瑙﹀彂澧炵泭锛堥┍鍔ㄥ姏澧炲姞锛?----
         for trig in triggers:
-            self._apply_trigger(trig, tick_number=current_tick_number)
+            self._apply_trigger(
+                trig,
+                tick_number=current_tick_number,
+                local_reward_punish_map=local_reward_punish_map or {},
+            )
 
         # ---- Step 4: prune nodes / 娣樻卑闀挎湡闂茬疆鑺傜偣 ----
         self._prune_idle_nodes(tick_number=current_tick_number)
@@ -569,11 +629,31 @@ class ActionManager:
                 base_top_n = int(params.get("top_n", 16) or 16)
                 if kind == "attention_focus_mode":
                     scale = float(self._config.get("mode_focus_top_n_scale", 0.70))
+                    budget_scale = float(self._config.get("mode_focus_attention_energy_budget_scale", 1.25))
                 else:
                     scale = float(self._config.get("mode_diverge_top_n_scale", 1.30))
+                    budget_scale = float(self._config.get("mode_diverge_attention_energy_budget_scale", 0.75))
                 top_n = int(round(base_top_n * max(0.1, scale)))
                 top_n = max(4, min(64, top_n))
-                produced["modulation"] = {"attention": {"top_n": top_n, "reason": kind}}
+                base_budget = float(
+                    params.get(
+                        "attention_energy_budget",
+                        self._config.get("mode_attention_energy_budget_base", 8.0),
+                    )
+                    or 8.0
+                )
+                budget_min = float(self._config.get("mode_attention_energy_budget_min", 0.0) or 0.0)
+                budget_max = float(self._config.get("mode_attention_energy_budget_max", 24.0) or 24.0)
+                if budget_max < budget_min:
+                    budget_max = budget_min
+                attention_energy_budget = max(budget_min, min(budget_max, base_budget * max(0.0, budget_scale)))
+                produced["modulation"] = {
+                    "attention": {
+                        "top_n": top_n,
+                        "attention_energy_budget": round(float(attention_energy_budget), 8),
+                        "reason": kind,
+                    }
+                }
             elif kind == "recall":
                 directive = self._build_recall_focus_directive(
                     node=node,
@@ -617,11 +697,15 @@ class ActionManager:
             if not consume_drive:
                 consume_drive = bool(ok)
 
+            consumed_drive = 0.0
             if consume_drive:
                 # Consume drive by threshold (not clear).
                 # Consume drive by effective threshold (not clear-to-zero).
-                node["drive"] = max(0.0, float(node.get("drive", 0.0)) - max(0.0, eff_threshold))
+                consumed_drive = max(0.0, float(eff_threshold))
+                node["drive"] = max(0.0, float(node.get("drive", 0.0)) - float(consumed_drive))
                 node["last_trigger_tick"] = tick_number
+                node["last_consumed_drive"] = round(float(consumed_drive), 8)
+                node["tick_consumed_drive_total"] = float(node.get("tick_consumed_drive_total", 0.0) or 0.0) + float(consumed_drive)
                 # Fatigue bump on execute to avoid endless loops.
                 if bool(self._config.get("action_fatigue_enabled", True)):
                     inc = float(self._config.get("action_fatigue_increase_on_execute", 0.35))
@@ -642,11 +726,18 @@ class ActionManager:
                 "base_threshold": round(float(node.get("base_threshold", node.get("threshold", 0.0) or 0.0)), 8),
                 "threshold_scale": round(float(node.get("threshold_scale", 1.0) or 1.0), 8),
                 "effective_threshold": round(float(eff_threshold), 8),
+                "consumed_drive": round(float(consumed_drive), 8),
                 "fatigue": round(float(node.get("fatigue", 0.0) or 0.0), 8),
                 "produced": produced,
                 "trigger_sources": list(node.get("trigger_sources", []) or [])[:6],
                 "tick_gain_total": round(float(node.get("tick_gain_total", 0.0) or 0.0), 8),
+                "tick_gain_raw_total": round(float(node.get("tick_gain_raw_total", 0.0) or 0.0), 8),
                 "tick_gain_by_source_kind": dict(node.get("tick_gain_by_source_kind", {}) or {}),
+                "target_ref_object_id": str(node.get("target_ref_object_id", "") or ""),
+                "target_ref_object_type": str(node.get("target_ref_object_type", "") or ""),
+                "target_item_id": str(node.get("target_item_id", "") or ""),
+                "target_display": str(node.get("target_display", "") or ""),
+                "local_drive_modulation": dict(node.get("last_local_drive_modulation", {}) or {}) if isinstance(node.get("last_local_drive_modulation", {}), dict) else {},
                 "origin": {
                     "passive_iesm": bool(passive),
                     "active_internal": bool(active),
@@ -688,6 +779,7 @@ class ActionManager:
                     "base_threshold": round(float(node.get("base_threshold", node.get("threshold", 0.0) or 0.0)), 8),
                     "threshold_scale": round(float(node.get("threshold_scale", 1.0) or 1.0), 8),
                     "effective_threshold": round(float(eff_threshold), 8),
+                    "consumed_drive": round(float(consumed_drive), 8),
                     "fatigue": round(float(node.get("fatigue", 0.0) or 0.0), 8),
                     "produced": {
                         "system_feedback": {
@@ -735,14 +827,36 @@ class ActionManager:
                 "base_threshold": round(float(node.get("base_threshold", node.get("threshold", 0.0) or 0.0)), 8),
                 "threshold_scale": round(float(node.get("threshold_scale", 1.0) or 1.0), 8),
                 "effective_threshold": round(float(node.get("effective_threshold", node.get("threshold", 0.0) or 0.0)), 8),
+                "threshold_components": dict(node.get("threshold_components", {}) or {}) if isinstance(node.get("threshold_components", {}), dict) else {},
+                "target_ref_object_id": str(node.get("target_ref_object_id", "") or ""),
+                "target_ref_object_type": str(node.get("target_ref_object_type", "") or ""),
+                "target_item_id": str(node.get("target_item_id", "") or ""),
+                "target_display": str(node.get("target_display", "") or ""),
+                "params": dict(node.get("params", {}) or {}) if isinstance(node.get("params", {}), dict) else {},
+                "trigger_sources": list(node.get("trigger_sources", []) or [])[:8],
+                "tick_sources": list(node.get("tick_sources", []) or [])[:8],
+                "target_binding_strategy": str(node.get("target_binding_strategy", "") or ""),
+                "target_binding_requested_from": str(node.get("target_binding_requested_from", "") or ""),
+                "target_binding_applied": bool(node.get("target_binding_applied", False)),
+                "target_binding_reason": str(node.get("target_binding_reason", "") or ""),
+                "target_binding_match_source": str(node.get("target_binding_match_source", "") or ""),
+                "target_binding_match_ref_object_id": str(node.get("target_binding_match_ref_object_id", "") or ""),
+                "target_binding_match_ref_object_type": str(node.get("target_binding_match_ref_object_type", "") or ""),
+                "target_binding_match_item_id": str(node.get("target_binding_match_item_id", "") or ""),
+                "target_binding_match_display": str(node.get("target_binding_match_display", "") or ""),
+                "local_drive_modulation": dict(node.get("last_local_drive_modulation", {}) or {}) if isinstance(node.get("last_local_drive_modulation", {}), dict) else {},
                 "fatigue": round(float(node.get("fatigue", 0.0) or 0.0), 8),
+                "last_consumed_drive": round(float(node.get("last_consumed_drive", 0.0) or 0.0), 8),
+                "tick_consumed_drive_total": round(float(node.get("tick_consumed_drive_total", 0.0) or 0.0), 8),
                 "cooldown_ticks": int(node.get("cooldown_ticks", 0) or 0),
                 "last_trigger_tick": int(node.get("last_trigger_tick", -1) or -1),
                 "last_update_tick": int(node.get("last_update_tick", -1) or -1),
                 "tick_gain_total": round(float(node.get("tick_gain_total", 0.0) or 0.0), 8),
+                "tick_gain_raw_total": round(float(node.get("tick_gain_raw_total", 0.0) or 0.0), 8),
             }
             for node in nodes_ranked_for_snapshot[:24]
         ]
+        action_learning_summary = self._build_action_learning_summary(nodes_ranked_for_snapshot)
 
         self._logger.brief(
             trace_id=trace_id,
@@ -793,11 +907,23 @@ class ActionManager:
                 "nodes": nodes_snapshot,
                 "triggers": triggers[:64],
                 "executors_registry": list(self._executor_registry),
+                "action_learning_summary": action_learning_summary,
                 "threshold_modulation": {
                     "threshold_scale_by_nt": dict(self._config.get("threshold_scale_by_nt", {}) or {}),
+                    "threshold_scale_by_rwd_pun_enabled": bool(self._config.get("threshold_scale_by_rwd_pun_enabled", True)),
+                    "threshold_scale_by_rwd_pun_reward_coef": float(self._config.get("threshold_scale_by_rwd_pun_reward_coef", -0.28) or -0.28),
+                    "threshold_scale_by_rwd_pun_punish_coef": float(self._config.get("threshold_scale_by_rwd_pun_punish_coef", 0.34) or 0.34),
+                    "threshold_scale_by_rwd_pun_min": float(self._config.get("threshold_scale_by_rwd_pun_min", 0.60) or 0.60),
+                    "threshold_scale_by_rwd_pun_max": float(self._config.get("threshold_scale_by_rwd_pun_max", 1.45) or 1.45),
                     "threshold_scale_min": float(self._config.get("threshold_scale_min", 0.55) or 0.55),
                     "threshold_scale_max": float(self._config.get("threshold_scale_max", 1.75) or 1.75),
                     "action_fatigue_enabled": bool(self._config.get("action_fatigue_enabled", True)),
+                    "rwd_pun_snapshot": dict(emotion_state.get("rwd_pun_snapshot", {}) or {}) if isinstance(emotion_state.get("rwd_pun_snapshot", {}), dict) else {},
+                    "local_drive_modulation_by_rwd_pun_enabled": bool(self._config.get("local_drive_modulation_by_rwd_pun_enabled", True)),
+                    "local_drive_reward_bonus_coef": float(self._config.get("local_drive_reward_bonus_coef", 0.45) or 0.45),
+                    "local_drive_punish_penalty_coef": float(self._config.get("local_drive_punish_penalty_coef", 0.55) or 0.55),
+                    "local_drive_scale_min": float(self._config.get("local_drive_scale_min", 0.20) or 0.20),
+                    "local_drive_scale_max": float(self._config.get("local_drive_scale_max", 1.80) or 1.80),
                 },
                 "meta": {
                     "version": __version__,
@@ -897,12 +1023,62 @@ class ActionManager:
             params = item.get("params") or {}
             if not isinstance(params, dict):
                 params = {"raw": params}
+            else:
+                params = dict(params)
+            for key in [
+                "target_ref_object_id",
+                "target_ref_object_type",
+                "target_item_id",
+                "target_display",
+                "trigger_target_ref",
+                "trigger_target_display",
+                "ref_object_id",
+                "ref_object_type",
+                "item_id",
+            ]:
+                if str(params.get(key, "") or "").strip():
+                    continue
+                value = item.get(key, "")
+                if isinstance(value, str):
+                    value = value.strip()
+                if value not in (None, ""):
+                    params[key] = value
             # Allow conflict keys to be declared at the top level for readability.
             # 鍏佽鎶婁簰鏂?key锛坢utex_key/mutex_keys锛夊啓鍦?action_trigger 椤跺眰锛堟洿鐩磋锛夛紝
             # 杩欓噷缁熶竴鎶樺彔鍒?params 涓紝渚?ActionManager 鐨勫啿绐佷徊瑁佽鍙栥€?            if "mutex_key" not in params and isinstance(item.get("mutex_key"), str) and str(item.get("mutex_key") or "").strip():
                 params["mutex_key"] = str(item.get("mutex_key") or "").strip()
             if "mutex_keys" not in params and isinstance(item.get("mutex_keys"), list):
                 params["mutex_keys"] = [str(x).strip() for x in (item.get("mutex_keys") or []) if str(x).strip()]
+            source = {
+                "kind": "iesm_action_trigger",
+                "rule_id": str(item.get("rule_id", "") or ""),
+                "rule_title": str(item.get("rule_title", "") or ""),
+                "rule_phase": str(item.get("rule_phase", "") or ""),
+                "rule_priority": int(item.get("rule_priority", item.get("rule_pri", item.get("priority", 0))) or 0),
+            }
+            for key in [
+                "target_binding_strategy",
+                "target_binding_requested_from",
+                "target_binding_reason",
+                "target_binding_match_source",
+                "target_binding_match_ref_object_id",
+                "target_binding_match_ref_object_type",
+                "target_binding_match_item_id",
+                "target_binding_match_display",
+                "target_ref_object_id",
+                "target_ref_object_type",
+                "target_item_id",
+                "target_display",
+                "trigger_target_ref",
+                "trigger_target_display",
+            ]:
+                value = item.get(key, None)
+                if isinstance(value, str):
+                    value = value.strip()
+                if value not in (None, ""):
+                    source[key] = value
+            if "target_binding_applied" in item:
+                source["target_binding_applied"] = bool(item.get("target_binding_applied", False))
 
             out.append(
                 {
@@ -912,13 +1088,7 @@ class ActionManager:
                     "threshold": float(threshold),
                     "cooldown_ticks": int(cooldown),
                     "params": dict(params),
-                    "source": {
-                        "kind": "iesm_action_trigger",
-                        "rule_id": str(item.get("rule_id", "") or ""),
-                        "rule_title": str(item.get("rule_title", "") or ""),
-                        "rule_phase": str(item.get("rule_phase", "") or ""),
-                        "rule_priority": int(item.get("rule_priority", item.get("rule_pri", item.get("priority", 0))) or 0),
-                    },
+                    "source": source,
                 }
             )
         return out
@@ -1004,11 +1174,348 @@ class ActionManager:
             }
         ]
 
+    @staticmethod
+    def _extract_action_target_from_params(params: dict[str, Any] | None) -> dict[str, str]:
+        params = params or {}
+        target_ref_object_id = str(
+            params.get("target_ref_object_id", params.get("ref_object_id", "")) or ""
+        ).strip()
+        target_ref_object_type = str(
+            params.get("target_ref_object_type", params.get("ref_object_type", "")) or ""
+        ).strip()
+        target_item_id = str(params.get("target_item_id", params.get("item_id", "")) or "").strip()
+        target_display = str(
+            params.get(
+                "target_display",
+                params.get("display", params.get("trigger_target_display", "")),
+            )
+            or ""
+        ).strip()
+        trigger_target_ref = str(
+            params.get(
+                "trigger_target_ref",
+                params.get("trigger_target", params.get("target_ref", params.get("anchor_ref", ""))),
+            )
+            or ""
+        ).strip()
+        if not target_ref_object_id and trigger_target_ref:
+            if ":" in trigger_target_ref:
+                target_ref_object_type, target_ref_object_id = [x.strip() for x in trigger_target_ref.split(":", 1)]
+            else:
+                target_ref_object_id = trigger_target_ref
+        if not target_display:
+            target_display = target_ref_object_id or target_item_id
+        return {
+            "target_ref_object_id": str(target_ref_object_id or ""),
+            "target_ref_object_type": str(target_ref_object_type or ""),
+            "target_item_id": str(target_item_id or ""),
+            "target_display": str(target_display or ""),
+        }
+
+    @staticmethod
+    def _normalize_local_feedback_text(text: Any) -> str:
+        raw = str(text or "").strip().lower()
+        if not raw:
+            return ""
+        raw = re.sub(r"[a-z_][a-z0-9_\-]*:[0-9.]+", "", raw)
+        fragments = re.findall(r"[\u4e00-\u9fffA-Za-z0-9]+", raw)
+        if fragments:
+            return "".join(fragments).strip()
+        raw = re.sub(r"[{}\[\]()<>【】《》「」『』\s]+", "", raw)
+        return raw.strip()
+
+    def _score_local_feedback_text_similarity(self, *, target_display: str, candidate_display: str) -> float:
+        target_norm = self._normalize_local_feedback_text(target_display)
+        candidate_norm = self._normalize_local_feedback_text(candidate_display)
+        if not target_norm or not candidate_norm:
+            return 0.0
+        if target_norm == candidate_norm:
+            return 1.0
+        if target_norm in candidate_norm or candidate_norm in target_norm:
+            return 1.0
+        try:
+            longest = difflib.SequenceMatcher(None, target_norm, candidate_norm).find_longest_match(
+                0,
+                len(target_norm),
+                0,
+                len(candidate_norm),
+            ).size
+        except Exception:
+            longest = 0
+        return self._clamp01(float(longest) / float(max(1, len(target_norm))))
+
+    def _find_local_feedback_text_fallback(
+        self,
+        *,
+        target_ref_object_type: str,
+        target_display: str,
+        by_ref: dict[str, Any],
+        by_item: dict[str, Any],
+    ) -> dict[str, Any]:
+        fallback_enabled = bool(self._config.get("local_drive_feedback_text_fallback_enabled", True))
+        detail: dict[str, Any] = {
+            "text_fallback_attempted": False,
+            "text_fallback_best_score": 0.0,
+            "text_fallback_candidate_count": 0,
+        }
+        if not fallback_enabled:
+            detail["text_fallback_reason"] = "config_disabled"
+            return {"local_feedback": None, "lookup_key": "", "lookup_mode": "", "detail": detail}
+
+        allow_target_types = {
+            str(x or "").strip().lower()
+            for x in (self._config.get("local_drive_feedback_text_fallback_target_types") or [])
+            if str(x or "").strip()
+        }
+        target_type_norm = str(target_ref_object_type or "").strip().lower()
+        if allow_target_types and target_type_norm not in allow_target_types:
+            detail["text_fallback_reason"] = "target_type_filtered"
+            return {"local_feedback": None, "lookup_key": "", "lookup_mode": "", "detail": detail}
+
+        target_norm = self._normalize_local_feedback_text(target_display)
+        try:
+            min_chars = int(self._config.get("local_drive_feedback_text_fallback_min_chars", 6) or 6)
+        except Exception:
+            min_chars = 6
+        if len(target_norm) < max(1, min_chars):
+            detail["text_fallback_reason"] = "target_text_too_short"
+            return {"local_feedback": None, "lookup_key": "", "lookup_mode": "", "detail": detail}
+
+        try:
+            min_score = float(self._config.get("local_drive_feedback_text_fallback_min_score", 0.55) or 0.55)
+        except Exception:
+            min_score = 0.55
+        min_score = self._clamp01(min_score)
+        try:
+            max_candidates = int(self._config.get("local_drive_feedback_text_fallback_max_candidates", 96) or 96)
+        except Exception:
+            max_candidates = 96
+        max_candidates = max(1, min(512, max_candidates))
+
+        detail["text_fallback_attempted"] = True
+        best_payload: dict[str, Any] | None = None
+        best_lookup_key = ""
+        best_lookup_mode = ""
+        best_score = 0.0
+        best_signal_mag = -1.0
+        best_len_penalty = 10**9
+        candidate_count = 0
+        seen_keys: set[str] = set()
+
+        for lookup_mode, bucket in (("ref", by_ref), ("item", by_item)):
+            if not isinstance(bucket, dict):
+                continue
+            for raw_key, payload in bucket.items():
+                if candidate_count >= max_candidates:
+                    break
+                if not isinstance(payload, dict):
+                    continue
+                key = f"{lookup_mode}::{str(raw_key or '').strip()}"
+                if not str(raw_key or "").strip() or key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                candidate_count += 1
+                candidate_display = str(payload.get("display", "") or "").strip()
+                score = self._score_local_feedback_text_similarity(
+                    target_display=str(target_display or ""),
+                    candidate_display=candidate_display,
+                )
+                if score <= 0.0:
+                    continue
+                signal_mag = max(0.0, float(payload.get("rwd", 0.0) or 0.0)) + max(0.0, float(payload.get("pun", 0.0) or 0.0))
+                candidate_norm = self._normalize_local_feedback_text(candidate_display)
+                len_penalty = abs(len(candidate_norm) - len(target_norm))
+                if (
+                    score > best_score
+                    or (abs(score - best_score) <= 1e-12 and signal_mag > best_signal_mag)
+                    or (abs(score - best_score) <= 1e-12 and abs(signal_mag - best_signal_mag) <= 1e-12 and len_penalty < best_len_penalty)
+                ):
+                    best_payload = dict(payload)
+                    best_lookup_key = key
+                    best_lookup_mode = "text_fallback"
+                    best_score = score
+                    best_signal_mag = signal_mag
+                    best_len_penalty = len_penalty
+            if candidate_count >= max_candidates:
+                break
+
+        detail["text_fallback_candidate_count"] = int(candidate_count)
+        detail["text_fallback_best_score"] = round(float(best_score), 8)
+        if best_lookup_key:
+            detail["text_fallback_best_lookup_key"] = str(best_lookup_key)
+        if not isinstance(best_payload, dict) or best_score < min_score:
+            detail["text_fallback_reason"] = "no_candidate_above_threshold"
+            return {"local_feedback": None, "lookup_key": "", "lookup_mode": "", "detail": detail}
+
+        detail["reason"] = "local_feedback_text_fallback"
+        detail["text_fallback_lookup_key"] = str(best_lookup_key)
+        return {
+            "local_feedback": best_payload,
+            "lookup_key": f"text::{best_lookup_key}",
+            "lookup_mode": best_lookup_mode,
+            "detail": detail,
+        }
+
+    def _compute_local_drive_modulation(
+        self,
+        *,
+        gain: float,
+        params: dict[str, Any] | None,
+        local_reward_punish_map: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        base_gain_raw = max(0.0, float(gain or 0.0))
+        target = self._extract_action_target_from_params(params)
+        params = params or {}
+        input_drive_scale = 1.0
+        input_drive_boost_applied = False
+        target_ref_object_type = str(target.get("target_ref_object_type", "") or "").strip().lower()
+        if target_ref_object_type == "input":
+            try:
+                input_drive_scale = float(params.get("explicit_input_drive_scale", 1.0) or 1.0)
+            except Exception:
+                input_drive_scale = 1.0
+            input_drive_scale = max(1.0, min(3.0, float(input_drive_scale)))
+            input_drive_boost_applied = abs(input_drive_scale - 1.0) > 1e-12
+        base_gain = float(base_gain_raw) * float(input_drive_scale)
+        result = {
+            "enabled": bool(self._config.get("local_drive_modulation_by_rwd_pun_enabled", True)),
+            "target_ref_object_id": str(target.get("target_ref_object_id", "") or ""),
+            "target_ref_object_type": str(target.get("target_ref_object_type", "") or ""),
+            "target_item_id": str(target.get("target_item_id", "") or ""),
+            "target_display": str(target.get("target_display", "") or ""),
+            "base_gain_raw": float(base_gain_raw),
+            "lookup_key": "",
+            "lookup_attempted": False,
+            "lookup_hit": False,
+            "lookup_status": "skipped",
+            "lookup_mode": "",
+            "applied": False,
+            "scale_raw": 1.0,
+            "scale_clamped": 1.0,
+            "input_drive_scale": float(input_drive_scale),
+            "input_drive_boost_applied": bool(input_drive_boost_applied),
+            "input_drive_boost_gain": max(0.0, float(base_gain - base_gain_raw)),
+            "reward_bonus_scale": 0.0,
+            "punish_penalty_scale": 0.0,
+            "reward": 0.0,
+            "punish": 0.0,
+            "base_gain": float(base_gain),
+            "gain_after": float(base_gain),
+            "reward_bonus_gain": 0.0,
+            "punish_penalty_gain": 0.0,
+            "sensitivity": 1.0,
+            "detail": {},
+        }
+        if base_gain <= 0.0:
+            result["detail"] = {"reason": "non_positive_gain"}
+            return result
+
+        if not bool(self._config.get("local_drive_modulation_by_rwd_pun_enabled", True)):
+            result["detail"] = {"reason": "config_disabled", "input_drive_boost_applied": bool(input_drive_boost_applied)}
+            return result
+        if bool(params.get("disable_local_reward_punish_drive_modulation", False)):
+            result["detail"] = {"reason": "node_disabled", "input_drive_boost_applied": bool(input_drive_boost_applied)}
+            return result
+
+        try:
+            sensitivity = float(params.get("local_rwd_pun_drive_sensitivity", 1.0) or 1.0)
+        except Exception:
+            sensitivity = 1.0
+        sensitivity = max(0.0, min(3.0, float(sensitivity)))
+        result["sensitivity"] = float(sensitivity)
+
+        require_target = bool(self._config.get("local_drive_modulation_require_target", True))
+        target_ref_object_id = str(target.get("target_ref_object_id", "") or "")
+        target_item_id = str(target.get("target_item_id", "") or "")
+        if require_target and not target_ref_object_id and not target_item_id:
+            result["detail"] = {"reason": "target_required_but_missing", "input_drive_boost_applied": bool(input_drive_boost_applied)}
+            return result
+        if not target_ref_object_id and not target_item_id:
+            result["detail"] = {"reason": "lookup_target_missing", "input_drive_boost_applied": bool(input_drive_boost_applied)}
+            return result
+
+        by_ref = {}
+        by_item = {}
+        if isinstance(local_reward_punish_map, dict):
+            by_ref = local_reward_punish_map.get("by_ref", {}) if isinstance(local_reward_punish_map.get("by_ref", {}), dict) else {}
+            by_item = local_reward_punish_map.get("by_item", {}) if isinstance(local_reward_punish_map.get("by_item", {}), dict) else {}
+
+        local_feedback = None
+        lookup_key = ""
+        lookup_mode = ""
+        result["lookup_attempted"] = True
+        if target_ref_object_id and target_ref_object_id in by_ref:
+            local_feedback = by_ref.get(target_ref_object_id)
+            lookup_key = f"ref::{target_ref_object_id}"
+            lookup_mode = "direct_ref"
+        elif target_item_id and target_item_id in by_item:
+            local_feedback = by_item.get(target_item_id)
+            lookup_key = f"item::{target_item_id}"
+            lookup_mode = "direct_item"
+        fallback_probe = {"local_feedback": None, "lookup_key": "", "lookup_mode": "", "detail": {}}
+        if not isinstance(local_feedback, dict):
+            fallback_probe = self._find_local_feedback_text_fallback(
+                target_ref_object_type=str(target.get("target_ref_object_type", "") or ""),
+                target_display=str(target.get("target_display", "") or ""),
+                by_ref=by_ref,
+                by_item=by_item,
+            )
+            if isinstance(fallback_probe.get("local_feedback"), dict):
+                local_feedback = dict(fallback_probe.get("local_feedback") or {})
+                lookup_key = str(fallback_probe.get("lookup_key", "") or "")
+                lookup_mode = str(fallback_probe.get("lookup_mode", "") or "")
+
+        result["lookup_key"] = str(lookup_key or "")
+        result["lookup_mode"] = str(lookup_mode or "")
+        result["lookup_hit"] = isinstance(local_feedback, dict)
+        if not isinstance(local_feedback, dict):
+            result["lookup_status"] = "miss"
+            detail = {"reason": "local_feedback_not_found", "input_drive_boost_applied": bool(input_drive_boost_applied)}
+            if isinstance(fallback_probe.get("detail"), dict):
+                detail.update(dict(fallback_probe.get("detail") or {}))
+            result["detail"] = detail
+            return result
+
+        reward = max(0.0, float(local_feedback.get("rwd", 0.0) or 0.0))
+        punish = max(0.0, float(local_feedback.get("pun", 0.0) or 0.0))
+        reward_coef = max(0.0, float(self._config.get("local_drive_reward_bonus_coef", 0.45) or 0.45))
+        punish_coef = max(0.0, float(self._config.get("local_drive_punish_penalty_coef", 0.55) or 0.55))
+        scale_min = max(0.0, float(self._config.get("local_drive_scale_min", 0.20) or 0.20))
+        scale_max = max(scale_min, float(self._config.get("local_drive_scale_max", 1.80) or 1.80))
+
+        reward_bonus_scale = float(reward) * float(reward_coef) * float(sensitivity)
+        punish_penalty_scale = float(punish) * float(punish_coef) * float(sensitivity)
+        scale_raw = 1.0 + reward_bonus_scale - punish_penalty_scale
+        scale_clamped = max(scale_min, min(scale_max, float(scale_raw)))
+        gain_after = float(base_gain) * float(scale_clamped)
+        detail = dict(local_feedback.get("detail", {}) or {}) if isinstance(local_feedback.get("detail", {}), dict) else {}
+        if isinstance(fallback_probe.get("detail"), dict) and lookup_mode == "text_fallback":
+            detail.update(dict(fallback_probe.get("detail") or {}))
+
+        result.update(
+            {
+                "lookup_hit": True,
+                "lookup_status": "hit",
+                "applied": abs(gain_after - base_gain) > 1e-12,
+                "scale_raw": float(scale_raw),
+                "scale_clamped": float(scale_clamped),
+                "reward_bonus_scale": float(reward_bonus_scale),
+                "punish_penalty_scale": float(punish_penalty_scale),
+                "reward": float(reward),
+                "punish": float(punish),
+                "gain_after": float(gain_after),
+                "reward_bonus_gain": max(0.0, float(gain_after - base_gain)),
+                "punish_penalty_gain": max(0.0, float(base_gain - gain_after)),
+                "detail": detail,
+            }
+        )
+        return result
+
     # ================================================================== #
     # Node ops / 鑺傜偣缁存姢                                                 #
     # ================================================================== #
 
-    def _apply_trigger(self, trig: dict[str, Any], *, tick_number: int) -> None:
+    def _apply_trigger(self, trig: dict[str, Any], *, tick_number: int, local_reward_punish_map: dict[str, Any] | None = None) -> None:
         action_id = str(trig.get("action_id", "") or "")
         if not action_id:
             return
@@ -1041,14 +1548,70 @@ class ActionManager:
         # 鑺傜偣鍐呭瓨鏀锯€滃熀鍑嗛槇鍊尖€濓紝瀹炴椂闃堝€煎湪姣?tick 鏍规嵁璋冨埗鍐嶈绠椼€?        node["threshold"] = float(threshold)
         node["cooldown_ticks"] = cooldown
         node["params"] = dict(trig.get("params", {}) or {})
-        node["drive"] = max(0.0, min(drive_max, float(node.get("drive", 0.0)) + gain))
+        target = self._extract_action_target_from_params(node.get("params", {}))
+        node["target_ref_object_id"] = str(target.get("target_ref_object_id", "") or node.get("target_ref_object_id", "") or "")
+        node["target_ref_object_type"] = str(target.get("target_ref_object_type", "") or node.get("target_ref_object_type", "") or "")
+        node["target_item_id"] = str(target.get("target_item_id", "") or node.get("target_item_id", "") or "")
+        node["target_display"] = str(target.get("target_display", "") or node.get("target_display", "") or "")
+        source_meta = trig.get("source", {}) if isinstance(trig.get("source", {}), dict) else {}
+        node["target_binding_strategy"] = str(source_meta.get("target_binding_strategy", node.get("target_binding_strategy", "")) or "")
+        node["target_binding_requested_from"] = str(
+            source_meta.get("target_binding_requested_from", node.get("target_binding_requested_from", "")) or ""
+        )
+        node["target_binding_reason"] = str(source_meta.get("target_binding_reason", node.get("target_binding_reason", "")) or "")
+        node["target_binding_match_source"] = str(
+            source_meta.get("target_binding_match_source", node.get("target_binding_match_source", "")) or ""
+        )
+        node["target_binding_match_ref_object_id"] = str(
+            source_meta.get("target_binding_match_ref_object_id", node.get("target_binding_match_ref_object_id", "")) or ""
+        )
+        node["target_binding_match_ref_object_type"] = str(
+            source_meta.get("target_binding_match_ref_object_type", node.get("target_binding_match_ref_object_type", "")) or ""
+        )
+        node["target_binding_match_item_id"] = str(
+            source_meta.get("target_binding_match_item_id", node.get("target_binding_match_item_id", "")) or ""
+        )
+        node["target_binding_match_display"] = str(
+            source_meta.get("target_binding_match_display", node.get("target_binding_match_display", "")) or ""
+        )
+        if "target_binding_applied" in source_meta:
+            node["target_binding_applied"] = bool(source_meta.get("target_binding_applied", False))
+        local_mod = self._compute_local_drive_modulation(
+            gain=float(gain),
+            params=node.get("params", {}),
+            local_reward_punish_map=local_reward_punish_map or {},
+        )
+        applied_gain = max(0.0, float(local_mod.get("gain_after", gain) or gain))
+        node["last_local_drive_modulation"] = dict(local_mod)
+        node["drive"] = max(0.0, min(drive_max, float(node.get("drive", 0.0)) + applied_gain))
         node["last_update_tick"] = tick_number
         node.setdefault("trigger_sources", []).append(trig.get("source", {}))
         # Per-tick trigger summary (for observability).
         # 鏈?tick 瑙﹀彂婧愭憳瑕侊紙鐢ㄤ簬瑙傛祴鈥滆鍔?涓诲姩鍘熷洜鈥濓級銆?        node["tick_gain_total"] = float(node.get("tick_gain_total", 0.0) or 0.0) + float(gain)
+        node["tick_gain_raw_total"] = float(node.get("tick_gain_raw_total", 0.0) or 0.0) + float(gain)
+        node["tick_gain_total"] = float(node.get("tick_gain_total", 0.0) or 0.0) - float(gain) + float(applied_gain)
+        node["tick_local_gain_base_total"] = float(node.get("tick_local_gain_base_total", 0.0) or 0.0) + float(gain)
+        node["tick_local_gain_applied_total"] = float(node.get("tick_local_gain_applied_total", 0.0) or 0.0) + float(applied_gain)
+        node["tick_local_reward_bonus_total"] = float(node.get("tick_local_reward_bonus_total", 0.0) or 0.0) + float(local_mod.get("reward_bonus_gain", 0.0) or 0.0)
+        node["tick_local_punish_penalty_total"] = float(node.get("tick_local_punish_penalty_total", 0.0) or 0.0) + float(local_mod.get("punish_penalty_gain", 0.0) or 0.0)
+        lookup_status = str(local_mod.get("lookup_status", "") or "").strip().lower()
+        detail_payload = local_mod.get("detail", {})
+        lookup_reason = str(detail_payload.get("reason", "") or "").strip().lower() if isinstance(detail_payload, dict) else ""
+        if lookup_status == "hit" or bool(local_mod.get("lookup_hit", False)):
+            node["tick_local_lookup_hit_count"] = int(node.get("tick_local_lookup_hit_count", 0) or 0) + 1
+        elif lookup_status == "miss" or lookup_reason == "local_feedback_not_found":
+            node["tick_local_lookup_miss_count"] = int(node.get("tick_local_lookup_miss_count", 0) or 0) + 1
+        else:
+            node["tick_local_lookup_skipped_count"] = int(node.get("tick_local_lookup_skipped_count", 0) or 0) + 1
+            if lookup_reason in {"target_required_but_missing", "lookup_target_missing"}:
+                node["tick_local_target_missing_count"] = int(node.get("tick_local_target_missing_count", 0) or 0) + 1
+            if lookup_reason in {"config_disabled", "node_disabled"}:
+                node["tick_local_disabled_count"] = int(node.get("tick_local_disabled_count", 0) or 0) + 1
+        if bool(local_mod.get("applied", False)):
+            node["tick_local_modulated_count"] = int(node.get("tick_local_modulated_count", 0) or 0) + 1
         sk = str((trig.get("source", {}) or {}).get("kind", "") or "unknown")
         by = node.get("tick_gain_by_source_kind", {}) if isinstance(node.get("tick_gain_by_source_kind", {}), dict) else {}
-        by[sk] = round(float(by.get(sk, 0.0) or 0.0) + float(gain), 8)
+        by[sk] = round(float(by.get(sk, 0.0) or 0.0) + float(applied_gain), 8)
         node["tick_gain_by_source_kind"] = by
         node.setdefault("tick_sources", []).append(trig.get("source", {}) or {})
         # Trim sources to keep memory bounded.
@@ -1087,7 +1650,8 @@ class ActionManager:
     def _compute_effective_threshold(self, *, node: dict[str, Any], emotion_state: dict) -> dict[str, Any]:
         """Compute the effective execution threshold for the current tick.
 
-        It combines base threshold, NT modulation, and local action fatigue.
+        It combines base threshold, NT modulation, reward/punish modulation,
+        and local action fatigue.
         Returns base_threshold, threshold_scale, effective_threshold, and component details.
         """
         base_threshold = float(node.get("threshold", 1.0) or 1.0)
@@ -1105,9 +1669,20 @@ class ActionManager:
                     "mode": "fixed_base_threshold",
                     "nt_scale_raw": 1.0,
                     "nt_scale_clamped": 1.0,
+                    "combined_scale_pre_fatigue": 1.0,
+                    "rwd_pun_enabled": False,
+                    "rwd_pun_scale_raw": 1.0,
+                    "rwd_pun_scale_clamped": 1.0,
+                    "rwd_pun_reward_delta_scale": 0.0,
+                    "rwd_pun_punish_delta_scale": 0.0,
+                    "rwd_pun_reward_threshold_delta": 0.0,
+                    "rwd_pun_punish_threshold_delta": 0.0,
+                    "rwd_pun_sensitivity": 0.0,
+                    "rwd_pun_snapshot": {},
                     "fatigue_scale": 1.0,
                     "fatigue": float(node.get("fatigue", 0.0) or 0.0),
                     "nt_snapshot": {},
+                    "threshold_delta": 0.0,
                 },
             }
         # 1) NT scaling
@@ -1136,13 +1711,51 @@ class ActionManager:
         zmax = float(self._config.get("threshold_scale_max", 1.75) or 1.75)
         nt_scale_clamped = max(zmin, min(zmax, float(nt_scale)))
 
-        # 2) Local action fatigue scaling
+        # 2) Reward / punish scaling
+        rwd_pun_snapshot_raw = emotion_state.get("rwd_pun_snapshot", {})
+        rwd_pun_snapshot = dict(rwd_pun_snapshot_raw or {}) if isinstance(rwd_pun_snapshot_raw, dict) else {}
+        try:
+            rwd = max(0.0, float(rwd_pun_snapshot.get("rwd", 0.0) or 0.0))
+        except Exception:
+            rwd = 0.0
+        try:
+            pun = max(0.0, float(rwd_pun_snapshot.get("pun", 0.0) or 0.0))
+        except Exception:
+            pun = 0.0
+
+        rwd_pun_enabled = bool(self._config.get("threshold_scale_by_rwd_pun_enabled", True))
+        disable_rwd_pun = bool(params.get("disable_rwd_pun_threshold_modulation", False))
+        try:
+            rwd_pun_sensitivity = float(params.get("rwd_pun_threshold_sensitivity", 1.0) or 1.0)
+        except Exception:
+            rwd_pun_sensitivity = 1.0
+        rwd_pun_sensitivity = max(0.0, min(3.0, float(rwd_pun_sensitivity)))
+
+        reward_coef = float(self._config.get("threshold_scale_by_rwd_pun_reward_coef", -0.28) or -0.28)
+        punish_coef = float(self._config.get("threshold_scale_by_rwd_pun_punish_coef", 0.34) or 0.34)
+        rwd_pun_min = float(self._config.get("threshold_scale_by_rwd_pun_min", 0.60) or 0.60)
+        rwd_pun_max = float(self._config.get("threshold_scale_by_rwd_pun_max", 1.45) or 1.45)
+
+        reward_delta_scale = 0.0
+        punish_delta_scale = 0.0
+        rwd_pun_scale = 1.0
+        if rwd_pun_enabled and not disable_rwd_pun:
+            reward_delta_scale = float(rwd) * float(reward_coef) * float(rwd_pun_sensitivity)
+            punish_delta_scale = float(pun) * float(punish_coef) * float(rwd_pun_sensitivity)
+            rwd_pun_scale += reward_delta_scale + punish_delta_scale
+        rwd_pun_scale_clamped = max(rwd_pun_min, min(rwd_pun_max, float(rwd_pun_scale)))
+
+        combined_scale_pre_fatigue = max(zmin, min(zmax, float(nt_scale_clamped) * float(rwd_pun_scale_clamped)))
+
+        # 3) Local action fatigue scaling
         fatigue = float(node.get("fatigue", 0.0) or 0.0)
         fatigue_gain = float(self._config.get("action_fatigue_threshold_gain", 0.55) or 0.55)
         fatigue_scale = 1.0 + max(0.0, min(1.0, fatigue)) * max(0.0, fatigue_gain)
 
-        threshold_scale = float(nt_scale_clamped) * float(fatigue_scale)
+        threshold_scale = float(combined_scale_pre_fatigue) * float(fatigue_scale)
         effective = base_threshold * threshold_scale
+        reward_threshold_delta = float(base_threshold) * float(min(0.0, reward_delta_scale))
+        punish_threshold_delta = float(base_threshold) * float(max(0.0, punish_delta_scale))
         return {
             "base_threshold": float(base_threshold),
             "threshold_scale": float(threshold_scale),
@@ -1150,10 +1763,111 @@ class ActionManager:
             "components": {
                 "nt_scale_raw": float(nt_scale),
                 "nt_scale_clamped": float(nt_scale_clamped),
+                "combined_scale_pre_fatigue": float(combined_scale_pre_fatigue),
+                "rwd_pun_enabled": bool(rwd_pun_enabled and not disable_rwd_pun),
+                "rwd_pun_scale_raw": float(rwd_pun_scale),
+                "rwd_pun_scale_clamped": float(rwd_pun_scale_clamped),
+                "rwd_pun_reward_delta_scale": float(reward_delta_scale),
+                "rwd_pun_punish_delta_scale": float(punish_delta_scale),
+                "rwd_pun_reward_threshold_delta": float(reward_threshold_delta),
+                "rwd_pun_punish_threshold_delta": float(punish_threshold_delta),
+                "rwd_pun_sensitivity": float(rwd_pun_sensitivity),
+                "rwd_pun_snapshot": {"rwd": float(rwd), "pun": float(pun)},
                 "fatigue_scale": float(fatigue_scale),
                 "fatigue": float(fatigue),
                 "nt_snapshot": {str(k): float(v or 0.0) for k, v in (nt or {}).items() if str(k)},
+                "threshold_delta": float(effective - base_threshold),
             },
+        }
+
+    def _build_action_learning_summary(self, nodes: list[dict[str, Any]] | None) -> dict[str, Any]:
+        rows = [row for row in (nodes or []) if isinstance(row, dict)]
+        local_scale_vals: list[float] = []
+        targeted_node_count = 0
+        local_modulated_node_count = 0
+        local_lookup_hit_count = 0
+        local_lookup_text_fallback_hit_count = 0
+        local_lookup_miss_count = 0
+        local_lookup_skipped_count = 0
+        local_target_missing_count = 0
+        local_modulation_disabled_count = 0
+        local_reward_bonus_total = 0.0
+        local_punish_penalty_total = 0.0
+        local_gain_base_total = 0.0
+        local_gain_applied_total = 0.0
+        examples: list[dict[str, Any]] = []
+
+        for row in rows:
+            target_ref_object_id = str(row.get("target_ref_object_id", "") or "")
+            target_item_id = str(row.get("target_item_id", "") or "")
+            if target_ref_object_id or target_item_id:
+                targeted_node_count += 1
+            local_mod = row.get("last_local_drive_modulation", row.get("local_drive_modulation", {}))
+            local_mod = dict(local_mod or {}) if isinstance(local_mod, dict) else {}
+            detail_payload = local_mod.get("detail", {})
+            local_reason = str(detail_payload.get("reason", "") or "").strip().lower() if isinstance(detail_payload, dict) else ""
+            local_status = str(local_mod.get("lookup_status", "") or "").strip().lower()
+            local_lookup_mode = str(local_mod.get("lookup_mode", "") or "").strip().lower()
+            if not local_status:
+                if bool(local_mod.get("lookup_hit", False)):
+                    local_status = "hit"
+                elif local_reason == "local_feedback_not_found":
+                    local_status = "miss"
+                else:
+                    local_status = "skipped"
+            if local_status == "hit":
+                local_lookup_hit_count += 1
+                if local_lookup_mode == "text_fallback":
+                    local_lookup_text_fallback_hit_count += 1
+            elif local_status == "miss":
+                local_lookup_miss_count += 1
+            else:
+                local_lookup_skipped_count += 1
+                if local_reason in {"target_required_but_missing", "lookup_target_missing"}:
+                    local_target_missing_count += 1
+                if local_reason in {"config_disabled", "node_disabled"}:
+                    local_modulation_disabled_count += 1
+            if bool(local_mod.get("applied", False)):
+                local_modulated_node_count += 1
+                local_scale_vals.append(float(local_mod.get("scale_clamped", 1.0) or 1.0))
+                examples.append(
+                    {
+                        "action_id": str(row.get("action_id", "") or ""),
+                        "action_kind": str(row.get("action_kind", "") or ""),
+                        "target_ref_object_id": target_ref_object_id,
+                        "target_item_id": target_item_id,
+                        "target_display": str(row.get("target_display", "") or ""),
+                        "reward": round(float(local_mod.get("reward", 0.0) or 0.0), 8),
+                        "punish": round(float(local_mod.get("punish", 0.0) or 0.0), 8),
+                        "lookup_mode": str(local_lookup_mode or ""),
+                        "scale_clamped": round(float(local_mod.get("scale_clamped", 1.0) or 1.0), 8),
+                        "reward_bonus_gain": round(float(local_mod.get("reward_bonus_gain", 0.0) or 0.0), 8),
+                        "punish_penalty_gain": round(float(local_mod.get("punish_penalty_gain", 0.0) or 0.0), 8),
+                    }
+                )
+            local_reward_bonus_total += max(0.0, float(row.get("tick_local_reward_bonus_total", 0.0) or 0.0))
+            local_punish_penalty_total += max(0.0, float(row.get("tick_local_punish_penalty_total", 0.0) or 0.0))
+            local_gain_base_total += max(0.0, float(row.get("tick_local_gain_base_total", row.get("tick_gain_raw_total", 0.0)) or 0.0))
+            local_gain_applied_total += max(0.0, float(row.get("tick_local_gain_applied_total", row.get("tick_gain_total", 0.0)) or 0.0))
+
+        examples.sort(key=lambda row: abs(float(row.get("scale_clamped", 1.0) or 1.0) - 1.0), reverse=True)
+        return {
+            "local_drive_modulation_enabled": bool(self._config.get("local_drive_modulation_by_rwd_pun_enabled", True)),
+            "targeted_node_count": int(targeted_node_count),
+            "local_modulated_node_count": int(local_modulated_node_count),
+            "local_lookup_hit_count": int(local_lookup_hit_count),
+            "local_lookup_text_fallback_hit_count": int(local_lookup_text_fallback_hit_count),
+            "local_lookup_miss_count": int(local_lookup_miss_count),
+            "local_lookup_skipped_count": int(local_lookup_skipped_count),
+            "local_target_missing_count": int(local_target_missing_count),
+            "local_modulation_disabled_count": int(local_modulation_disabled_count),
+            "local_drive_scale_mean": round(float(sum(local_scale_vals) / len(local_scale_vals)) if local_scale_vals else 1.0, 8),
+            "local_reward_drive_bonus_total": round(float(local_reward_bonus_total), 8),
+            "local_punish_drive_penalty_total": round(float(local_punish_penalty_total), 8),
+            "local_gain_base_total": round(float(local_gain_base_total), 8),
+            "local_gain_applied_total": round(float(local_gain_applied_total), 8),
+            "local_gain_net_delta_total": round(float(local_gain_applied_total - local_gain_base_total), 8),
+            "examples": examples[:8],
         }
 
     def _prune_idle_nodes(self, *, tick_number: int) -> None:
@@ -1953,7 +2667,8 @@ class ActionManager:
         start_time = time.time()
 
         # Provide a detailed node snapshot for real-time observability.
-        # 鎻愪緵鏇村畬鏁寸殑琛屽姩鑺傜偣蹇収锛屼究浜庡墠绔€滃疄鏃剁洃鎺ц鍔ㄥ櫒/琛屽姩鎺ュ彛鐘舵€佲€濄€?        nodes = list(self._nodes.values())
+        # 提供更完整的行动节点快照，便于前端查看行动器/行动接口运行态。
+        nodes = list(self._nodes.values())
         nodes.sort(key=lambda n: float(n.get("drive", 0.0) or 0.0), reverse=True)
         nodes_snapshot = [
             {
@@ -1964,12 +2679,28 @@ class ActionManager:
                 "threshold_scale": round(float(n.get("threshold_scale", 1.0) or 1.0), 8),
                 "effective_threshold": round(float(n.get("effective_threshold", n.get("threshold", 0.0) or 0.0) or 0.0), 8),
                 "threshold_components": dict(n.get("threshold_components", {}) or {}) if isinstance(n.get("threshold_components", {}), dict) else {},
+                "target_ref_object_id": str(n.get("target_ref_object_id", "") or ""),
+                "target_ref_object_type": str(n.get("target_ref_object_type", "") or ""),
+                "target_item_id": str(n.get("target_item_id", "") or ""),
+                "target_display": str(n.get("target_display", "") or ""),
+                "params": dict(n.get("params", {}) or {}) if isinstance(n.get("params", {}), dict) else {},
+                "target_binding_strategy": str(n.get("target_binding_strategy", "") or ""),
+                "target_binding_requested_from": str(n.get("target_binding_requested_from", "") or ""),
+                "target_binding_applied": bool(n.get("target_binding_applied", False)),
+                "target_binding_reason": str(n.get("target_binding_reason", "") or ""),
+                "target_binding_match_source": str(n.get("target_binding_match_source", "") or ""),
+                "target_binding_match_ref_object_id": str(n.get("target_binding_match_ref_object_id", "") or ""),
+                "target_binding_match_ref_object_type": str(n.get("target_binding_match_ref_object_type", "") or ""),
+                "target_binding_match_item_id": str(n.get("target_binding_match_item_id", "") or ""),
+                "target_binding_match_display": str(n.get("target_binding_match_display", "") or ""),
+                "local_drive_modulation": dict(n.get("last_local_drive_modulation", {}) or {}) if isinstance(n.get("last_local_drive_modulation", {}), dict) else {},
                 "fatigue": round(float(n.get("fatigue", 0.0) or 0.0), 8),
                 "cooldown_ticks": int(n.get("cooldown_ticks", 0) or 0),
                 "last_attempt_tick": int(n.get("last_attempt_tick", -1) or -1),
                 "last_trigger_tick": int(n.get("last_trigger_tick", -1) or -1),
                 "last_update_tick": int(n.get("last_update_tick", -1) or -1),
                 "tick_gain_total": round(float(n.get("tick_gain_total", 0.0) or 0.0), 8),
+                "tick_gain_raw_total": round(float(n.get("tick_gain_raw_total", 0.0) or 0.0), 8),
                 "tick_gain_by_source_kind": dict(n.get("tick_gain_by_source_kind", {}) or {}) if isinstance(n.get("tick_gain_by_source_kind", {}), dict) else {},
                 "trigger_sources": list(n.get("trigger_sources", []) or [])[:8],
                 "tick_sources": list(n.get("tick_sources", []) or [])[:8],
@@ -1995,8 +2726,9 @@ class ActionManager:
                     "node_count": len(self._nodes),
                     "executed_history_count": len(self._executed_history),
                 },
+                "action_learning_summary": self._build_action_learning_summary(nodes),
                 "nodes": nodes_snapshot,
-                # Recent executed actions (flattened) / 鏈€杩戞墽琛岃鍔紙鎵佸钩璁板綍锛?                "recent_executed_actions": list(self._executed_history)[-80:],
+                "recent_executed_actions": list(self._executed_history)[-80:],
                 "stop_interface": {
                     "supported_modes": ["action_id", "action_kind", "all"],
                     "default_hold_ticks": 2,

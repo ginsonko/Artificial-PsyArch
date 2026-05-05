@@ -1,0 +1,8 @@
+target_ratio: 1.55
+target_ratio_min: 1.28
+target_ratio_max: 1.55
+window_ticks: 0
+g_min: 0.0
+g_max: 4.5
+neutral_log_g_decay: 0.0
+counter_windup_gain: 2.22

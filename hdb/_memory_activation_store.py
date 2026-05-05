@@ -17,6 +17,7 @@ class MemoryActivationStore:
         self._base_dir = Path(base_dir)
         self._config = config
         self._items: dict[str, dict] = {}
+        self._recent_memory_ids: list[str] = []
         self._load()
 
     @property
@@ -32,17 +33,45 @@ class MemoryActivationStore:
     def iter_items(self) -> list[dict]:
         return list(self._items.values())
 
+    def get_recent(self, limit: int = 10) -> list[dict]:
+        if limit <= 0:
+            return []
+        recent: list[dict] = []
+        for memory_id in reversed(self._recent_memory_ids):
+            if len(recent) >= limit:
+                break
+            item = self._items.get(memory_id)
+            if item is not None:
+                recent.append(item)
+        if len(recent) >= limit:
+            return recent[:limit]
+        seen = {str(item.get("memory_id", item.get("id", ""))) for item in recent}
+        for memory_id in reversed(list(self._items.keys())):
+            if len(recent) >= limit:
+                break
+            if memory_id in seen:
+                continue
+            item = self._items.get(memory_id)
+            if item is not None:
+                recent.append(item)
+        return recent[:limit]
+
     def clear(self) -> int:
         count = len(self._items)
         for memory_id in list(self._items):
             self.delete(memory_id)
         self._items.clear()
+        self._recent_memory_ids.clear()
         return count
 
     def delete(self, memory_id: str) -> bool:
         item = self._items.pop(memory_id, None)
         if item is None:
             return False
+        try:
+            self._recent_memory_ids.remove(memory_id)
+        except ValueError:
+            pass
         return remove_file(self._file_path(memory_id))
 
     def apply_targets(
@@ -83,6 +112,7 @@ class MemoryActivationStore:
             self._persist_item(item)
             total_delta_er += float(payload.get("delta_er", 0.0))
             total_delta_ev += float(payload.get("delta_ev", 0.0))
+            self._touch_recent(memory_id)
             applied_items.append(self._snapshot_item(item))
 
         applied_items.sort(key=self._energy_desc_key)
@@ -555,6 +585,21 @@ class MemoryActivationStore:
                 continue
             memory_id = str(payload["memory_id"])
             self._items[memory_id] = payload
+            self._recent_memory_ids.append(memory_id)
+        self._recent_memory_ids.sort(
+            key=lambda memory_id: (
+                int(self._items.get(memory_id, {}).get("last_updated_at", 0) or 0),
+                int(self._items.get(memory_id, {}).get("created_at", 0) or 0),
+                str(memory_id),
+            )
+        )
+
+    def _touch_recent(self, memory_id: str) -> None:
+        try:
+            self._recent_memory_ids.remove(memory_id)
+        except ValueError:
+            pass
+        self._recent_memory_ids.append(memory_id)
 
     def _persist_item(self, item: dict) -> None:
         write_json_file(self._file_path(item.get("memory_id", "")), item)

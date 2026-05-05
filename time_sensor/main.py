@@ -29,11 +29,14 @@ AP 时间感受器模块（Time Sensor）— 主模块
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import time
 import traceback
 from typing import Any
+
+from hdb._structure_resolver import resolve_or_create_structure_from_profile
 
 from . import __module_name__, __schema_version__, __version__
 from ._logger import ModuleLogger
@@ -84,7 +87,7 @@ TIME_SENSOR_DEFAULT_CONFIG: dict[str, Any] = {
         {"id": "48t", "label_zh": "约 48 tick", "min_sec": 32.0, "max_sec": 64.0, "center_sec": 48.0},
         {"id": "96t", "label_zh": "约 96 tick", "min_sec": 64.0, "max_sec": 128.0, "center_sec": 96.0},
     ],
-    "source_mode": "memory_activation_snapshot",
+    "source_mode": "runtime_memory_projection",
     "memory_top_k": 12,
     "energy_gain_ratio": 0.14,
     # base_energy_source / 时间感受赋能的能量来源口径
@@ -130,6 +133,34 @@ TIME_SENSOR_DEFAULT_CONFIG: dict[str, Any] = {
     "peak_keep_ratio": 0.72,
     # max_total_bindings / 单 tick 最大绑定条数（安全刹车，防止 MAP 爆炸时刷屏）
     "max_total_bindings": 12,
+    # enable_projection_target_bindings / 是否额外把“结构投影目标”也纳入时间感受绑定候选
+    # - false: 仅沿用旧版“记忆反馈事件峰值目标”绑定路径
+    # - true: 在旧路径之外，额外为每条记忆挑选少量 structure projection 目标做镜像绑定
+    #         用于把时间感受更稳定地挂到高阶结构对象上，避免长期只停留在 A/B/X 这类底层原子结构。
+    "enable_projection_target_bindings": True,
+    # enable_runtime_snapshot_target_bindings / runtime-em 主链是否直接从 memory snapshot 提取结构目标
+    # - false: 仍主要依赖 memory_feedback_result / synthetic projection stub
+    # - true: 当主链是 runtime_memory_projection 时，直接依据 memory_activation_snapshot.backing_structure_ids 绑定时间感受
+    #         这样时间感受主链就不再依赖专门记忆池回流结果。
+    "enable_runtime_snapshot_target_bindings": True,
+    # runtime_snapshot_target_richness_bias_enabled / runtime-em 目标选择是否偏向更“整体”的结构
+    # - true: backing_structure_ids 同时包含原子结构与父结构时，不再平均后按列表顺序取第一个；
+    #         会结合结构复杂度与当前活跃能量，把时间感受优先挂到更高阶、更有代表性的结构上。
+    # - false: 保留旧版“平均分 + 顺序打平”口径。
+    "runtime_snapshot_target_richness_bias_enabled": True,
+    # runtime_snapshot_target_complexity_bonus_per_token / 每多 1 个 token 带来的 richness 加成
+    "runtime_snapshot_target_complexity_bonus_per_token": 0.45,
+    # runtime_snapshot_target_group_bonus / 每多 1 个 sequence_group 带来的 richness 加成
+    "runtime_snapshot_target_group_bonus": 0.15,
+    # runtime_snapshot_target_runtime_attr_bonus / 运行态绑定属性数量带来的 richness 加成
+    "runtime_snapshot_target_runtime_attr_bonus": 0.08,
+    # max_projection_bind_targets_per_memory / 每条记忆最多额外镜像绑定几个 structure projection 目标
+    "max_projection_bind_targets_per_memory": 1,
+    # projection_target_keep_ratio / structure projection 波峰保留比例
+    # 说明：与 peak_keep_ratio 逻辑一致，但单独可调，便于保守放开高阶结构绑定。
+    "projection_target_keep_ratio": 0.72,
+    # time_factor_stripped_projection_context_free_identity_enabled / 去时间因子结构使用无上下文身份
+    "time_factor_stripped_projection_context_free_identity_enabled": True,
     "node_id_prefix": "sa_time_bucket_",
     "node_display_prefix": "时间感受",
     # ---- logging ----
@@ -160,7 +191,7 @@ class TimeSensor:
         self._tick_counter = 0
         self._last_tick_report: dict[str, Any] | None = None
         # Delayed energization tasks (theory 4.2.8) / 延迟赋能任务表（理论 4.2.8）
-        # - key: target_item_id (anchor object id in StatePool)
+        # - key: task_key = "{task_kind}::{target_identity}"
         self._delayed_tasks: dict[str, dict[str, Any]] = {}
         # Short-term fatigue after execution (avoid immediate re-trigger) / 执行后短时疲劳（避免立刻重复触发）
         self._task_fatigue_until_tick: dict[str, int] = {}
@@ -322,11 +353,13 @@ class TimeSensor:
         self,
         *,
         pool: Any,
+        hdb: Any | None = None,
         trace_id: str,
         tick_id: str,
         now_ms: int | None = None,
         memory_activation_snapshot: dict | None = None,
         memory_feedback_result: dict | None = None,
+        source_mode: str | None = None,
     ) -> dict[str, Any]:
         """
         主入口：根据“被重新接触到的记忆”生成时间感受桶，并对状态池节点赋能。
@@ -336,7 +369,7 @@ class TimeSensor:
               - _store.get_by_ref(ref_id) -> state_item | None
               - apply_energy_update(...)
               - insert_runtime_node(...)
-          - memory_activation_snapshot: HDB 记忆赋能池（MAP）快照（items 内含 created_at/total_energy）
+          - memory_activation_snapshot: 记忆快照；可来自 HDB 的 MAP，也可来自 StatePool 内 em 运行态整理视图
 
         返回：
           - time_feelings: 时间桶赋能详情（供观测台展示）
@@ -345,6 +378,12 @@ class TimeSensor:
         start = time.time()
         self._tick_counter += 1
         now_ms = int(now_ms or (time.time() * 1000))
+
+        effective_source_mode = str(
+            source_mode or self._config.get("source_mode", "memory_activation_snapshot") or "memory_activation_snapshot"
+        ).strip().lower()
+        if effective_source_mode not in {"memory_activation_snapshot", "runtime_memory_projection"}:
+            effective_source_mode = "memory_activation_snapshot"
 
         if not bool(self._config.get("enabled", True)):
             out = {
@@ -379,6 +418,7 @@ class TimeSensor:
         # ---- Step 1: execute due delayed tasks (theory 4.2.8) / 执行到期的延迟赋能任务 ----
         delayed_report = self._execute_due_delayed_tasks(
             pool=pool,
+            hdb=hdb,
             trace_id=trace_id,
             tick_id=tick_id,
             now_ms=now_ms,
@@ -416,6 +456,70 @@ class TimeSensor:
             except Exception:
                 te = 0.0
             return max(0.0, float(te))
+
+        def _collect_runtime_snapshot_target_scores() -> dict[str, dict[str, float]]:
+            score_map: dict[str, dict[str, float]] = {}
+            if not bool(self._config.get("enable_runtime_snapshot_target_bindings", True)):
+                return score_map
+            for memory_item in items:
+                if not isinstance(memory_item, dict):
+                    continue
+                memory_id = str(memory_item.get("memory_id", "") or "").strip()
+                if not memory_id:
+                    continue
+                backing_ids_raw: list[str] = []
+                for field_name in ("backing_structure_ids", "structure_refs", "source_structure_ids"):
+                    for value in list(memory_item.get(field_name, []) or []):
+                        text = str(value or "").strip()
+                        if text:
+                            backing_ids_raw.append(text)
+                for field_name in ("structure_ref_items", "backing_structure_items", "source_structure_items"):
+                    for ref_item in list(memory_item.get(field_name, []) or []):
+                        if not isinstance(ref_item, dict):
+                            continue
+                        for key in ("id", "structure_id", "ref_object_id"):
+                            text = str(ref_item.get(key, "") or "").strip()
+                            if text:
+                                backing_ids_raw.append(text)
+                                break
+                backing_ids = list(dict.fromkeys(backing_ids_raw))
+                if not backing_ids:
+                    continue
+                weighted_targets: list[tuple[str, float]] = []
+                for backing_id in backing_ids:
+                    try:
+                        target_item = pool._store.get_by_ref(backing_id)  # type: ignore[attr-defined]
+                    except Exception:
+                        target_item = None
+                    if not isinstance(target_item, dict):
+                        continue
+                    target_item_id = str(target_item.get("id", "") or "").strip()
+                    if target_item_id:
+                        weighted_targets.append(
+                            (
+                                target_item_id,
+                                self._runtime_snapshot_target_richness_weight(target_item),
+                            )
+                        )
+                weighted_targets = self._dedupe_runtime_snapshot_weighted_targets(weighted_targets)
+                if not weighted_targets:
+                    continue
+                score_base = _resolve_source_energy(memory_item)
+                if score_base <= 0.0:
+                    continue
+                weight_total = sum(float(weight or 0.0) for _, weight in weighted_targets)
+                if weight_total <= 0.0:
+                    continue
+                score_map.setdefault(memory_id, {})
+                for target_item_id, target_weight in weighted_targets:
+                    score_share = round(float(score_base) * max(0.0, float(target_weight or 0.0)) / float(weight_total), 8)
+                    if score_share <= 0.0:
+                        continue
+                    score_map[memory_id][target_item_id] = round(
+                        float(score_map[memory_id].get(target_item_id, 0.0) or 0.0) + score_share,
+                        8,
+                    )
+            return score_map
 
         # ---- Step 3: accumulate bucket energies / 汇总每个桶的能量 ----
         bucket_energy: dict[str, float] = {b["id"]: 0.0 for b in buckets}
@@ -735,50 +839,81 @@ class TimeSensor:
                     "time_basis": time_basis,
                 }
 
-            # ---- Parse memory feedback result -> per-memory peak targets ----
-            # 输入来自 observatory._apply_memory_feedback() 的返回结构（items 内含 events/projections）。
-            fb = memory_feedback_result or {}
-            fb_items = list(fb.get("items", []) or [])
-            fb_items = [x for x in fb_items if isinstance(x, dict)]
             score_by_mem: dict[str, dict[str, float]] = {}
+            projection_scores_by_mem: dict[str, dict[str, float]] = {}
+            runtime_snapshot_scores_by_mem: dict[str, dict[str, float]] = {}
 
-            for fbi in fb_items:
-                mid = str(fbi.get("memory_id", "") or "").strip()
-                if not mid:
-                    continue
-                kind = str(fbi.get("memory_kind", "") or "").strip()
-                score_by_mem.setdefault(mid, {})
+            if effective_source_mode == "runtime_memory_projection":
+                runtime_snapshot_scores_by_mem = _collect_runtime_snapshot_target_scores()
+            else:
+                # ---- Parse memory feedback result -> per-memory peak targets ----
+                # 输入来自 observatory._apply_memory_feedback() 的返回结构（items 内含 events/projections）。
+                fb = memory_feedback_result or {}
+                fb_items = list(fb.get("items", []) or [])
+                fb_items = [x for x in fb_items if isinstance(x, dict)]
 
-                if kind == "stimulus_packet":
-                    for ev in list(fbi.get("events", []) or []):
-                        if not isinstance(ev, dict):
-                            continue
-                        tid = str(ev.get("target_item_id", "") or "").strip()
-                        if not tid:
-                            continue
-                        d = ev.get("delta", {}) if isinstance(ev.get("delta", {}), dict) else {}
-                        de = max(0.0, float(d.get("delta_er", 0.0) or 0.0)) + max(0.0, float(d.get("delta_ev", 0.0) or 0.0))
-                        if de <= 0.0:
-                            continue
-                        score_by_mem[mid][tid] = float(score_by_mem[mid].get(tid, 0.0) or 0.0) + float(de)
+                for fbi in fb_items:
+                    mid = str(fbi.get("memory_id", "") or "").strip()
+                    if not mid:
+                        continue
+                    kind = str(fbi.get("memory_kind", "") or "").strip()
+                    score_by_mem.setdefault(mid, {})
 
-                elif kind == "structure_group":
-                    for pr in list(fbi.get("projections", []) or []):
-                        if not isinstance(pr, dict):
-                            continue
-                        tid = str(pr.get("target_item_id", "") or "").strip()
-                        if not tid:
-                            continue
-                        de = max(0.0, float(pr.get("er", 0.0) or 0.0)) + max(0.0, float(pr.get("ev", 0.0) or 0.0))
-                        if de <= 0.0:
-                            continue
-                        score_by_mem[mid][tid] = float(score_by_mem[mid].get(tid, 0.0) or 0.0) + float(de)
+                    if kind == "stimulus_packet":
+                        for ev in list(fbi.get("events", []) or []):
+                            if not isinstance(ev, dict):
+                                continue
+                            tid = str(ev.get("target_item_id", "") or "").strip()
+                            if not tid:
+                                continue
+                            d = ev.get("delta", {}) if isinstance(ev.get("delta", {}), dict) else {}
+                            de = max(0.0, float(d.get("delta_er", 0.0) or 0.0)) + max(0.0, float(d.get("delta_ev", 0.0) or 0.0))
+                            if de <= 0.0:
+                                continue
+                            score_by_mem[mid][tid] = float(score_by_mem[mid].get(tid, 0.0) or 0.0) + float(de)
+
+                        # `stimulus_packet` 记忆反馈除了原子事件峰值外，还可能伴随高阶结构投影。
+                        # 旧实现没有读取这里的 projections，时间感受会系统性地只绑定到底层 A/B/X 等对象。
+                        # 这里单独记录 projection 分数，由开关决定是否做“高阶结构镜像绑定”。
+                        for pr in list(fbi.get("projections", []) or fbi.get("structure_projections", []) or []):
+                            if not isinstance(pr, dict):
+                                continue
+                            tid = str(pr.get("target_item_id", "") or "").strip()
+                            if not tid:
+                                continue
+                            ref_type = str(pr.get("target_ref_object_type", "") or "").strip().lower()
+                            if ref_type and ref_type != "st":
+                                continue
+                            de = max(0.0, float(pr.get("er", 0.0) or 0.0)) + max(0.0, float(pr.get("ev", 0.0) or 0.0))
+                            if de <= 0.0:
+                                continue
+                            projection_scores_by_mem.setdefault(mid, {})
+                            projection_scores_by_mem[mid][tid] = float(projection_scores_by_mem[mid].get(tid, 0.0) or 0.0) + float(de)
+
+                    elif kind in {"structure_group", "runtime_em_projection"}:
+                        for pr in list(fbi.get("projections", []) or []):
+                            if not isinstance(pr, dict):
+                                continue
+                            tid = str(pr.get("target_item_id", "") or "").strip()
+                            if not tid:
+                                continue
+                            de = max(0.0, float(pr.get("er", 0.0) or 0.0)) + max(0.0, float(pr.get("ev", 0.0) or 0.0))
+                            if de <= 0.0:
+                                continue
+                            score_by_mem[mid][tid] = float(score_by_mem[mid].get(tid, 0.0) or 0.0) + float(de)
+                            projection_scores_by_mem.setdefault(mid, {})
+                            projection_scores_by_mem[mid][tid] = float(projection_scores_by_mem[mid].get(tid, 0.0) or 0.0) + float(de)
 
             # ---- Select peak targets (per memory) / 每条记忆选取波峰目标 ----
             max_targets = int(self._config.get("max_bind_targets_per_memory", 2) or 2)
             max_targets = max(1, min(8, max_targets))
             keep_ratio = float(self._config.get("peak_keep_ratio", 0.72) or 0.72)
             keep_ratio = max(0.0, min(1.0, keep_ratio))
+            enable_projection_targets = bool(self._config.get("enable_projection_target_bindings", True))
+            projection_max_targets = int(self._config.get("max_projection_bind_targets_per_memory", 1) or 1)
+            projection_max_targets = max(0, min(8, projection_max_targets))
+            projection_keep_ratio = float(self._config.get("projection_target_keep_ratio", keep_ratio) or keep_ratio)
+            projection_keep_ratio = max(0.0, min(1.0, projection_keep_ratio))
             max_total = int(self._config.get("max_total_bindings", 12) or 12)
             max_total = max(1, min(64, max_total))
 
@@ -790,11 +925,11 @@ class TimeSensor:
                 pairs = [(tid, float(v or 0.0)) for tid, v in (scores or {}).items() if str(tid) and float(v or 0.0) > 0.0]
                 if not pairs:
                     continue
-                pairs.sort(key=lambda p: p[1], reverse=True)
-                max_score = float(pairs[0][1] or 0.0)
-                picked = [(tid, sc) for (tid, sc) in pairs if sc >= max_score * keep_ratio][:max_targets]
-                if not picked:
-                    picked = [pairs[0]]
+                picked = self._pick_peak_targets_from_scores(
+                    score_pairs=pairs,
+                    max_targets=max_targets,
+                    keep_ratio=keep_ratio,
+                )
                 for tid, sc in picked:
                     candidates.append(
                         {
@@ -822,8 +957,110 @@ class TimeSensor:
                             "time_feeling_energy": mt.get("time_feeling_energy", 0.0),
                             "target_item_id": tid,
                             "target_delta_energy": round(float(sc), 8),
+                            "target_score_source": "legacy_peak",
+                            "target_peak_kind": "feedback_peak",
                         }
                     )
+
+            if enable_projection_targets and projection_max_targets > 0:
+                for mid, projection_scores in projection_scores_by_mem.items():
+                    mt = mem_time.get(mid)
+                    if not mt:
+                        continue
+                    projection_pairs = [
+                        (tid, float(v or 0.0))
+                        for tid, v in (projection_scores or {}).items()
+                        if str(tid) and float(v or 0.0) > 0.0
+                    ]
+                    if not projection_pairs:
+                        continue
+                    picked_projection_targets = self._pick_peak_targets_from_scores(
+                        score_pairs=projection_pairs,
+                        max_targets=projection_max_targets,
+                        keep_ratio=projection_keep_ratio,
+                    )
+                    for tid, sc in picked_projection_targets:
+                        candidates.append(
+                            {
+                                "memory_id": mid,
+                                "memory_display_text": mt.get("display_text", ""),
+                                "delta_unit": mt.get("delta_unit", "s"),
+                                "delta_sec": mt.get("delta_sec", 0.0),
+                                "delta_value": mt.get("delta_value", mt.get("delta_sec", 0.0)),
+                                "time_basis": mt.get("time_basis", time_basis),
+                                "bucket_id": mt.get("bucket_id", ""),
+                                "bucket_label_zh": mt.get("bucket_label_zh", ""),
+                                "bucket_center_sec": mt.get("bucket_center_sec", 0.0),
+                                "bucket_weight": mt.get("bucket_weight", 0.0),
+                                "bucket_secondary_id": mt.get("bucket_secondary_id", ""),
+                                "bucket_secondary_label_zh": mt.get("bucket_secondary_label_zh", ""),
+                                "bucket_secondary_center_sec": mt.get("bucket_secondary_center_sec", 0.0),
+                                "bucket_secondary_weight": mt.get("bucket_secondary_weight", 0.0),
+                                "bucket_1": mt.get("bucket_1", ""),
+                                "w1": mt.get("w1", 0.0),
+                                "bucket_2": mt.get("bucket_2", ""),
+                                "w2": mt.get("w2", 0.0),
+                                "bucket_ref_object_id": f"{node_prefix}{str(mt.get('bucket_id', '') or '')}" if str(mt.get("bucket_id", "") or "") else "",
+                                "bucket_secondary_ref_object_id": f"{node_prefix}{str(mt.get('bucket_secondary_id', '') or '')}" if str(mt.get("bucket_secondary_id", "") or "") else "",
+                                "time_feeling_energy": mt.get("time_feeling_energy", 0.0),
+                                "target_item_id": tid,
+                                "target_delta_energy": round(float(sc), 8),
+                                "target_score_source": "projection_peak",
+                                "target_peak_kind": "structure_projection",
+                            }
+                        )
+
+            if effective_source_mode == "runtime_memory_projection":
+                runtime_keep_ratio = float(self._config.get("projection_target_keep_ratio", keep_ratio) or keep_ratio)
+                runtime_keep_ratio = max(0.0, min(1.0, runtime_keep_ratio))
+                runtime_max_targets = int(self._config.get("max_projection_bind_targets_per_memory", 1) or 1)
+                runtime_max_targets = max(1, min(8, runtime_max_targets))
+                for mid, runtime_scores in runtime_snapshot_scores_by_mem.items():
+                    mt = mem_time.get(mid)
+                    if not mt:
+                        continue
+                    runtime_pairs = [
+                        (tid, float(v or 0.0))
+                        for tid, v in (runtime_scores or {}).items()
+                        if str(tid) and float(v or 0.0) > 0.0
+                    ]
+                    if not runtime_pairs:
+                        continue
+                    picked_runtime_targets = self._pick_peak_targets_from_scores(
+                        score_pairs=runtime_pairs,
+                        max_targets=runtime_max_targets,
+                        keep_ratio=runtime_keep_ratio,
+                    )
+                    for tid, sc in picked_runtime_targets:
+                        candidates.append(
+                            {
+                                "memory_id": mid,
+                                "memory_display_text": mt.get("display_text", ""),
+                                "delta_unit": mt.get("delta_unit", "s"),
+                                "delta_sec": mt.get("delta_sec", 0.0),
+                                "delta_value": mt.get("delta_value", mt.get("delta_sec", 0.0)),
+                                "time_basis": mt.get("time_basis", time_basis),
+                                "bucket_id": mt.get("bucket_id", ""),
+                                "bucket_label_zh": mt.get("bucket_label_zh", ""),
+                                "bucket_center_sec": mt.get("bucket_center_sec", 0.0),
+                                "bucket_weight": mt.get("bucket_weight", 0.0),
+                                "bucket_secondary_id": mt.get("bucket_secondary_id", ""),
+                                "bucket_secondary_label_zh": mt.get("bucket_secondary_label_zh", ""),
+                                "bucket_secondary_center_sec": mt.get("bucket_secondary_center_sec", 0.0),
+                                "bucket_secondary_weight": mt.get("bucket_secondary_weight", 0.0),
+                                "bucket_1": mt.get("bucket_1", ""),
+                                "w1": mt.get("w1", 0.0),
+                                "bucket_2": mt.get("bucket_2", ""),
+                                "w2": mt.get("w2", 0.0),
+                                "bucket_ref_object_id": f"{node_prefix}{str(mt.get('bucket_id', '') or '')}" if str(mt.get("bucket_id", "") or "") else "",
+                                "bucket_secondary_ref_object_id": f"{node_prefix}{str(mt.get('bucket_secondary_id', '') or '')}" if str(mt.get("bucket_secondary_id", "") or "") else "",
+                                "time_feeling_energy": mt.get("time_feeling_energy", 0.0),
+                                "target_item_id": tid,
+                                "target_delta_energy": round(float(sc), 8),
+                                "target_score_source": "runtime_projection_peak",
+                                "target_peak_kind": "runtime_memory_projection",
+                            }
+                        )
 
             # Reduce duplicates by target_item_id: keep strongest.
             best_by_target: dict[str, dict[str, Any]] = {}
@@ -852,6 +1089,38 @@ class TimeSensor:
                 sec_w = float(c.get("bucket_secondary_weight", 0.0) or 0.0)
                 primary_ref_id = str(c.get("bucket_ref_object_id", "") or "").strip()
                 secondary_ref_id = str(c.get("bucket_secondary_ref_object_id", "") or "").strip()
+                target_item_before = None
+                target_ref_object_id = ""
+                target_ref_object_type = ""
+                target_display_seed = ""
+                context_owner_structure_id = ""
+                try:
+                    target_item_before = pool._store.get(tid)  # type: ignore[attr-defined]
+                except Exception:
+                    target_item_before = None
+                if isinstance(target_item_before, dict):
+                    target_ref_object_id = str(target_item_before.get("ref_object_id", "") or "")
+                    target_ref_object_type = str(target_item_before.get("ref_object_type", "") or "")
+                    target_ref_snapshot = (
+                        target_item_before.get("ref_snapshot", {})
+                        if isinstance(target_item_before.get("ref_snapshot", {}), dict)
+                        else {}
+                    )
+                    target_display_seed = str(
+                        target_ref_snapshot.get("content_display", "")
+                        or target_ref_snapshot.get("content_display_detail", "")
+                        or target_ref_object_id
+                    )
+                    target_runtime_ext = (
+                        target_item_before.get("meta", {}).get("ext", {})
+                        if isinstance(target_item_before.get("meta", {}), dict)
+                        and isinstance(target_item_before.get("meta", {}).get("ext", {}), dict)
+                        else {}
+                    )
+                    context_owner_structure_id = str(
+                        target_runtime_ext.get("context_owner_structure_id", "")
+                        or (target_ref_object_id if target_ref_object_type == "st" else "")
+                    )
 
                 # Attribute SA (not inserted as standalone state item).
                 # 属性 SA（不会作为独立 state_item 入池）。
@@ -870,8 +1139,19 @@ class TimeSensor:
                     },
                     "stimulus": {"role": "attribute", "modality": "internal"},
                     "energy": {"er": 0.0, "ev": 0.0},
+                    "source": {
+                        "parent_ids": [target_ref_object_id] if target_ref_object_id else [tid],
+                        "context_ref_object_id": target_ref_object_id,
+                        "context_ref_object_type": target_ref_object_type,
+                        **({"context_owner_structure_id": context_owner_structure_id} if context_owner_structure_id else {}),
+                    },
                     "meta": {
                         "ext": {
+                            "bound_anchor_item_id": tid,
+                            "bound_anchor_ref_object_id": target_ref_object_id,
+                            "bound_anchor_ref_object_type": target_ref_object_type,
+                            "bound_anchor_display": target_display_seed,
+                            "attribute_runtime_mode": "state_item",
                             "time_basis": str(c.get("time_basis", time_basis) or time_basis),
                             "time_unit": str(c.get("delta_unit", "s") or "s"),
                             "time_bucket_id": bid,
@@ -952,6 +1232,8 @@ class TimeSensor:
         # ---- Step 5: register delayed tasks from attribute time-feelings (theory 4.2.8) ----
         delayed_register = self._register_delayed_tasks_from_bindings(
             attribute_bindings=attribute_bindings,
+            pool=pool,
+            hdb=hdb,
             now_ms=now_ms,
             time_basis=time_basis,
             tick_index=int(tick_index) if tick_index is not None else None,
@@ -962,7 +1244,7 @@ class TimeSensor:
             "enabled": True,
             "time_basis": time_basis,
             "tick_index": int(tick_index) if tick_index is not None else None,
-            "source_mode": str(self._config.get("source_mode", "")),
+            "source_mode": effective_source_mode,
             "enabled_bucket_nodes": bool(enable_bucket_nodes),
             "enabled_bind_attribute": bool(enable_bind_attribute),
             "output_mode": output_mode,
@@ -970,6 +1252,7 @@ class TimeSensor:
             "memory_rows": mem_rows[:24],
             "bucket_updates": bucket_updates,
             "attribute_bindings": attribute_bindings[:64],
+            "attribute_binding_source_counts": self._count_binding_sources(attribute_bindings),
             "pool_events": pool_events,
             "delayed_tasks": {
                 **dict(delayed_report),
@@ -991,6 +1274,7 @@ class TimeSensor:
                 "bind_attribute": bool(enable_bind_attribute),
                 "bucket_update_count": len(bucket_updates),
                 "attr_bind_count": len(attribute_bindings),
+                "binding_source_counts": self._count_binding_sources(attribute_bindings),
                 "pool_event_count": len(pool_events),
             },
         )
@@ -1055,6 +1339,109 @@ class TimeSensor:
             "legacy_output_mode": legacy_mode,
         }
 
+    @staticmethod
+    def _pick_peak_targets_from_scores(
+        *,
+        score_pairs: list[tuple[str, float]],
+        max_targets: int,
+        keep_ratio: float,
+    ) -> list[tuple[str, float]]:
+        pairs = [
+            (str(tid or "").strip(), float(score or 0.0))
+            for tid, score in list(score_pairs or [])
+            if str(tid or "").strip() and float(score or 0.0) > 0.0
+        ]
+        if not pairs or max_targets <= 0:
+            return []
+        pairs.sort(key=lambda item: item[1], reverse=True)
+        max_score = float(pairs[0][1] or 0.0)
+        picked = [(tid, sc) for (tid, sc) in pairs if sc >= max_score * keep_ratio][:max_targets]
+        if not picked:
+            picked = [pairs[0]]
+        return [(tid, float(round(sc, 8))) for tid, sc in picked]
+
+    def _runtime_snapshot_target_richness_weight(self, target_item: dict | None) -> float:
+        if not bool(self._config.get("runtime_snapshot_target_richness_bias_enabled", True)):
+            return 1.0
+        if not isinstance(target_item, dict):
+            return 1.0
+
+        ref_snapshot = target_item.get("ref_snapshot", {}) if isinstance(target_item.get("ref_snapshot", {}), dict) else {}
+        sequence_groups = ref_snapshot.get("sequence_groups", []) if isinstance(ref_snapshot.get("sequence_groups", []), list) else []
+        flat_tokens = [str(token) for token in (ref_snapshot.get("flat_tokens", []) or []) if str(token)]
+        runtime_bound_units = ref_snapshot.get("runtime_bound_attribute_units", [])
+        if not isinstance(runtime_bound_units, list):
+            runtime_bound_units = []
+        ext = target_item.get("ext", {}) if isinstance(target_item.get("ext", {}), dict) else {}
+        bound_attributes = ext.get("bound_attributes", []) if isinstance(ext.get("bound_attributes", []), list) else []
+
+        try:
+            token_count = int(ref_snapshot.get("token_count", 0) or 0)
+        except Exception:
+            token_count = 0
+        if token_count <= 0:
+            try:
+                token_count = int(ref_snapshot.get("member_count", 0) or 0)
+            except Exception:
+                token_count = 0
+        if token_count <= 0:
+            token_count = len(flat_tokens)
+        token_count = max(1, token_count)
+        group_count = max(1, len([group for group in sequence_groups if isinstance(group, dict)]) or 0)
+        runtime_attr_count = len([unit for unit in runtime_bound_units if isinstance(unit, dict)])
+        if runtime_attr_count <= 0:
+            runtime_attr_count = len([attr for attr in bound_attributes if isinstance(attr, dict)])
+
+        token_bonus = max(0.0, float(self._config.get("runtime_snapshot_target_complexity_bonus_per_token", 0.45) or 0.45))
+        group_bonus = max(0.0, float(self._config.get("runtime_snapshot_target_group_bonus", 0.15) or 0.15))
+        runtime_attr_bonus = max(0.0, float(self._config.get("runtime_snapshot_target_runtime_attr_bonus", 0.08) or 0.08))
+
+        complexity_scale = 1.0
+        complexity_scale += token_bonus * max(0, token_count - 1)
+        complexity_scale += group_bonus * max(0, group_count - 1)
+        complexity_scale += runtime_attr_bonus * max(0, runtime_attr_count)
+
+        total_energy = 0.0
+        energy = target_item.get("energy", {}) if isinstance(target_item.get("energy", {}), dict) else {}
+        try:
+            total_energy += float(energy.get("er", 0.0) or 0.0) + float(energy.get("ev", 0.0) or 0.0)
+        except Exception:
+            total_energy = 0.0
+        if total_energy <= 0.0:
+            try:
+                total_energy += float(target_item.get("er", 0.0) or 0.0) + float(target_item.get("ev", 0.0) or 0.0)
+            except Exception:
+                total_energy = 0.0
+        energy_scale = math.sqrt(total_energy) if total_energy > 0.0 else 1.0
+        return round(max(1.0, float(complexity_scale) * max(1.0, float(energy_scale))), 8)
+
+    @staticmethod
+    def _dedupe_runtime_snapshot_weighted_targets(weighted_targets: list[tuple[str, float]]) -> list[tuple[str, float]]:
+        best_by_target: dict[str, float] = {}
+        ordered_ids: list[str] = []
+        for raw_target_id, raw_weight in list(weighted_targets or []):
+            target_id = str(raw_target_id or "").strip()
+            if not target_id:
+                continue
+            weight = max(0.0, float(raw_weight or 0.0))
+            if target_id not in best_by_target:
+                ordered_ids.append(target_id)
+                best_by_target[target_id] = weight
+                continue
+            if weight > float(best_by_target.get(target_id, 0.0) or 0.0):
+                best_by_target[target_id] = weight
+        return [(target_id, round(float(best_by_target.get(target_id, 0.0) or 0.0), 8)) for target_id in ordered_ids]
+
+    @staticmethod
+    def _count_binding_sources(attribute_bindings: list[dict[str, Any]]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for row in list(attribute_bindings or []):
+            if not isinstance(row, dict):
+                continue
+            source = str(row.get("target_score_source", "") or "legacy_peak").strip() or "legacy_peak"
+            counts[source] = int(counts.get(source, 0)) + 1
+        return counts
+
     def _normalized_buckets(self, key: str = "buckets") -> list[dict[str, Any]]:
         raw = list(self._config.get(key, []) or [])
         if not raw and key != "buckets":
@@ -1104,25 +1491,26 @@ class TimeSensor:
     def _task_in_fatigue(
         self,
         *,
-        target_item_id: str,
+        task_key: str,
         now_ms: int,
         time_basis: str,
         tick_index: int | None,
     ) -> bool:
-        if not target_item_id:
+        if not task_key:
             return False
         if str(time_basis) == "tick":
-            until = int(self._task_fatigue_until_tick.get(target_item_id, 0) or 0)
+            until = int(self._task_fatigue_until_tick.get(task_key, 0) or 0)
             if tick_index is None:
                 return False
             return int(tick_index) < until
-        until_ms = int(self._task_fatigue_until_ms.get(target_item_id, 0) or 0)
+        until_ms = int(self._task_fatigue_until_ms.get(task_key, 0) or 0)
         return int(now_ms) < until_ms
 
     def _execute_due_delayed_tasks(
         self,
         *,
         pool: Any,
+        hdb: Any | None,
         trace_id: str,
         tick_id: str,
         now_ms: int,
@@ -1130,8 +1518,8 @@ class TimeSensor:
         tick_index: int | None,
     ) -> dict[str, Any]:
         """
-        Execute due delayed tasks and energize their anchor targets.
-        执行到期任务，并对锚点对象赋能（理论 4.2.8 的“到点再点亮”）。
+        Execute due delayed tasks and energize their targets.
+        执行到期任务，并对目标对象赋能（理论 4.2.8 的“到点再点亮”）。
         """
         enabled = bool(self._config.get("enable_delayed_tasks", False))
         if not enabled:
@@ -1163,14 +1551,15 @@ class TimeSensor:
         pool_events: list[dict[str, Any]] = []
         kept: dict[str, dict[str, Any]] = {}
 
-        for target_item_id, task in tasks.items():
-            tid = str(target_item_id or "").strip()
-            if not tid or not isinstance(task, dict):
+        for task_key, task in tasks.items():
+            task_key = str(task_key or "").strip()
+            if not task_key or not isinstance(task, dict):
                 continue
+            task_kind = str(task.get("task_kind", "anchor_item") or "anchor_item").strip() or "anchor_item"
 
             # Skip if in fatigue window.
-            if self._task_in_fatigue(target_item_id=tid, now_ms=now_ms, time_basis=time_basis, tick_index=tick_index):
-                kept[tid] = task
+            if self._task_in_fatigue(task_key=task_key, now_ms=now_ms, time_basis=time_basis, tick_index=tick_index):
+                kept[task_key] = task
                 continue
 
             due = False
@@ -1191,7 +1580,7 @@ class TimeSensor:
                 due = False
 
             if not due:
-                kept[tid] = task
+                kept[task_key] = task
                 continue
 
             # Apply energization
@@ -1207,13 +1596,38 @@ class TimeSensor:
 
             if delta_energy <= 0.0:
                 # Nothing to apply; drop task silently.
-                executed.append({"target_item_id": tid, "ok": False, "reason": "delta_energy_zero"})
+                executed.append(
+                    {
+                        "task_key": task_key,
+                        "task_kind": task_kind,
+                        "target_item_id": str(task.get("target_item_id", "") or ""),
+                        "target_ref_object_id": str(task.get("target_ref_object_id", "") or ""),
+                        "ok": False,
+                        "reason": "delta_energy_zero",
+                    }
+                )
             else:
                 delta_er = float(delta_energy) if energy_key == "er" else 0.0
                 delta_ev = float(delta_energy) if energy_key == "ev" else 0.0
                 try:
+                    resolved_target = self._resolve_delayed_task_runtime_target(
+                        task=task,
+                        pool=pool,
+                        hdb=hdb,
+                        trace_id=trace_id,
+                        tick_id=tick_id,
+                    )
+                    resolved_item_id = str(resolved_target.get("target_item_id", "") or "").strip()
+                    resolved_ref_id = str(
+                        resolved_target.get("target_ref_object_id", task.get("target_ref_object_id", "")) or ""
+                    ).strip()
+                    resolved_ref_type = str(
+                        resolved_target.get("target_ref_object_type", task.get("target_ref_object_type", "")) or ""
+                    ).strip()
+                    if not resolved_item_id:
+                        raise RuntimeError("delayed_task_target_missing")
                     res = pool.apply_energy_update(  # type: ignore[attr-defined]
-                        target_item_id=tid,
+                        target_item_id=resolved_item_id,
                         delta_er=delta_er,
                         delta_ev=delta_ev,
                         trace_id=f"{trace_id}_time_sensor_task",
@@ -1224,7 +1638,11 @@ class TimeSensor:
                     pool_events.append(
                         {
                             "op": "delayed_task_execute",
-                            "target_item_id": tid,
+                            "task_key": task_key,
+                            "task_kind": task_kind,
+                            "target_item_id": resolved_item_id,
+                            "target_ref_object_id": resolved_ref_id,
+                            "target_ref_object_type": resolved_ref_type,
                             "delta_er": round(delta_er, 6),
                             "delta_ev": round(delta_ev, 6),
                             "time_basis": time_basis,
@@ -1235,8 +1653,14 @@ class TimeSensor:
                     )
                     executed.append(
                         {
-                            "target_item_id": tid,
-                            "target_display": str(task.get("target_display", "") or ""),
+                            "task_key": task_key,
+                            "task_kind": task_kind,
+                            "target_item_id": resolved_item_id,
+                            "target_ref_object_id": resolved_ref_id,
+                            "target_ref_object_type": resolved_ref_type,
+                            "target_display": str(
+                                resolved_target.get("target_display", task.get("target_display", "")) or ""
+                            ),
                             "weight": round(weight, 6),
                             "delta_energy": round(delta_energy, 6),
                             "energy_key": energy_key,
@@ -1246,14 +1670,34 @@ class TimeSensor:
                         }
                     )
                 except Exception as exc:
-                    pool_events.append({"op": "delayed_task_execute", "target_item_id": tid, "error": str(exc)})
-                    executed.append({"target_item_id": tid, "ok": False, "error": str(exc)})
+                    pool_events.append(
+                        {
+                            "op": "delayed_task_execute",
+                            "task_key": task_key,
+                            "task_kind": task_kind,
+                            "target_item_id": str(task.get("target_item_id", "") or ""),
+                            "target_ref_object_id": str(task.get("target_ref_object_id", "") or ""),
+                            "target_ref_object_type": str(task.get("target_ref_object_type", "") or ""),
+                            "error": str(exc),
+                        }
+                    )
+                    executed.append(
+                        {
+                            "task_key": task_key,
+                            "task_kind": task_kind,
+                            "target_item_id": str(task.get("target_item_id", "") or ""),
+                            "target_ref_object_id": str(task.get("target_ref_object_id", "") or ""),
+                            "target_ref_object_type": str(task.get("target_ref_object_type", "") or ""),
+                            "ok": False,
+                            "error": str(exc),
+                        }
+                    )
 
             # Apply post-exec fatigue window (avoid immediate re-registration/re-trigger)
             if str(time_basis) == "tick" and tick_index is not None and fatigue_ticks > 0:
-                self._task_fatigue_until_tick[tid] = int(tick_index) + int(fatigue_ticks)
+                self._task_fatigue_until_tick[task_key] = int(tick_index) + int(fatigue_ticks)
             elif str(time_basis) != "tick" and fatigue_ms > 0:
-                self._task_fatigue_until_ms[tid] = int(now_ms) + int(fatigue_ms)
+                self._task_fatigue_until_ms[task_key] = int(now_ms) + int(fatigue_ms)
 
         # Keep only future tasks.
         self._delayed_tasks = kept
@@ -1268,6 +1712,8 @@ class TimeSensor:
         self,
         *,
         attribute_bindings: list[dict[str, Any]],
+        pool: Any,
+        hdb: Any | None,
         now_ms: int,
         time_basis: str,
         tick_index: int | None,
@@ -1275,6 +1721,9 @@ class TimeSensor:
         """
         Register (or update) delayed tasks from time-feeling attribute bindings.
         从“时间感受属性绑定”注册/更新延迟赋能任务（理论 4.2.8）。
+        默认并行支持两类任务：
+        - anchor_item：独立时间间隔 SA -> 到期赋能其锚点对象
+        - structure_projection：若目标结构内包含时间感受 SA -> 到期赋能“去掉时间因子后的结构”
         """
         enabled = bool(self._config.get("enable_delayed_tasks", False))
         if not enabled:
@@ -1294,6 +1743,7 @@ class TimeSensor:
         skipped_small = 0
         skipped_fatigue = 0
         skipped_bad = 0
+        skipped_projection = 0
 
         for b in list(attribute_bindings or [])[:128]:
             if not isinstance(b, dict):
@@ -1313,10 +1763,6 @@ class TimeSensor:
             # Enforce "attribute time-feeling only": bindings already satisfy this by construction.
             # 这里不再额外检查 attribute_name，避免前端字段变化导致漏注册。
 
-            if self._task_in_fatigue(target_item_id=target_item_id, now_ms=now_ms, time_basis=time_basis, tick_index=tick_index):
-                skipped_fatigue += 1
-                continue
-
             # Interval value comes from bucket center.
             try:
                 interval_value = float(b.get("bucket_center_sec", 0.0) or 0.0)
@@ -1326,7 +1772,6 @@ class TimeSensor:
                 skipped_bad += 1
                 continue
 
-            task: dict[str, Any] | None = self._delayed_tasks.get(target_item_id)
             target_display = str(b.get("target_display", "") or "")
             target_ref_object_id = str(b.get("target_ref_object_id", "") or "")
             target_ref_object_type = str(b.get("target_ref_object_type", "") or "")
@@ -1341,45 +1786,81 @@ class TimeSensor:
                 interval_sec = max(min_interval_sec, float(interval_value))
                 due_at_ms = int(now_ms) + int(round(interval_sec * 1000.0))
 
-            if task:
-                try:
-                    task["weight"] = round(max(0.0, float(task.get("weight", 0.0) or 0.0)) + max(0.0, float(delta)), 8)
-                except Exception:
-                    task["weight"] = round(max(0.0, float(delta)), 8)
-                task["updated_at"] = int(now_ms)
-                task["register_count"] = int(task.get("register_count", 0) or 0) + 1
-                if due_tick is not None:
-                    task["due_tick"] = int(due_tick)
-                if due_at_ms is not None:
-                    task["due_at_ms"] = int(due_at_ms)
-                # Keep display fresh
-                if target_display:
-                    task["target_display"] = target_display
-                if target_ref_object_id:
-                    task["target_ref_object_id"] = target_ref_object_id
-                if target_ref_object_type:
-                    task["target_ref_object_type"] = target_ref_object_type
-                updated += 1
+            anchor_task = {
+                "task_key": self._build_delayed_task_key(task_kind="anchor_item", target_item_id=target_item_id),
+                "task_kind": "anchor_item",
+                "target_item_id": target_item_id,
+                "target_ref_object_id": target_ref_object_id,
+                "target_ref_object_type": target_ref_object_type,
+                "target_display": target_display,
+                "time_basis": str(time_basis),
+                "interval_value": float(interval_value),
+            }
+            structure_task = self._build_structure_projection_task_from_binding(
+                binding=b,
+                pool=pool,
+                hdb=hdb,
+                trace_id="",
+                tick_id="",
+                time_basis=time_basis,
+                interval_value=float(interval_value),
+            )
+            candidate_tasks = [anchor_task]
+            if structure_task:
+                candidate_tasks.append(structure_task)
             else:
-                task = {
-                    "task_id": f"ts_task_{target_item_id}",
-                    "target_item_id": target_item_id,
-                    "target_ref_object_id": target_ref_object_id,
-                    "target_ref_object_type": target_ref_object_type,
-                    "target_display": target_display,
-                    "time_basis": str(time_basis),
-                    "interval_value": float(interval_value),
-                    "weight": round(max(0.0, float(delta)), 8),
-                    "created_at": int(now_ms),
-                    "updated_at": int(now_ms),
-                    "register_count": 1,
-                }
-                if due_tick is not None:
-                    task["due_tick"] = int(due_tick)
-                if due_at_ms is not None:
-                    task["due_at_ms"] = int(due_at_ms)
-                self._delayed_tasks[target_item_id] = task
-                registered += 1
+                skipped_projection += 1
+
+            for task_seed in candidate_tasks:
+                task_key = str(task_seed.get("task_key", "") or "").strip()
+                if not task_key:
+                    skipped_bad += 1
+                    continue
+                if self._task_in_fatigue(task_key=task_key, now_ms=now_ms, time_basis=time_basis, tick_index=tick_index):
+                    skipped_fatigue += 1
+                    continue
+                task: dict[str, Any] | None = self._delayed_tasks.get(task_key)
+                if task:
+                    try:
+                        task["weight"] = round(max(0.0, float(task.get("weight", 0.0) or 0.0)) + max(0.0, float(delta)), 8)
+                    except Exception:
+                        task["weight"] = round(max(0.0, float(delta)), 8)
+                    task["updated_at"] = int(now_ms)
+                    task["register_count"] = int(task.get("register_count", 0) or 0) + 1
+                    task["time_basis"] = str(time_basis)
+                    task["interval_value"] = float(interval_value)
+                    if due_tick is not None:
+                        task["due_tick"] = int(due_tick)
+                    if due_at_ms is not None:
+                        task["due_at_ms"] = int(due_at_ms)
+                    for fresh_key in (
+                        "target_item_id",
+                        "target_ref_object_id",
+                        "target_ref_object_type",
+                        "target_display",
+                        "target_structure_id",
+                        "projection_source_structure_id",
+                        "stripped_content_signature",
+                    ):
+                        fresh_value = task_seed.get(fresh_key)
+                        if fresh_value not in (None, "", []):
+                            task[fresh_key] = fresh_value
+                    updated += 1
+                else:
+                    task = {
+                        **dict(task_seed),
+                        "task_id": f"ts_task_{task_key}",
+                        "weight": round(max(0.0, float(delta)), 8),
+                        "created_at": int(now_ms),
+                        "updated_at": int(now_ms),
+                        "register_count": 1,
+                    }
+                    if due_tick is not None:
+                        task["due_tick"] = int(due_tick)
+                    if due_at_ms is not None:
+                        task["due_at_ms"] = int(due_at_ms)
+                    self._delayed_tasks[task_key] = task
+                    registered += 1
 
         pruned = self._prune_delayed_tasks(capacity=capacity)
         table_size = len(self._delayed_tasks)
@@ -1397,7 +1878,12 @@ class TimeSensor:
             "updated_count": updated,
             "pruned_count": pruned,
             "table_size": table_size,
-            "skipped": {"small_delta": skipped_small, "fatigue": skipped_fatigue, "bad": skipped_bad},
+            "skipped": {
+                "small_delta": skipped_small,
+                "fatigue": skipped_fatigue,
+                "bad": skipped_bad,
+                "projection_unavailable": skipped_projection,
+            },
             "tasks": rows[:16],
         }
 
@@ -1432,10 +1918,10 @@ class TimeSensor:
 
         to_drop = candidates[:over]
         dropped = 0
-        drop_ids = {str(r.get("target_item_id", "") or "") for r in to_drop if str(r.get("target_item_id", "") or "")}
-        for tid in drop_ids:
-            if tid in tasks:
-                tasks.pop(tid, None)
+        drop_ids = {str(r.get("task_key", "") or "") for r in to_drop if str(r.get("task_key", "") or "")}
+        for task_key in drop_ids:
+            if task_key in tasks:
+                tasks.pop(task_key, None)
                 dropped += 1
 
         # If still over (candidate pool too small), drop remaining oldest by weight.
@@ -1445,7 +1931,7 @@ class TimeSensor:
             victim = rest[0] if rest else None
             if not isinstance(victim, dict):
                 break
-            vid = str(victim.get("target_item_id", "") or "")
+            vid = str(victim.get("task_key", "") or "")
             if not vid:
                 break
             tasks.pop(vid, None)
@@ -1453,6 +1939,399 @@ class TimeSensor:
 
         self._delayed_tasks = tasks
         return dropped
+
+    @staticmethod
+    def _build_delayed_task_key(
+        *,
+        task_kind: str,
+        target_item_id: str = "",
+        target_structure_id: str = "",
+    ) -> str:
+        kind = str(task_kind or "anchor_item").strip() or "anchor_item"
+        identity = str(target_structure_id or target_item_id or "").strip()
+        if not identity:
+            identity = "unknown"
+        return f"{kind}::{identity}"
+
+    def _resolve_delayed_task_runtime_target(
+        self,
+        *,
+        task: dict[str, Any],
+        pool: Any,
+        hdb: Any | None,
+        trace_id: str,
+        tick_id: str,
+    ) -> dict[str, Any]:
+        task_kind = str(task.get("task_kind", "anchor_item") or "anchor_item").strip() or "anchor_item"
+        target_item_id = str(task.get("target_item_id", "") or "").strip()
+        target_ref_object_id = str(task.get("target_ref_object_id", "") or "").strip()
+        target_ref_object_type = str(task.get("target_ref_object_type", "") or "").strip()
+        target_display = str(task.get("target_display", "") or "").strip()
+
+        target_item = None
+        if target_item_id:
+            try:
+                target_item = pool._store.get(target_item_id)  # type: ignore[attr-defined]
+            except Exception:
+                target_item = None
+        if not isinstance(target_item, dict) and target_ref_object_id:
+            try:
+                target_item = pool._store.get_by_ref(target_ref_object_id)  # type: ignore[attr-defined]
+            except Exception:
+                target_item = None
+        if isinstance(target_item, dict):
+            return {
+                "task_kind": task_kind,
+                "target_item_id": str(target_item.get("id", "") or target_item_id),
+                "target_ref_object_id": str(target_item.get("ref_object_id", "") or target_ref_object_id),
+                "target_ref_object_type": str(target_item.get("ref_object_type", "") or target_ref_object_type),
+                "target_display": str(
+                    (
+                        target_item.get("ref_snapshot", {})
+                        if isinstance(target_item.get("ref_snapshot", {}), dict)
+                        else {}
+                    ).get("content_display", "")
+                    or target_display
+                    or target_ref_object_id
+                ),
+            }
+
+        if target_ref_object_type == "st" and target_ref_object_id and hdb is not None:
+            runtime_obj = None
+            try:
+                runtime_obj = hdb.make_runtime_structure_object(
+                    target_ref_object_id,
+                    er=0.0,
+                    ev=0.0,
+                    reason=f"time_sensor_{task_kind}",
+                )
+            except Exception:
+                runtime_obj = None
+            if isinstance(runtime_obj, dict):
+                try:
+                    pool.insert_runtime_node(  # type: ignore[attr-defined]
+                        runtime_object=runtime_obj,
+                        trace_id=f"{trace_id}_time_sensor_task_materialize",
+                        tick_id=tick_id,
+                        allow_merge=True,
+                        source_module=__module_name__,
+                        reason=f"time_sensor_{task_kind}_materialize",
+                    )
+                except Exception:
+                    pass
+                try:
+                    target_item = pool._store.get_by_ref(target_ref_object_id)  # type: ignore[attr-defined]
+                except Exception:
+                    target_item = None
+                if isinstance(target_item, dict):
+                    return {
+                        "task_kind": task_kind,
+                        "target_item_id": str(target_item.get("id", "") or ""),
+                        "target_ref_object_id": str(target_item.get("ref_object_id", "") or target_ref_object_id),
+                        "target_ref_object_type": str(target_item.get("ref_object_type", "") or target_ref_object_type),
+                        "target_display": str(
+                            (
+                                target_item.get("ref_snapshot", {})
+                                if isinstance(target_item.get("ref_snapshot", {}), dict)
+                                else {}
+                            ).get("content_display", "")
+                            or target_display
+                            or target_ref_object_id
+                        ),
+                    }
+
+        return {
+            "task_kind": task_kind,
+            "target_item_id": target_item_id,
+            "target_ref_object_id": target_ref_object_id,
+            "target_ref_object_type": target_ref_object_type,
+            "target_display": target_display,
+        }
+
+    def _build_structure_projection_task_from_binding(
+        self,
+        *,
+        binding: dict[str, Any],
+        pool: Any,
+        hdb: Any | None,
+        trace_id: str,
+        tick_id: str,
+        time_basis: str,
+        interval_value: float,
+    ) -> dict[str, Any] | None:
+        if hdb is None:
+            return None
+        target_item_id = str(binding.get("target_item_id", "") or "").strip()
+        if not target_item_id:
+            return None
+        try:
+            target_item = pool._store.get(target_item_id)  # type: ignore[attr-defined]
+        except Exception:
+            target_item = None
+        target_ref_object_id = str(
+            binding.get("target_ref_object_id", "")
+            or (target_item.get("ref_object_id", "") if isinstance(target_item, dict) else "")
+            or ""
+        ).strip()
+        target_ref_object_type = str(
+            binding.get("target_ref_object_type", "")
+            or (target_item.get("ref_object_type", "") if isinstance(target_item, dict) else "")
+            or ""
+        ).strip()
+        if target_ref_object_type != "st" or not target_ref_object_id:
+            return None
+
+        structure_store = getattr(hdb, "_structure_store", None)
+        pointer_index = getattr(hdb, "_pointer_index", None)
+        cut_engine = getattr(hdb, "_cut", None)
+        group_store = getattr(hdb, "_group_store", None)
+        if structure_store is None or pointer_index is None or cut_engine is None:
+            return None
+        structure_obj = structure_store.get(target_ref_object_id)
+        if not isinstance(structure_obj, dict):
+            return None
+
+        from hdb._profile_restore import restore_structure_profile
+
+        source_profile = restore_structure_profile(
+            structure_obj,
+            cut_engine=cut_engine,
+            structure_store=structure_store,
+            group_store=group_store,
+        )
+        stripped_profile = self._strip_time_factor_from_profile(
+            profile=source_profile,
+            cut_engine=cut_engine,
+        )
+        if not stripped_profile:
+            return None
+        original_signature = str(source_profile.get("content_signature", "") or "").strip()
+        stripped_signature = str(stripped_profile.get("content_signature", "") or "").strip()
+        if not stripped_signature or stripped_signature == original_signature:
+            return None
+
+        materialized = self._lookup_or_materialize_structure_from_profile(
+            hdb=hdb,
+            target_profile=stripped_profile,
+            source_structure_id=target_ref_object_id,
+            trace_id=trace_id,
+            tick_id=tick_id,
+        )
+        if not materialized:
+            return None
+        stripped_structure_id = str(materialized.get("structure_id", "") or "").strip()
+        if not stripped_structure_id:
+            return None
+
+        return {
+            "task_key": self._build_delayed_task_key(
+                task_kind="structure_projection",
+                target_structure_id=stripped_structure_id,
+            ),
+            "task_kind": "structure_projection",
+            "target_item_id": "",
+            "target_structure_id": stripped_structure_id,
+            "target_ref_object_id": stripped_structure_id,
+            "target_ref_object_type": "st",
+            "target_display": str(materialized.get("display_text", "") or stripped_structure_id),
+            "projection_source_structure_id": target_ref_object_id,
+            "stripped_content_signature": stripped_signature,
+            "time_basis": str(time_basis),
+            "interval_value": float(interval_value),
+        }
+
+    def _strip_time_factor_from_profile(
+        self,
+        *,
+        profile: dict[str, Any],
+        cut_engine: Any,
+    ) -> dict[str, Any] | None:
+        groups = list(profile.get("sequence_groups", []) or [])
+        if not groups:
+            return None
+
+        filtered_groups: list[dict[str, Any]] = []
+        removed_any = False
+        for group_index, group in enumerate(groups):
+            if not isinstance(group, dict):
+                continue
+            units = [dict(unit) for unit in list(group.get("units", []) or []) if isinstance(unit, dict)]
+            if not units:
+                continue
+            allowed_units: list[dict[str, Any]] = []
+            allowed_unit_ids: set[str] = set()
+            for unit in units:
+                if self._is_time_factor_unit(unit):
+                    removed_any = True
+                    continue
+                allowed_units.append(dict(unit))
+                unit_id = str(unit.get("unit_id", unit.get("id", "")) or "").strip()
+                if unit_id:
+                    allowed_unit_ids.add(unit_id)
+            if not allowed_units:
+                continue
+
+            filtered_bundles: list[dict[str, Any]] = []
+            for bundle in list(group.get("csa_bundles", []) or []):
+                if not isinstance(bundle, dict):
+                    continue
+                anchor_unit_id = str(bundle.get("anchor_unit_id", "") or "").strip()
+                member_unit_ids = [
+                    str(member_id)
+                    for member_id in list(bundle.get("member_unit_ids", []) or [])
+                    if str(member_id) and str(member_id) in allowed_unit_ids
+                ]
+                if anchor_unit_id not in allowed_unit_ids or len(member_unit_ids) < 2:
+                    continue
+                filtered_bundle = dict(bundle)
+                filtered_bundle["member_unit_ids"] = member_unit_ids
+                filtered_bundles.append(filtered_bundle)
+
+            filtered_groups.append(
+                {
+                    "group_index": int(group.get("group_index", group_index) or group_index),
+                    "source_type": str(group.get("source_type", "") or ""),
+                    "origin_frame_id": str(group.get("origin_frame_id", "") or ""),
+                    "source_group_index": int(group.get("source_group_index", group.get("group_index", group_index)) or group_index),
+                    "source_sequence_index": int(group.get("source_sequence_index", 0) or 0),
+                    "order_sensitive": bool(group.get("order_sensitive", False)),
+                    "string_unit_kind": str(group.get("string_unit_kind", "") or ""),
+                    "string_token_text": str(group.get("string_token_text", "") or ""),
+                    "units": allowed_units,
+                    "csa_bundles": filtered_bundles,
+                }
+            )
+
+        if not removed_any or not filtered_groups:
+            return None
+
+        stripped_profile = cut_engine.build_sequence_profile_from_groups(filtered_groups)
+        stripped_ext = dict(profile.get("ext", {}) or {}) if isinstance(profile.get("ext", {}), dict) else {}
+        stripped_ext["time_factor_stripped_projection"] = True
+        stripped_profile["ext"] = stripped_ext
+        return stripped_profile
+
+    def _is_time_factor_unit(self, unit: dict[str, Any]) -> bool:
+        if not isinstance(unit, dict):
+            return False
+        configured_name = str(self._config.get("attribute_name", "时间感受") or "时间感受").strip()
+        attribute_name = str(unit.get("attribute_name", unit.get("content", {}).get("attribute_name", "")) or "").strip()
+        unit_role = str(unit.get("unit_role", unit.get("role", "")) or "").strip().lower()
+        token = str(unit.get("token", unit.get("display_text", "")) or "")
+        display_text = str(unit.get("display_text", token) or token)
+        unit_signature = str(unit.get("unit_signature", "") or "")
+        probe = " ".join(
+            [
+                attribute_name,
+                token,
+                display_text,
+                unit_signature,
+            ]
+        ).lower()
+        if attribute_name and attribute_name == configured_name:
+            return True
+        if "sa_time_bucket_" in probe:
+            return True
+        if "时间感受" in probe or "time_feeling" in probe or "time_bucket" in probe:
+            return unit_role == "attribute" or bool(attribute_name)
+        return False
+
+    def _lookup_or_materialize_structure_from_profile(
+        self,
+        *,
+        hdb: Any,
+        target_profile: dict[str, Any],
+        source_structure_id: str,
+        trace_id: str,
+        tick_id: str,
+    ) -> dict[str, Any] | None:
+        structure_store = getattr(hdb, "_structure_store", None)
+        pointer_index = getattr(hdb, "_pointer_index", None)
+        cut_engine = getattr(hdb, "_cut", None)
+        if structure_store is None or pointer_index is None or cut_engine is None:
+            return None
+
+        normalized_profile = cut_engine.build_sequence_profile_from_groups(
+            list(target_profile.get("sequence_groups", []) or [])
+        )
+        profile_ext = dict(target_profile.get("ext", {}) or {}) if isinstance(target_profile.get("ext", {}), dict) else {}
+        profile_ext.update(dict(normalized_profile.get("ext", {}) or {}) if isinstance(normalized_profile.get("ext", {}), dict) else {})
+        context_free_identity = bool(
+            self._config.get("time_factor_stripped_projection_context_free_identity_enabled", True)
+        )
+        context_owner_structure_id = str(profile_ext.get("context_owner_structure_id", "") or source_structure_id).strip()
+        if context_free_identity:
+            for key in ("context_ref_object_id", "context_ref_object_type", "context_owner_structure_id", "context_path_ids"):
+                profile_ext.pop(key, None)
+            if source_structure_id:
+                profile_ext.setdefault("provenance_owner_structure_id", source_structure_id)
+        else:
+            profile_ext.setdefault("context_owner_structure_id", context_owner_structure_id)
+            profile_ext.setdefault("context_ref_object_id", profile_ext.get("context_ref_object_id", "") or context_owner_structure_id)
+            profile_ext.setdefault("context_ref_object_type", profile_ext.get("context_ref_object_type", "") or "st")
+        profile_ext["time_factor_stripped_projection"] = True
+        profile_ext["time_projection_source_structure_id"] = source_structure_id
+        profile_ext["identity_context_free"] = context_free_identity
+        result = resolve_or_create_structure_from_profile(
+            profile={
+                **dict(normalized_profile),
+                "display_text": str(
+                    normalized_profile.get("display_text", "")
+                    or target_profile.get("display_text", "")
+                    or target_profile.get("content_signature", "")
+                    or ""
+                ),
+                "ext": profile_ext,
+            },
+            structure_store=structure_store,
+            pointer_index=pointer_index,
+            cut_engine=cut_engine,
+            trace_id=f"{trace_id}_time_projection_materialize" if trace_id else "time_projection_materialize",
+            tick_id=tick_id or trace_id or "time_projection_materialize",
+            confidence=0.74,
+            origin="time_factor_stripped_projection",
+            origin_id=str(
+                normalized_profile.get("content_signature", "")
+                or target_profile.get("content_signature", "")
+                or ""
+            ),
+            parent_ids=[] if context_free_identity else ([source_structure_id] if source_structure_id else []),
+            ext=profile_ext,
+            source_interface="run_time_feeling_tick",
+            strict_context_owner_match=False if context_free_identity else bool(context_owner_structure_id),
+            require_context_free=context_free_identity,
+        )
+        created_structure = result.get("structure") if isinstance(result, dict) else None
+        if not isinstance(created_structure, dict):
+            return None
+        created_inner = created_structure.get("structure", {}) if isinstance(created_structure.get("structure", {}), dict) else {}
+        structure_id = str(created_structure.get("id", "") or "")
+        if source_structure_id and structure_id and structure_id != source_structure_id and hasattr(structure_store, "add_diff_entry"):
+            try:
+                structure_store.add_diff_entry(
+                    source_structure_id,
+                    target_id=structure_id,
+                    content_signature=str(created_inner.get("content_signature", "") or ""),
+                    base_weight=0.72,
+                    residual_existing_signature="",
+                    residual_incoming_signature=str(normalized_profile.get("content_signature", "") or ""),
+                    ext={
+                        "relation_type": "time_factor_stripped_projection",
+                        "kind": "time_factor_stripped_projection",
+                        "context_owner_structure_id": context_owner_structure_id,
+                        "context_ref_object_id": context_owner_structure_id,
+                        "context_ref_object_type": "st",
+                    },
+                )
+            except Exception:
+                pass
+        return {
+            "structure_id": structure_id,
+            "display_text": str(created_inner.get("display_text", "") or normalized_profile.get("content_signature", "") or ""),
+            "content_signature": str(created_inner.get("content_signature", "") or normalized_profile.get("content_signature", "") or ""),
+            "created": bool(result.get("created", False)),
+            "order": 0,
+        }
 
     @staticmethod
     def _dual_bucket_weights(buckets: list[dict[str, Any]], t_sec: float) -> tuple[str, float, str, float]:

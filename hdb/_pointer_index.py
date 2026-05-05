@@ -10,6 +10,12 @@ import time
 from collections import OrderedDict, defaultdict
 from typing import Any
 
+from ._numeric_match import (
+    coerce_numeric_value,
+    describe_numeric_match as build_numeric_match,
+    numeric_match_tolerance,
+)
+
 
 class PointerIndex:
     def __init__(self, config: dict):
@@ -18,11 +24,14 @@ class PointerIndex:
         self._fallback_map: dict[str, str] = {}
         self._signature_index: defaultdict[str, list[str]] = defaultdict(list)
         self._recent_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._exact_lookup_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._numeric_families: dict[str, dict[str, Any]] = {}
+        self._numeric_dirty_families: set[str] = set()
 
     def update_config(self, config: dict) -> None:
         self._config = config
         self._trim_recent_cache()
+        self._trim_exact_lookup_cache()
         for family in list(self._numeric_families):
             self._rebuild_numeric_family(family)
 
@@ -75,6 +84,11 @@ class PointerIndex:
         self._primary_map.pop(structure_id, None)
         self._fallback_map.pop(structure_id, None)
         self._recent_cache.pop(structure_id, None)
+        self._exact_lookup_cache = OrderedDict(
+            (key, value)
+            for key, value in self._exact_lookup_cache.items()
+            if str(value.get("structure_id", "") or "") != str(structure_id or "")
+        )
         if signature and signature in self._signature_index:
             self._signature_index[signature] = [item for item in self._signature_index[signature] if item != structure_id]
         affected = []
@@ -96,6 +110,25 @@ class PointerIndex:
         }
         self._recent_cache.move_to_end(structure_id)
         self._trim_recent_cache()
+
+    def cache_exact_structure_id(self, cache_key: str, structure_id: str) -> None:
+        if not cache_key or not structure_id:
+            return
+        self._exact_lookup_cache[cache_key] = {
+            "structure_id": str(structure_id),
+            "cached_at": int(time.time() * 1000),
+        }
+        self._exact_lookup_cache.move_to_end(cache_key)
+        self._trim_exact_lookup_cache()
+
+    def resolve_exact_structure_id(self, cache_key: str) -> str:
+        if not cache_key:
+            return ""
+        payload = self._exact_lookup_cache.get(cache_key)
+        if not isinstance(payload, dict):
+            return ""
+        self._exact_lookup_cache.move_to_end(cache_key)
+        return str(payload.get("structure_id", "") or "")
 
     def resolve_db(self, *, structure_obj: dict, structure_store, logger=None, trace_id: str = "", tick_id: str = "") -> tuple[dict | None, dict]:
         structure_id = structure_obj.get("id", "")
@@ -169,6 +202,7 @@ class PointerIndex:
             "fallback_pointer_count": len(self._fallback_map),
             "signature_index_count": len(self._signature_index),
             "recent_cache_count": len(self._recent_cache),
+            "exact_lookup_cache_count": len(self._exact_lookup_cache),
             "numeric_bucket_family_count": len(self._numeric_families),
             "numeric_bucket_count": sum(len(state.get("buckets", [])) for state in self._numeric_families.values()),
         }
@@ -178,6 +212,7 @@ class PointerIndex:
         self._fallback_map.clear()
         self._signature_index.clear()
         self._recent_cache.clear()
+        self._exact_lookup_cache.clear()
         self._numeric_families.clear()
         for structure_obj in structure_store.iter_structures():
             self.register_structure(structure_obj)
@@ -186,6 +221,11 @@ class PointerIndex:
         limit = max(8, int(self._config.get("lru_db_cache_size", 64)))
         while len(self._recent_cache) > limit:
             self._recent_cache.popitem(last=False)
+
+    def _trim_exact_lookup_cache(self) -> None:
+        limit = max(16, int(self._config.get("exact_lookup_cache_size", 256)))
+        while len(self._exact_lookup_cache) > limit:
+            self._exact_lookup_cache.popitem(last=False)
 
     def _log_fallback(self, logger, trace_id: str, tick_id: str, structure_id: str, primary_db_id: str, resolved_db_id: str, mode: str) -> None:
         if logger is None or not self._config.get("detail_log_dump_pointer_fallback", True):
@@ -206,17 +246,7 @@ class PointerIndex:
 
     @staticmethod
     def _coerce_numeric(value: Any) -> float | None:
-        if isinstance(value, bool):
-            return None
-        if isinstance(value, (int, float)):
-            return float(value)
-        text = str(value or "").strip()
-        if not text:
-            return None
-        try:
-            return float(text)
-        except ValueError:
-            return None
+        return coerce_numeric_value(value)
 
     def _numeric_bucket_display(self, *, family: str, center: float, lower: float, upper: float) -> str:
         return f"{family}≈{center:.4f}[{lower:.4f},{upper:.4f}]"
@@ -251,10 +281,11 @@ class PointerIndex:
         )
 
     def _numeric_match_gap(self, *, left: float, right: float) -> float:
-        scale = max(1.0, abs(float(left)), abs(float(right)))
-        return max(
-            float(self._config.get("numeric_match_abs_tolerance", 0.2)),
-            float(self._config.get("numeric_match_rel_tolerance", 0.35)) * scale,
+        return numeric_match_tolerance(
+            float(left),
+            float(right),
+            abs_tolerance=float(self._config.get("numeric_match_abs_tolerance", 0.2)),
+            rel_tolerance=float(self._config.get("numeric_match_rel_tolerance", 0.35)),
         )
 
     def _family_state(self, family: str) -> dict[str, Any]:
@@ -296,11 +327,23 @@ class PointerIndex:
         for family, values in family_values.items():
             state = self._family_state(family)
             observations = state.setdefault("observations", {})
-            observations[structure_id] = sorted(values)
-            self._rebuild_numeric_family(family)
+            sorted_values = sorted(values)
+            if observations.get(structure_id) == sorted_values:
+                continue
+            observations[structure_id] = sorted_values
+            if bool(self._config.get("numeric_bucket_lazy_rebuild_enabled", True)):
+                self._numeric_dirty_families.add(family)
+            else:
+                self._rebuild_numeric_family(family)
+
+    def _ensure_numeric_family_rebuilt(self, family: str) -> None:
+        if family not in self._numeric_dirty_families:
+            return
+        self._rebuild_numeric_family(family)
 
     def _rebuild_numeric_family(self, family: str) -> None:
         state = self._family_state(family)
+        self._numeric_dirty_families.discard(family)
         observations = state.get("observations", {})
         observed_values = [
             float(value)
@@ -383,6 +426,7 @@ class PointerIndex:
             )
 
         bucket_members: dict[str, list[str]] = {str(bucket.get("bucket_id", "")): [] for bucket in new_buckets}
+        bucket_sample_counts: dict[str, int] = {str(bucket.get("bucket_id", "")): 0 for bucket in new_buckets}
         for structure_id, values in observations.items():
             structure_bucket_ids = []
             for value in values:
@@ -394,6 +438,8 @@ class PointerIndex:
                     ),
                 )
                 bucket_id = str(target_bucket.get("bucket_id", ""))
+                if bucket_id:
+                    bucket_sample_counts[bucket_id] = int(bucket_sample_counts.get(bucket_id, 0)) + 1
                 if bucket_id and bucket_id not in structure_bucket_ids:
                     structure_bucket_ids.append(bucket_id)
             for bucket_id in structure_bucket_ids:
@@ -402,22 +448,7 @@ class PointerIndex:
                     bucket_members[bucket_id].append(structure_id)
         for bucket in new_buckets:
             bucket_id = str(bucket.get("bucket_id", ""))
-            bucket["sample_count"] = sum(
-                1
-                for values in observations.values()
-                for value in values
-                if bucket_id in {
-                    str(
-                        min(
-                            new_buckets,
-                            key=lambda item: (
-                                abs(float(item.get("center", 0.0)) - float(value)),
-                                str(item.get("bucket_id", "")),
-                            ),
-                        ).get("bucket_id", "")
-                    )
-                }
-            )
+            bucket["sample_count"] = int(bucket_sample_counts.get(bucket_id, 0))
         state["buckets"] = new_buckets
         state["bucket_members"] = bucket_members
 
@@ -535,7 +566,8 @@ class PointerIndex:
         if not family or numeric_value is None:
             return []
         state = self._family_state(family)
-        if create_if_missing:
+        self._ensure_numeric_family_rebuilt(family)
+        if create_if_missing and bool(self._config.get("numeric_bucket_synthetic_lookup_rebuild_enabled", False)):
             observations = state.setdefault("observations", {})
             synthetic_id = f"__lookup__::{family}::{round(float(numeric_value), 8)}"
             observations[synthetic_id] = [round(float(numeric_value), 8)]
@@ -568,13 +600,19 @@ class PointerIndex:
 
     def describe_numeric_match(self, *, attribute_name: str, left_value: float, right_value: float) -> dict[str, Any] | None:
         family = str(attribute_name or "")
-        left = self._coerce_numeric(left_value)
-        right = self._coerce_numeric(right_value)
-        if not family or left is None or right is None:
+        if not family:
             return None
-        distance = abs(float(left) - float(right))
-        similarity = self._numeric_similarity_ratio(float(left), float(right))
-        midpoint = round((float(left) + float(right)) / 2.0, 8)
+        numeric_match = build_numeric_match(
+            family=family,
+            left_value=left_value,
+            right_value=right_value,
+            abs_tolerance=float(self._config.get("numeric_match_abs_tolerance", 0.2)),
+            rel_tolerance=float(self._config.get("numeric_match_rel_tolerance", 0.35)),
+            min_similarity=float(self._config.get("numeric_match_min_similarity", 0.4)),
+        )
+        if not numeric_match:
+            return None
+        midpoint = round(float(numeric_match.get("average_value", 0.0)), 8)
         buckets = self.resolve_numeric_buckets(
             attribute_name=family,
             value=midpoint,
@@ -595,12 +633,7 @@ class PointerIndex:
         }
         bucket_id = str(bucket.get("bucket_id", ""))
         return {
-            "family": family,
-            "left_value": round(float(left), 8),
-            "right_value": round(float(right), 8),
-            "average_value": midpoint,
-            "distance": round(distance, 8),
-            "similarity": round(similarity, 8),
+            **numeric_match,
             "bucket_id": bucket_id,
             "bucket_center": round(float(bucket.get("center", midpoint)), 8),
             "bucket_lower_bound": round(float(bucket.get("lower_bound", midpoint)), 8),
@@ -608,15 +641,3 @@ class PointerIndex:
             "bucket_display_text": str(bucket.get("display_text", "")),
             "bucket_signature": self._numeric_bucket_signature(family=family, bucket_id=bucket_id),
         }
-
-    @staticmethod
-    def _numeric_similarity_ratio(left: float, right: float) -> float:
-        left_value = float(left)
-        right_value = float(right)
-        if left_value == right_value:
-            return 1.0
-        if left_value == 0.0 or right_value == 0.0:
-            return 0.0
-        if left_value * right_value < 0.0:
-            return 0.0
-        return max(0.0, min(1.0, min(abs(left_value), abs(right_value)) / max(abs(left_value), abs(right_value))))
