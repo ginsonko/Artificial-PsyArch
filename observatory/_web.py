@@ -1865,7 +1865,7 @@ def _build_handler():
 
 def run_observatory_web(app: ObservatoryApp, *, host: str, port: int, open_browser: bool = True) -> None:
     server = ObservatoryWebServer(host, port, app)
-    url = f"http://{host}:{port}/"
+    url = f"http://{host}:{port}/next/"
     print(f"AP Observatory Web UI: {url}")
     if open_browser:
         try:
