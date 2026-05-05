@@ -1,0 +1,16 @@
+stimulus_level_max_rounds: 14
+internal_resolution_detail_budget_adr_gain: 56
+ev_propagation_ratio: 1.0
+internal_resolution_flat_unit_cap_per_structure: 173
+internal_resolution_detail_budget_base: 104
+internal_resolution_max_structures_per_tick: 11
+er_induction_threshold: 0.31
+stimulus_early_stop_patience_rounds: 0
+induction_energy_graph_v2_max_rounds: 1
+induction_energy_graph_v2_root_er_decay_ratio: 0.8
+induction_energy_graph_v2_root_source_ev_ratio: 0.9500000000000001
+induction_energy_graph_v2_frontier_ev_ratio: 0.9500000000000001
+induction_energy_graph_v2_er_round_ratio: 0.9
+induction_energy_graph_v2_min_budget: 0.02
+induction_energy_graph_v2_max_frontier_nodes_per_source: 2
+induction_min_entry_base_weight: 0.0

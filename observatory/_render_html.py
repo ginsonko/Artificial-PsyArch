@@ -284,7 +284,7 @@ def _render_induction_section(induction: dict) -> str:
         "感应赋能 / Induction Propagation",
         "".join(
             [
-                _metric_card("源结构", str(data.get("source_item_count", 0)), f"fallback {yn(data.get('fallback_used', False))}"),
+                _metric_card("感应源对象", str(data.get("source_item_count", 0)), f"fallback {yn(data.get('fallback_used', False))}"),
                 _metric_card("EV / ER", f"{data.get('propagated_target_count', 0)} / {data.get('induced_target_count', 0)}", f"ΔEV {f(data.get('total_delta_ev', 0.0))}"),
                 _metric_card("EV 消耗", f(data.get("total_ev_consumed", 0.0)), f"updated {data.get('updated_weight_count', 0)}"),
             ]
@@ -308,6 +308,7 @@ def export_cycle_html(report: dict, html_path: str | Path) -> str:
     sections = [
         _render_sensor_section(report.get("sensor", {})),
         _render_maintenance_section(report.get("maintenance", {})),
+        _render_cognitive_stitching_section(report.get("cognitive_stitching", {})),
         _render_attention_section(report.get("attention", {})),
         _render_structure_section(report.get("structure_level", {})),
         _render_projection_section(report.get("pool_apply", {})),
@@ -349,6 +350,7 @@ def _render_shell(report: dict) -> str:
         f"<p>轮次 {e(report.get('trace_id', ''))}</p>"
         "</div>"
         "<nav class='nav'>"
+        "<a href='#cognitive_stitching'>Cognitive Stitching</a>"
         "<a href='#overview'>总览</a>"
         "<a href='#sensor'>文本感受器</a>"
         "<a href='#maintenance'>状态池维护</a>"
@@ -452,6 +454,127 @@ def _render_maintenance_section(maintenance: dict) -> str:
         "状态池自适应维护 / State Pool Maintenance",
         "".join(cards)
         + _table("维护事件", ["事件", "目标", "类型", "原因", "ER", "EV", "CP"], event_rows),
+    )
+
+
+def _render_cognitive_stitching_section(cognitive_stitching: dict) -> str:
+    candidate_audit = cognitive_stitching.get("candidate_audit", {}) if isinstance(cognitive_stitching.get("candidate_audit", {}), dict) else {}
+    rejected_reason_counts = candidate_audit.get("rejected_reason_counts", {}) if isinstance(candidate_audit.get("rejected_reason_counts", {}), dict) else {}
+    score_means = candidate_audit.get("score_means", {}) if isinstance(candidate_audit.get("score_means", {}), dict) else {}
+    candidate_rows = [
+        [
+            item.get("action_type", ""),
+            item.get("source_display", ""),
+            item.get("source_kind", ""),
+            item.get("target_display", ""),
+            item.get("target_kind", ""),
+            item.get("match_mode", ""),
+            item.get("context_k", 0),
+            item.get("matched_span", 0),
+            f(item.get("score", 0.0)),
+            f(item.get("edge_weight_ratio", 0.0)),
+            f(item.get("match_strength", 0.0)),
+            f(item.get("fatigue_before", 0.0)),
+        ]
+        for item in cognitive_stitching.get("candidate_preview", [])[:12]
+    ]
+    rejection_rows = [
+        [
+            item.get("reason", ""),
+            item.get("action_type", ""),
+            item.get("source_display", ""),
+            item.get("target_display", ""),
+            f(item.get("score", 0.0)),
+            f(item.get("min_candidate_score", 0.0)),
+            f(item.get("threshold_margin", 0.0)),
+            f(item.get("base_score", 0.0)),
+        ]
+        for item in candidate_audit.get("rejection_preview", [])[:10]
+    ]
+    competition_rows = [
+        [
+            item.get("outcome", ""),
+            item.get("candidate_signature", ""),
+            item.get("action_type", ""),
+            f(item.get("incoming_score", 0.0)),
+            f(item.get("existing_score", 0.0)),
+            item.get("incoming_source_display", ""),
+            item.get("incoming_target_display", ""),
+        ]
+        for item in candidate_audit.get("competition_preview", [])[:10]
+    ]
+    action_rows = [
+        [
+            item.get("action", ""),
+            item.get("action_family", ""),
+            item.get("event_display", ""),
+            item.get("event_component_count", 0),
+            item.get("source_display", ""),
+            item.get("source_kind", ""),
+            item.get("target_display", ""),
+            item.get("target_kind", ""),
+            item.get("match_mode", ""),
+            item.get("context_k", 0),
+            item.get("matched_span", 0),
+            f(item.get("score", 0.0)),
+            f(item.get("absorbed_total", 0.0)),
+            f(item.get("fatigue_after", 0.0)),
+        ]
+        for item in cognitive_stitching.get("actions", [])[:12]
+    ]
+    narrative_rows = [
+        [
+            item.get("display", ""),
+            item.get("ref_object_id", ""),
+            f(item.get("er", 0.0)),
+            f(item.get("ev", 0.0)),
+            f(item.get("cp_abs", 0.0)),
+            f(item.get("event_grasp", 0.0)),
+            f(item.get("salience_score", 0.0)),
+            item.get("component_count", 0),
+            item.get("esdb_parent_depth", 0),
+            item.get("esdb_delta_entry_count", 0),
+            1 if item.get("esdb_materialized", False) else 0,
+            item.get("esdb_update_count", 0),
+        ]
+        for item in cognitive_stitching.get("narrative_top_items", [])[:12]
+    ]
+    cards = [
+        _metric_card("enabled", yn(cognitive_stitching.get("enabled", False)), cognitive_stitching.get("reason", "")),
+        _metric_card("seed / candidate", f"{cognitive_stitching.get('seed_structure_count', 0)} / {cognitive_stitching.get('candidate_count', 0)}", f"stage {cognitive_stitching.get('stage', '')}"),
+        _metric_card("plain / event seed", f"{cognitive_stitching.get('seed_plain_structure_count', 0)} / {cognitive_stitching.get('seed_event_count', 0)}", f"actions {cognitive_stitching.get('action_count', 0)}"),
+        _metric_card("create / extend / merge", f"{cognitive_stitching.get('created_count', 0)} / {cognitive_stitching.get('extended_count', 0)} / {cognitive_stitching.get('merged_count', 0)}", f"reinforced {cognitive_stitching.get('reinforced_count', 0)}"),
+        _metric_card("narrative top", str(len(cognitive_stitching.get("narrative_top_items", []) or [])), f"fatigue states {cognitive_stitching.get('pair_fatigue_state_size', 0)}"),
+        _metric_card(
+            "ESDB",
+            f"events {cognitive_stitching.get('esdb_event_count', 0)}",
+            f"mat {cognitive_stitching.get('esdb_materialized_event_count', 0)} | delta {cognitive_stitching.get('esdb_delta_entry_total', 0)}",
+        ),
+        _metric_card(
+            "candidate audit",
+            f"raw {candidate_audit.get('raw_accepted_count', 0)} | dedup {candidate_audit.get('deduped_candidate_count', 0)}",
+            f"rejected {candidate_audit.get('rejected_count', 0)} | pruned {candidate_audit.get('deduped_pruned_count', 0)}",
+        ),
+        _metric_card(
+            "reject reasons",
+            " / ".join(f"{k}:{v}" for k, v in rejected_reason_counts.items()) or "-",
+            f"replace {candidate_audit.get('replacement_count', 0)} | keep {candidate_audit.get('kept_existing_count', 0)}",
+        ),
+        _metric_card(
+            "score means",
+            f"score {f(score_means.get('score', 0.0))} | margin {f(score_means.get('threshold_margin', 0.0))}",
+            f"base {f(score_means.get('base_score', 0.0))} | match {f(score_means.get('match_strength', 0.0))} | context {f(score_means.get('context_ratio', 0.0))}",
+        ),
+    ]
+    return _section(
+        "cognitive_stitching",
+        "认知拼接 / Cognitive Stitching",
+        "".join(cards)
+        + _table("CS candidates", ["action", "source", "source_kind", "target", "target_kind", "match", "context_k", "matched_span", "score", "edge_ratio", "match_strength", "fatigue"], candidate_rows)
+        + _table("CS rejected candidates", ["reason", "action", "source", "target", "score", "min_score", "margin", "base_score"], rejection_rows)
+        + _table("CS competition", ["outcome", "signature", "action", "incoming", "existing", "source", "target"], competition_rows)
+        + _table("CS actions", ["action", "family", "event", "components", "source", "source_kind", "target", "target_kind", "match", "context_k", "matched_span", "score", "absorbed", "fatigue_after"], action_rows)
+        + _table("CS narrative top", ["display", "ref_id", "ER", "EV", "CP", "grasp", "salience", "components", "es_depth", "delta", "mat", "upd"], narrative_rows),
     )
 
 
@@ -765,7 +888,7 @@ def _render_induction_section(induction: dict) -> str:
         for item in induction.get("applied_targets", [])
     ]
     cards = [
-        _metric_card("源结构", str(data.get("source_item_count", 0)), "参与感应赋能的起点"),
+        _metric_card("感应源对象", str(data.get("source_item_count", 0)), "参与感应赋能的运行态起点"),
         _metric_card("传播 / 诱发", f"{data.get('propagated_target_count', 0)} / {data.get('induced_target_count', 0)}", "目标命中次数"),
         _metric_card("total_delta_ev", f(data.get("total_delta_ev", 0.0)), "赋能总增量"),
         _metric_card("ev 消耗", f(data.get("total_ev_consumed", 0.0)), "虚能量传播预算"),
@@ -777,7 +900,140 @@ def _render_induction_section(induction: dict) -> str:
     )
 
 
-def _render_final_section(final_state: dict) -> str:
+def _local_modulation_text(local_mod: dict | None) -> str:
+    local_mod = dict(local_mod or {}) if isinstance(local_mod, dict) else {}
+    if not local_mod:
+        return "无"
+    detail = local_mod.get("detail", {}) if isinstance(local_mod.get("detail", {}), dict) else {}
+    reason = str(detail.get("reason", "") or "").strip().lower()
+    status = str(local_mod.get("lookup_status", "") or "").strip().lower()
+    if not status:
+        if bool(local_mod.get("lookup_hit", False)):
+            status = "hit"
+        elif reason == "local_feedback_not_found":
+            status = "miss"
+        else:
+            status = "skipped"
+    if status == "hit":
+        return (
+            f"命中 reward {f(local_mod.get('reward', 0.0))} / "
+            f"punish {f(local_mod.get('punish', 0.0))} / "
+            f"scale {f(local_mod.get('scale_clamped', 1.0))}"
+        )
+    if status == "miss":
+        return "未命中反馈"
+    reason_labels = {
+        "config_disabled": "全局关闭",
+        "node_disabled": "节点关闭",
+        "target_required_but_missing": "缺少目标",
+        "lookup_target_missing": "无目标可查",
+        "non_positive_gain": "gain<=0",
+    }
+    return f"跳过({reason_labels.get(reason, reason or '未知原因')})"
+
+
+def _render_action_learning_section(action: dict | None) -> str:
+    action = dict(action or {}) if isinstance(action, dict) else {}
+    summary = action.get("action_learning_summary", {}) if isinstance(action.get("action_learning_summary", {}), dict) else {}
+    nodes = [row for row in (action.get("nodes", []) or []) if isinstance(row, dict)]
+    executed = [row for row in (action.get("executed_actions", []) or []) if isinstance(row, dict)]
+    if not summary and not nodes and not executed:
+        return ""
+
+    cards = [
+        _metric_card(
+            "人形主路径",
+            "开启" if summary.get("humanlike_runtime_sync_enabled", True) else "关闭",
+            f"全局信号活跃 {summary.get('runtime_signal_node_active_count', 0)} | 行动节点活跃 {summary.get('runtime_action_node_active_count', 0)}",
+        ),
+        _metric_card(
+            "运行态显影",
+            f"{summary.get('runtime_signal_node_count', 0)} / {summary.get('runtime_action_node_count', 0)}",
+            f"执行显影 {summary.get('runtime_action_node_executed_count', 0)} | target_ref {summary.get('runtime_action_target_ref_count', 0)} / target_item {summary.get('runtime_action_target_item_count', 0)}",
+        ),
+        _metric_card("局部塑形开关", "开启" if summary.get("local_drive_modulation_enabled", True) else "关闭", "对象级 reward/punish 是否参与本轮 drive"),
+        _metric_card(
+            "目标 / 命中",
+            f"{summary.get('targeted_node_count', 0)} / {summary.get('local_lookup_hit_count', 0)}",
+            f"text_fallback {summary.get('local_lookup_text_fallback_hit_count', 0)} | miss {summary.get('local_lookup_miss_count', 0)} | skipped {summary.get('local_lookup_skipped_count', 0)}",
+        ),
+        _metric_card(
+            "目标缺失 / 关闭",
+            f"{summary.get('local_target_missing_count', 0)} / {summary.get('local_modulation_disabled_count', 0)}",
+            f"modulated {summary.get('local_modulated_node_count', 0)}",
+        ),
+        _metric_card(
+            "奖励 / 惩罚",
+            f"{f(summary.get('local_reward_drive_bonus_total', 0.0))} / {f(summary.get('local_punish_drive_penalty_total', 0.0))}",
+            f"scale_mean {f(summary.get('local_drive_scale_mean', 1.0))}",
+        ),
+    ]
+    example_rows = [
+        [
+            item.get("action_kind", ""),
+            item.get("action_id", ""),
+            item.get("target_display", "") or item.get("target_ref_object_id", "") or item.get("target_item_id", ""),
+            f(item.get("reward", 0.0)),
+            f(item.get("punish", 0.0)),
+            f(item.get("scale_clamped", 1.0)),
+            f(item.get("reward_bonus_gain", 0.0)),
+            f(item.get("punish_penalty_gain", 0.0)),
+        ]
+        for item in (summary.get("examples", []) or [])[:8]
+        if isinstance(item, dict)
+    ]
+    node_rows = [
+        [
+            row.get("action_kind", ""),
+            row.get("action_id", ""),
+            row.get("target_display", "") or row.get("target_ref_object_id", "") or row.get("target_item_id", ""),
+            f(row.get("drive", 0.0)),
+            f(row.get("tick_consumed_drive_total", row.get("last_consumed_drive", 0.0))),
+            f(row.get("effective_threshold", row.get("threshold", 0.0))),
+            _local_modulation_text(row.get("local_drive_modulation", {})),
+        ]
+        for row in nodes[:12]
+    ]
+    executed_rows = [
+        [
+            row.get("action_kind", ""),
+            row.get("action_id", ""),
+            row.get("target_display", "") or row.get("target_ref_object_id", "") or row.get("target_item_id", ""),
+            yn(row.get("success", False)),
+            yn(row.get("attempted", True)),
+            f(row.get("consumed_drive", row.get("last_consumed_drive", 0.0))),
+            _local_modulation_text(row.get("local_drive_modulation", {})),
+        ]
+        for row in executed[:12]
+    ]
+    block = (
+        "<section class='subpanel'>"
+        "<h4>行动学习摘要 / Action Learning Summary</h4>"
+        + "".join(cards)
+        + "</section>"
+    )
+    if example_rows:
+        block += _table(
+            "局部塑形样例 / Local modulation examples",
+            ["action_kind", "action_id", "目标动作 / Action target", "reward", "punish", "scale", "reward_gain", "punish_cost"],
+            example_rows,
+        )
+    if node_rows:
+        block += _table(
+            "当前行动节点 / Current action nodes",
+            ["kind", "action_id", "target", "drive", "tick_consumed", "effective_threshold", "local_modulation"],
+            node_rows,
+        )
+    if executed_rows:
+        block += _table(
+            "最近执行行动 / Recent executed actions",
+            ["kind", "action_id", "target", "success", "attempted", "consumed_drive", "local_modulation"],
+            executed_rows,
+        )
+    return block
+
+
+def _render_final_section(final_state: dict, action: dict | None = None) -> str:
     state_snapshot = final_state.get("state_snapshot", {})
     energy_summary = final_state.get("state_energy_summary", {})
     hdb_snapshot = final_state.get("hdb_snapshot", {})
@@ -813,6 +1069,7 @@ def _render_final_section(final_state: dict) -> str:
         "final",
         "最终状态池 + HDB 摘要 / Final State Pool + HDB Snapshot",
         "".join(cards)
+        + _render_action_learning_section(action)
         + _table("分类型能量", ["类型", "count", "total_er", "total_ev", "total_cp"], energy_rows)
         + _table("最终状态池对象", ["排名", "类型", "内容", "引用 ID", "ER", "EV", "CP", "疲劳", "近因"], item_rows)
         + _table("最近结构", ["结构 ID", "内容", "signature", "W", "G", "F"], recent_structure_rows),
@@ -890,6 +1147,7 @@ def export_cycle_html(report: dict, html_path: str | Path) -> str:
     sections = [
         _render_sensor_section(report.get("sensor", {})),
         _render_maintenance_section(report.get("maintenance", {})),
+        _render_cognitive_stitching_section(report.get("cognitive_stitching", {})),
         _render_attention_section(report.get("attention", {})),
         _render_structure_section(report.get("structure_level", {})),
         _render_cache_section(report.get("cache_neutralization", {})),
@@ -899,7 +1157,7 @@ def export_cycle_html(report: dict, html_path: str | Path) -> str:
         _render_cognitive_feeling_section(report.get("cognitive_feeling", {})),
         _render_emotion_section(report.get("emotion", {})),
         _render_innate_script_section(report.get("innate_script", {})),
-        _render_final_section(report.get("final_state", {})),
+        _render_final_section(report.get("final_state", {}), report.get("action", {})),
     ]
 
     page = [
@@ -1206,7 +1464,7 @@ def _render_induction_section(induction: dict) -> str:
         for item in induction.get("applied_targets", [])
     ]
     cards = [
-        _metric_card("源结构", str(data.get("source_item_count", 0)), "参与感应赋能的起点"),
+        _metric_card("感应源对象", str(data.get("source_item_count", 0)), "参与感应赋能的运行态起点"),
         _metric_card("传播 / 诱发", f"{data.get('propagated_target_count', 0)} / {data.get('induced_target_count', 0)}", "目标命中次数"),
         _metric_card("total_delta_ev", f(data.get("total_delta_ev", 0.0)), "赋能总增量"),
         _metric_card("ev 消耗", f(data.get("total_ev_consumed", 0.0)), "虚能量传播预算"),
@@ -1401,7 +1659,7 @@ def _render_induction_section(induction: dict) -> str:
         ]
         source_blocks.append(
             _table(
-                f"源结构 {source.get('display_text', '')} ({source.get('source_structure_id', '')})",
+                f"感应源 {source.get('display_text', '')} ({source.get('source_structure_id', '')})",
                 ["mode", "kind", "target_id", "display", "delta_ev", "runtime"],
                 rows,
             )
@@ -1421,7 +1679,7 @@ def _render_induction_section(induction: dict) -> str:
         "感应赋能 / Induction Propagation",
         "".join(
             [
-                _metric_card("源结构", str(data.get("source_item_count", 0)), "参与感应赋能的起点"),
+                _metric_card("感应源对象", str(data.get("source_item_count", 0)), "参与感应赋能的运行态起点"),
                 _metric_card("传播 / 诱发", f"{data.get('propagated_target_count', 0)} / {data.get('induced_target_count', 0)}", "目标命中次数"),
                 _metric_card("total_delta_ev", f(data.get("total_delta_ev", 0.0)), "赋能总增量"),
                 _metric_card("ev 消耗", f(data.get("total_ev_consumed", 0.0)), "虚能量传播预算"),
@@ -1540,7 +1798,7 @@ th { color: var(--muted); font-weight: 600; }
 def _obs_html_projection_kind_label(kind: str) -> str:
     mapping = {
         "structure": "结构 / Structure",
-        "memory": "记忆 / Memory",
+        "memory": "残差记忆 / Residual Memory",
     }
     return mapping.get(str(kind or ""), str(kind or "structure"))
 
@@ -1930,8 +2188,16 @@ def _render_projection_section(pool_apply: dict) -> str:
 def _render_induction_section(induction: dict) -> str:
     data = induction.get("result", {})
     debug = data.get("debug", {})
+    source_selection = induction.get("source_selection", {}) or data.get("source_selection", {}) or {}
+    source_details = list(debug.get("source_details", []) or [])
+    source_hit_count = sum(1 for source in source_details if list(source.get("candidate_entries", []) or []))
+    source_miss_count = max(0, len(source_details) - source_hit_count)
     source_blocks = []
-    for source in debug.get("source_details", [])[:8]:
+    for source in source_details[:8]:
+        source_id = str(source.get("source_item_id", "") or source.get("source_structure_id", "") or "")
+        support_ids = [str(x) for x in (source.get("resolved_support_structure_ids", []) or source.get("support_structure_ids", []) or []) if str(x)]
+        pointer_info = source.get("pointer_info", {}) if isinstance(source.get("pointer_info", {}), dict) else {}
+        skipped_reason = str(source.get("skipped_reason", "") or "")
         rows = [
             [
                 entry.get("mode", ""),
@@ -1950,9 +2216,11 @@ def _render_induction_section(induction: dict) -> str:
         ]
         source_blocks.append(
             _details_block(
-                summary=f"源结构 {source.get('display_text', '')} ({source.get('source_structure_id', '')})",
+                summary=f"源对象 {source.get('display_text', '') or source_id} ({source_id or '-'})",
                 body=(
-                    f"<div class='round-note'>ER {f(source.get('source_er', 0.0))} | EV {f(source.get('source_ev', 0.0))}</div>"
+                    f"<div class='round-note'>源类型 {e(str(source.get('source_ref_object_type', '') or '-'))} | ER {f(source.get('source_er', 0.0))} | EV {f(source.get('source_ev', 0.0))}</div>"
+                    f"<div class='round-note'>支持结构 {e(' / '.join(support_ids) or '-')} | 局部数据库 {e(str(pointer_info.get('resolved_db_id', '') or '-'))} | fallback {e('是' if pointer_info.get('used_fallback') else '否')}</div>"
+                    + (f"<div class='round-note'>未执行原因 {e(skipped_reason)}</div>" if skipped_reason else "")
                     + _table("赋能路径 / Induction paths", ["模式", "类型 / Kind", "目标 ID", "目标内容", "share", "entries", "delta_ev", "runtime", "W", "G", "F"], rows)
                 ),
             )
@@ -1962,13 +2230,24 @@ def _render_induction_section(induction: dict) -> str:
             _obs_html_projection_kind_label(item.get("projection_kind", "structure")),
             item.get("memory_id", "") or item.get("structure_id", ""),
             _display_text(item),
-            f(item.get("ev", 0.0)),
+            item.get("target_sa_count", "-"),
+            f(item.get("landed_total_ev", item.get("ev", 0.0))),
             item.get("result", ""),
         ]
         for item in induction.get("applied_targets", [])
     ]
     cards = [
-        _metric_card("源结构", str(data.get("source_item_count", 0)), "参与感应赋能的起点"),
+        _metric_card(
+            "可用源 / 实际参与",
+            f"{source_selection.get('induction_source_available_runtime_count', data.get('source_item_count', 0))} / {data.get('source_item_count', 0)}",
+            f"ST {source_selection.get('induction_source_selected_st_count', 0)} | 非ST {source_selection.get('induction_source_selected_non_st_count', 0)}",
+        ),
+        _metric_card(
+            "ER 源 / EV 源",
+            f"{source_selection.get('induction_source_selected_from_er_count', 0)} / {source_selection.get('induction_source_selected_from_ev_count', 0)}",
+            f"ER+EV {source_selection.get('induction_source_selected_from_er_ev_count', 0)} | cap_hit {'是' if source_selection.get('induction_source_selection_cap_hit') else '否'}",
+        ),
+        _metric_card("命中源 / 无候选", f"{source_hit_count} / {source_miss_count}", f"局部目标提示 {source_selection.get('induction_source_selected_with_local_target_hint_count', 0)}"),
         _metric_card("传播 / 诱发", f"{data.get('propagated_target_count', 0)} / {data.get('induced_target_count', 0)}", "目标命中次数"),
         _metric_card("total_delta_ev", f(data.get("total_delta_ev", 0.0)), "赋能总增量"),
         _metric_card("ev 消耗", f(data.get("total_ev_consumed", 0.0)), "虚能量传播预算"),
@@ -1976,7 +2255,7 @@ def _render_induction_section(induction: dict) -> str:
     return _section(
         "induction",
         "感应赋能 / Induction Propagation",
-        "".join(cards) + "".join(source_blocks) + _table("已回写目标 / Applied targets", ["类型 / Kind", "目标 ID", "内容", "delta_ev", "结果"], applied_rows),
+        "".join(cards) + "".join(source_blocks) + _table("已回写目标 / Applied targets", ["类型 / Kind", "目标 ID", "内容", "SA", "落地 EV", "结果"], applied_rows),
     )
 
 
@@ -2414,20 +2693,19 @@ def _render_emotion_section(emotion: dict) -> str:
     modulation = emotion.get("modulation", {}) or {}
     att_mod = modulation.get("attention", {}) if isinstance(modulation, dict) else {}
     labels = emotion.get("nt_channel_labels", {}) or {}
+    from_cfs = deltas.get("from_cfs", {}) if isinstance(deltas.get("from_cfs", {}), dict) else {}
+    from_script = deltas.get("from_script", {}) if isinstance(deltas.get("from_script", {}), dict) else {}
+    applied = deltas.get("applied", {}) if isinstance(deltas.get("applied", {}), dict) else {}
+    keys = sorted({*before.keys(), *after.keys(), *from_cfs.keys(), *from_script.keys(), *applied.keys(), *labels.keys()})
 
     cards = [
         _metric_card("奖/惩（rwd/pun）", f"{f(rwd_pun.get('rwd', 0.0))} / {f(rwd_pun.get('pun', 0.0))}", "奖惩汇总"),
         _metric_card("全局衰减（global_decay）", f(decay.get("global_decay_ratio", 0.0)), "递质衰减比例"),
-        _metric_card("通道数（channels）", str(len(after)), "NT（递质通道）数量"),
+        _metric_card("通道数（channels）", str(len(keys)), "NT（递质通道）数量"),
         _metric_card("注意力 Top-N（调制）", str(att_mod.get("top_n", "-")), "下一 tick 注意力 Top-N 调制"),
     ]
 
-    from_cfs = deltas.get("from_cfs", {}) if isinstance(deltas.get("from_cfs", {}), dict) else {}
-    from_script = deltas.get("from_script", {}) if isinstance(deltas.get("from_script", {}), dict) else {}
-    applied = deltas.get("applied", {}) if isinstance(deltas.get("applied", {}), dict) else {}
-
     channel_rows: list[list[object]] = []
-    keys = sorted({*before.keys(), *after.keys(), *from_cfs.keys(), *from_script.keys(), *applied.keys()})
     for ch in keys:
         ch_display = str(labels.get(ch, "") or ch)
         b = float(before.get(ch, 0.0) or 0.0)

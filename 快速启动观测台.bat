@@ -40,8 +40,10 @@ if "%PY_CMD%"=="" (
 
 echo Running: %PY_CMD% %PY_ARGS% -m observatory
 echo.
-
+echo [INFO] Backend is starting, please wait...
+echo.
 %PY_CMD% %PY_ARGS% -m observatory
+
 if %errorlevel% neq 0 (
   echo.
   echo [ERROR] Observatory exited with errorlevel=%errorlevel%.

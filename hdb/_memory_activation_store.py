@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 Memory activation pool for episodic-memory dual-channel (ER/EV) accumulation.
 """
@@ -17,6 +17,7 @@ class MemoryActivationStore:
         self._base_dir = Path(base_dir)
         self._config = config
         self._items: dict[str, dict] = {}
+        self._recent_memory_ids: list[str] = []
         self._load()
 
     @property
@@ -32,17 +33,45 @@ class MemoryActivationStore:
     def iter_items(self) -> list[dict]:
         return list(self._items.values())
 
+    def get_recent(self, limit: int = 10) -> list[dict]:
+        if limit <= 0:
+            return []
+        recent: list[dict] = []
+        for memory_id in reversed(self._recent_memory_ids):
+            if len(recent) >= limit:
+                break
+            item = self._items.get(memory_id)
+            if item is not None:
+                recent.append(item)
+        if len(recent) >= limit:
+            return recent[:limit]
+        seen = {str(item.get("memory_id", item.get("id", ""))) for item in recent}
+        for memory_id in reversed(list(self._items.keys())):
+            if len(recent) >= limit:
+                break
+            if memory_id in seen:
+                continue
+            item = self._items.get(memory_id)
+            if item is not None:
+                recent.append(item)
+        return recent[:limit]
+
     def clear(self) -> int:
         count = len(self._items)
         for memory_id in list(self._items):
             self.delete(memory_id)
         self._items.clear()
+        self._recent_memory_ids.clear()
         return count
 
     def delete(self, memory_id: str) -> bool:
         item = self._items.pop(memory_id, None)
         if item is None:
             return False
+        try:
+            self._recent_memory_ids.remove(memory_id)
+        except ValueError:
+            pass
         return remove_file(self._file_path(memory_id))
 
     def apply_targets(
@@ -83,6 +112,7 @@ class MemoryActivationStore:
             self._persist_item(item)
             total_delta_er += float(payload.get("delta_er", 0.0))
             total_delta_ev += float(payload.get("delta_ev", 0.0))
+            self._touch_recent(memory_id)
             applied_items.append(self._snapshot_item(item))
 
         applied_items.sort(key=self._energy_desc_key)
@@ -306,9 +336,15 @@ class MemoryActivationStore:
         return aggregated
 
     def _make_item(self, *, memory_id: str, episodic_obj: dict, display_text: str, now_ms: int) -> dict:
+        ext = dict(episodic_obj.get("meta", {}).get("ext", {}) or {})
+        memory_material = dict(ext.get("memory_material", {}) or {})
+        grouped_display_text = str(memory_material.get("grouped_display_text", "") or "")
+        memory_kind = str(memory_material.get("memory_kind", "") or "")
+        sequence_groups = list(memory_material.get("sequence_groups", []) or [])
         resolved_display = (
             str(display_text or "")
-            or str(episodic_obj.get("meta", {}).get("ext", {}).get("display_text", ""))
+            or grouped_display_text
+            or str(ext.get("display_text", ""))
             or str(episodic_obj.get("event_summary", ""))
             or memory_id
         )
@@ -317,6 +353,10 @@ class MemoryActivationStore:
             "object_type": "memory_activation",
             "memory_id": memory_id,
             "display_text": resolved_display,
+            "grouped_display_text": grouped_display_text,
+            "memory_kind": memory_kind,
+            "sequence_groups": sequence_groups,
+            "memory_material": memory_material,
             "event_summary": str(episodic_obj.get("event_summary", "")),
             "structure_refs": list(episodic_obj.get("structure_refs", [])),
             "group_refs": list(episodic_obj.get("group_refs", [])),
@@ -368,16 +408,26 @@ class MemoryActivationStore:
         trace_id: str,
         tick_id: str,
     ) -> None:
+        ext = dict(episodic_obj.get("meta", {}).get("ext", {}) or {})
+        memory_material = dict(ext.get("memory_material", {}) or {})
+        grouped_display_text = str(memory_material.get("grouped_display_text", "") or "")
+        memory_kind = str(memory_material.get("memory_kind", "") or "")
+        sequence_groups = list(memory_material.get("sequence_groups", []) or [])
         delta_er = round(max(0.0, float(payload.get("delta_er", 0.0))), 8)
         delta_ev = round(max(0.0, float(payload.get("delta_ev", 0.0))), 8)
         if delta_er <= 0.0 and delta_ev <= 0.0:
             return
         item["display_text"] = (
-            str(payload.get("display_text", ""))
+            grouped_display_text
+            or str(payload.get("display_text", ""))
             or str(item.get("display_text", ""))
             or str(episodic_obj.get("event_summary", ""))
             or str(item.get("memory_id", ""))
         )
+        item["grouped_display_text"] = grouped_display_text or str(item.get("grouped_display_text", ""))
+        item["memory_kind"] = memory_kind or str(item.get("memory_kind", ""))
+        item["sequence_groups"] = sequence_groups or list(item.get("sequence_groups", []) or [])
+        item["memory_material"] = memory_material or dict(item.get("memory_material", {}) or {})
         item["event_summary"] = str(episodic_obj.get("event_summary", ""))
         item["structure_refs"] = list(episodic_obj.get("structure_refs", []))
         item["group_refs"] = list(episodic_obj.get("group_refs", []))
@@ -417,7 +467,6 @@ class MemoryActivationStore:
             mode_totals_ev[str(mode)] = round(float(mode_totals_ev.get(str(mode), 0.0)) + float(mode_delta), 8)
         item["mode_totals_ev"] = mode_totals_ev
 
-        # Keep a bounded per-memory event history for future time-sensor inspection.
         recent_events = list(item.get("recent_events", []))
         recent_events.append(
             {
@@ -443,16 +492,14 @@ class MemoryActivationStore:
             return item
         # Align to theory core 4.2.6.3:
         # time-feeling delta should be based on the *memory* timestamp, not the MAP entry creation time.
-        # 对齐理论核心 4.2.6.3：
-        # 时间感受的时间差应基于“记忆本身的时间戳”，而不是 MAP 条目创建时间。
+        # ????????? 4.2.6.3??
+        # ???????????????????????????????????????MAP ???????????
         try:
             item["memory_created_at"] = int(episodic_obj.get("created_at", 0) or 0)
         except Exception:
             item["memory_created_at"] = int(item.get("created_at", 0) or 0)
         item["memory_tick_id"] = str(episodic_obj.get("tick_id", "") or "")
         item["memory_trace_id"] = str(episodic_obj.get("trace_id", "") or "")
-        # Best-effort parse a numeric tick index from tick_id (e.g., "cycle_0003" -> 3).
-        # 尽力从 tick_id 解析数值 tick_index（例如 "cycle_0003" -> 3），供 tick 时间基准使用。
         tick_id = str(episodic_obj.get("tick_id", "") or "")
         m = re.search(r"(\d+)$", tick_id)
         try:
@@ -462,9 +509,24 @@ class MemoryActivationStore:
         item["event_summary"] = str(episodic_obj.get("event_summary", ""))
         item["structure_refs"] = list(episodic_obj.get("structure_refs", []))
         item["group_refs"] = list(episodic_obj.get("group_refs", []))
+        ext = dict(episodic_obj.get("meta", {}).get("ext", {}) or {})
+        memory_material = dict(ext.get("memory_material", {}) or {})
+        grouped_display_text = str(memory_material.get("grouped_display_text", "") or "")
+        memory_kind = str(memory_material.get("memory_kind", "") or "")
+        sequence_groups = list(memory_material.get("sequence_groups", []) or [])
+        if memory_material:
+            item["memory_material"] = memory_material
+        if grouped_display_text:
+            item["grouped_display_text"] = grouped_display_text
+            item["display_text"] = grouped_display_text
+        if memory_kind:
+            item["memory_kind"] = memory_kind
+        if sequence_groups:
+            item["sequence_groups"] = sequence_groups
         if not str(item.get("display_text", "")):
             item["display_text"] = (
-                str(episodic_obj.get("meta", {}).get("ext", {}).get("display_text", ""))
+                grouped_display_text
+                or str(ext.get("display_text", ""))
                 or str(episodic_obj.get("event_summary", ""))
                 or memory_id
             )
@@ -474,7 +536,11 @@ class MemoryActivationStore:
     def _snapshot_item(item: dict) -> dict:
         return {
             "memory_id": str(item.get("memory_id", item.get("id", ""))),
-            "display_text": str(item.get("display_text", "")),
+            "display_text": str(item.get("grouped_display_text", "") or item.get("display_text", "")),
+            "grouped_display_text": str(item.get("grouped_display_text", "")) or None,
+            "memory_kind": str(item.get("memory_kind", "")) or None,
+            "sequence_groups": list(item.get("sequence_groups", []) or []),
+            "memory_material": dict(item.get("memory_material", {}) or {}),
             "event_summary": str(item.get("event_summary", "")),
             "structure_refs": list(item.get("structure_refs", [])),
             "group_refs": list(item.get("group_refs", [])),
@@ -503,7 +569,6 @@ class MemoryActivationStore:
             "last_feedback_at": int(item.get("last_feedback_at", 0)),
             "recent_feedback_events": list(item.get("recent_feedback_events", [])),
             "created_at": int(item.get("created_at", 0)),
-            # Enriched from episodic store (best-effort) / 从情景记忆补充（尽力而为）
             "memory_created_at": int(item.get("memory_created_at", item.get("created_at", 0)) or 0),
             "memory_tick_id": str(item.get("memory_tick_id", "") or ""),
             "memory_trace_id": str(item.get("memory_trace_id", "") or ""),
@@ -520,6 +585,21 @@ class MemoryActivationStore:
                 continue
             memory_id = str(payload["memory_id"])
             self._items[memory_id] = payload
+            self._recent_memory_ids.append(memory_id)
+        self._recent_memory_ids.sort(
+            key=lambda memory_id: (
+                int(self._items.get(memory_id, {}).get("last_updated_at", 0) or 0),
+                int(self._items.get(memory_id, {}).get("created_at", 0) or 0),
+                str(memory_id),
+            )
+        )
+
+    def _touch_recent(self, memory_id: str) -> None:
+        try:
+            self._recent_memory_ids.remove(memory_id)
+        except ValueError:
+            pass
+        self._recent_memory_ids.append(memory_id)
 
     def _persist_item(self, item: dict) -> None:
         write_json_file(self._file_path(item.get("memory_id", "")), item)
@@ -561,3 +641,7 @@ class MemoryActivationStore:
         if sort_by == "recent_desc":
             return self._recent_desc_key
         return self._energy_desc_key
+
+
+
+

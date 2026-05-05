@@ -6,19 +6,29 @@ AP 状态池模块 — 状态池项构建器
 state_item 是状态池的核心运行态对象，包含完整的能量、动态指标、绑定状态和生命周期信息。
 """
 
+import copy
 import time
 import re
 from typing import Any
 
 from . import __schema_version__, __module_name__
 from ._id_generator import next_id
+from hdb._context_metadata import (
+    build_context_metadata,
+    extract_context_metadata,
+    extract_residual_metadata,
+    merge_context_metadata,
+    merge_residual_metadata,
+)
+from hdb._sequence_display import format_sequence_groups
+from ._semantic_identity import semantic_context_key_from_parts
 
 
 # ====================================================================== #
 #                     支持的引用对象类型                                    #
 # ====================================================================== #
 
-SUPPORTED_REF_TYPES = {"sa", "csa", "st", "em", "cfs_signal", "action_node"}
+SUPPORTED_REF_TYPES = {"sa", "csa", "st", "sg", "em", "cfs_signal", "action_node"}
 
 # 属性名兜底提取：用于在缺失 attribute_name 字段时，从 token 中解析稳定键。
 # 例如： "惩罚信号:存在（punish_signal）" -> punish_signal
@@ -75,16 +85,58 @@ def build_state_item(
     cp_delta = er - ev
     cp_abs = abs(cp_delta)
 
+    ref_source = ref_object.get("source", {}) if isinstance(ref_object.get("source", {}), dict) else {}
+    parent_ids = list(ref_source.get("parent_ids", []) or [obj_id])
+    source_context = extract_context_metadata(ref_object)
+    explicit_context_present = _has_explicit_context_metadata(ref_object)
+    if object_lookup and not source_context.get("context_ref_object_type") and source_context.get("context_ref_object_id"):
+        parent_obj = object_lookup.get(source_context.get("context_ref_object_id", ""))
+        if isinstance(parent_obj, dict):
+            source_context["context_ref_object_type"] = str(parent_obj.get("object_type", "") or "")
+    source_context = build_context_metadata(
+        context_ref_object_id=source_context.get("context_ref_object_id", ""),
+        context_ref_object_type=source_context.get("context_ref_object_type", ""),
+        context_owner_structure_id=source_context.get("context_owner_structure_id", ""),
+        context_path_ids=source_context.get("context_path_ids", []),
+        parent_ids=parent_ids,
+    )
+    residual_meta = extract_residual_metadata(ref_object)
+    source_em_id = _extract_source_em_id(ref_object)
+    source_memory_created_at = _extract_source_memory_created_at(ref_object)
+
     # ---- 轻量快照 ----
-    ref_snapshot = _build_ref_snapshot(ref_object, source_module, object_lookup=object_lookup)
-    semantic_signature = _build_semantic_signature(ref_object, object_lookup=object_lookup)
+    ref_snapshot = _build_ref_snapshot(
+        ref_object,
+        source_module,
+        object_lookup=object_lookup,
+        context_meta=source_context,
+        residual_meta=residual_meta,
+        source_em_id=source_em_id,
+        source_memory_created_at=source_memory_created_at,
+        context_explicit=explicit_context_present,
+    )
     semantic_labels = _build_semantic_labels(ref_object, object_lookup=object_lookup)
+    runtime_meta_ext = merge_context_metadata(
+        _build_runtime_meta_ext(ref_object),
+        context_ref_object_id=source_context.get("context_ref_object_id", ""),
+        context_ref_object_type=source_context.get("context_ref_object_type", ""),
+        context_owner_structure_id=source_context.get("context_owner_structure_id", ""),
+        context_path_ids=source_context.get("context_path_ids", []),
+        parent_ids=parent_ids,
+    )
+    runtime_meta_ext["context_explicit"] = bool(explicit_context_present)
+    runtime_meta_ext = merge_residual_metadata(
+        runtime_meta_ext,
+        residual_origin_kind=residual_meta.get("residual_origin_kind", ""),
+        residual_origin_entry_id=residual_meta.get("residual_origin_entry_id", ""),
+    )
 
     # ---- sub_type 映射 ----
     sub_type_map = {
         "sa": "sa_runtime_item",
         "csa": "csa_runtime_item",
         "st": "st_runtime_item",
+        "sg": "sg_runtime_item",
         "em": "em_runtime_item",
         "cfs_signal": "cfs_runtime_item",
         "action_node": "action_runtime_item",
@@ -130,6 +182,42 @@ def build_state_item(
             except Exception:
                 pass
 
+    semantic_signature = _build_semantic_signature(ref_object, object_lookup=object_lookup)
+    identity_context_ref_id = ref_snapshot.get("context_ref_object_id", "")
+    identity_context_ref_type = ref_snapshot.get("context_ref_object_type", "")
+    identity_context_owner_id = ref_snapshot.get("context_owner_id", "")
+    identity_context_text = ref_snapshot.get("context_text", "")
+    if not explicit_context_present:
+        identity_context_ref_id = ""
+        identity_context_ref_type = ""
+        identity_context_owner_id = ""
+        identity_context_text = ""
+    if obj_type == "st" and not any(
+        str(value or "").strip()
+        for value in (identity_context_ref_id, identity_context_ref_type, identity_context_owner_id, identity_context_text)
+    ):
+        structure_ext = ref_snapshot.get("structure_ext", {}) if isinstance(ref_snapshot.get("structure_ext", {}), dict) else {}
+        identity_context_ref_id = structure_ext.get("context_ref_object_id", "")
+        identity_context_ref_type = structure_ext.get("context_ref_object_type", "")
+        identity_context_owner_id = structure_ext.get("context_owner_structure_id", "")
+        identity_context_text = structure_ext.get("context_text", "") or structure_ext.get("context_display_text", "")
+    semantic_context_key = semantic_context_key_from_parts(
+        semantic_signature=semantic_signature,
+        context_ref_object_id=identity_context_ref_id,
+        context_ref_object_type=identity_context_ref_type,
+        context_owner_id=identity_context_owner_id,
+        context_text=identity_context_text,
+        role=ref_snapshot.get("role", ""),
+        attribute_name=ref_snapshot.get("attribute_name", ""),
+    )
+    ref_alias_ids = _build_ref_alias_ids(
+        ref_object,
+        obj_id=obj_id,
+        obj_type=obj_type,
+        source_em_id=source_em_id,
+        residual_meta=residual_meta,
+    )
+
     return {
         "id": spi_id,
         "object_type": "state_item",
@@ -139,9 +227,10 @@ def build_state_item(
         # ---- 引用信息 ----
         "ref_object_type": obj_type,
         "ref_object_id": obj_id,
-        "ref_alias_ids": [obj_id],
+        "ref_alias_ids": ref_alias_ids,
         "ref_snapshot": ref_snapshot,
         "semantic_signature": semantic_signature,
+        "semantic_context_key": semantic_context_key,
 
         # ---- 能量 ----
         "energy": {
@@ -193,7 +282,8 @@ def build_state_item(
             "interface": source_interface,
             "origin": origin,
             "origin_id": origin_id,
-            "parent_ids": [obj_id],
+            "parent_ids": parent_ids,
+            **source_context,
         },
 
         # ---- 时间和追踪 ----
@@ -209,7 +299,7 @@ def build_state_item(
             "confidence": 1.0,
             "field_registry_version": __schema_version__,
             "debug": {},
-            "ext": {},
+            "ext": runtime_meta_ext,
         },
     }
 
@@ -272,15 +362,78 @@ def _extract_structure_packet_attributes(structure: dict, *, now_ms: int) -> dic
     return out
 
 
+def _has_explicit_context_metadata(ref_object: dict) -> bool:
+    if not isinstance(ref_object, dict):
+        return False
+    containers: list[dict] = []
+    meta = ref_object.get("meta", {}) if isinstance(ref_object.get("meta", {}), dict) else {}
+    meta_ext = meta.get("ext", {}) if isinstance(meta.get("ext", {}), dict) else {}
+    if isinstance(meta_ext, dict):
+        containers.append(meta_ext)
+    structure = ref_object.get("structure", {}) if isinstance(ref_object.get("structure", {}), dict) else {}
+    structure_ext = structure.get("ext", {}) if isinstance(structure.get("ext", {}), dict) else {}
+    if isinstance(structure_ext, dict):
+        containers.append(structure_ext)
+    ext = ref_object.get("ext", {}) if isinstance(ref_object.get("ext", {}), dict) else {}
+    if isinstance(ext, dict):
+        containers.append(ext)
+    source = ref_object.get("source", {}) if isinstance(ref_object.get("source", {}), dict) else {}
+    if isinstance(source, dict):
+        containers.append(source)
+    containers.append(ref_object)
+
+    for container in containers:
+        if container.get("context_ref_object_id") or container.get("context_owner_structure_id"):
+            return True
+        path_ids = container.get("context_path_ids", [])
+        if isinstance(path_ids, (list, tuple, set)):
+            if any(str(value or "").strip() for value in path_ids):
+                return True
+        elif path_ids not in (None, ""):
+            return True
+    return False
+
+
 def _build_ref_snapshot(
     ref_object: dict,
     source_module: str,
     object_lookup: dict[str, dict] | None = None,
+    context_meta: dict[str, Any] | None = None,
+    residual_meta: dict[str, Any] | None = None,
+    source_em_id: str | None = None,
+    source_memory_created_at: int | None = None,
+    context_explicit: bool | None = None,
 ) -> dict:
     """构建原始对象的轻量快照，用于日志和调试。"""
     obj_type = ref_object.get("object_type", "")
+    context_meta = dict(context_meta or extract_context_metadata(ref_object))
+    residual_meta = dict(residual_meta or extract_residual_metadata(ref_object))
+    if source_em_id is None:
+        source_em_id = _extract_source_em_id(ref_object)
+    if source_memory_created_at is None:
+        source_memory_created_at = _extract_source_memory_created_at(ref_object)
     snapshot = {
         "source_module": source_module,
+        "context_ref_object_id": str(context_meta.get("context_ref_object_id", "") or ""),
+        "context_ref_object_type": str(context_meta.get("context_ref_object_type", "") or ""),
+        "context_owner_id": str(context_meta.get("context_owner_structure_id", "") or ""),
+        "context_path_ids": list(context_meta.get("context_path_ids", []) or []),
+        "context_explicit": bool(_has_explicit_context_metadata(ref_object) if context_explicit is None else context_explicit),
+        "context_text": _extract_context_display_text(
+            ref_object,
+            object_lookup=object_lookup,
+            context_meta=context_meta,
+        ),
+        "residual_origin_kind": str(residual_meta.get("residual_origin_kind", "") or ""),
+        "residual_origin_entry_id": str(residual_meta.get("residual_origin_entry_id", "") or ""),
+        "residual_kind": _normalize_residual_kind(
+            ref_object,
+            residual_meta=residual_meta,
+            source_em_id=source_em_id,
+        ),
+        "source_em_id": source_em_id,
+        "memory_id": source_em_id,
+        "source_memory_created_at": int(source_memory_created_at or 0),
     }
 
     if obj_type == "sa":
@@ -357,8 +510,10 @@ def _build_ref_snapshot(
     elif obj_type == "st":
         content = ref_object.get("content", {})
         structure = ref_object.get("structure", {})
+        structured_display = format_sequence_groups(structure.get("sequence_groups", []))
         display = (
-            content.get("display")
+            structured_display
+            or content.get("display")
             or content.get("normalized")
             or content.get("raw")
             or structure.get("display_text")
@@ -366,7 +521,8 @@ def _build_ref_snapshot(
         )
         snapshot["content_display"] = display
         snapshot["content_display_detail"] = (
-            structure.get("display_text")
+            structured_display
+            or structure.get("display_text")
             or content.get("normalized")
             or display
         )
@@ -374,20 +530,62 @@ def _build_ref_snapshot(
         snapshot["content_signature"] = structure.get("content_signature", "")
         snapshot["flat_tokens"] = list(structure.get("flat_tokens", []))
         snapshot["sequence_groups"] = list(structure.get("sequence_groups", []))
+        snapshot["member_refs"] = list(structure.get("member_refs", []))
+        snapshot["structure_ext"] = copy.deepcopy(structure.get("ext", {})) if isinstance(structure.get("ext", {}), dict) else {}
+    elif obj_type == "sg":
+        content = ref_object.get("content", {})
+        group_structure = ref_object.get("group_structure", {})
+        if not isinstance(group_structure, dict):
+            group_structure = {}
+        structured_display = format_sequence_groups(group_structure.get("sequence_groups", []))
+        display = (
+            structured_display
+            or content.get("display")
+            or content.get("normalized")
+            or content.get("raw")
+            or group_structure.get("display_text")
+            or ref_object.get("id", "")
+        )
+        snapshot["content_display"] = display
+        snapshot["content_display_detail"] = (
+            structured_display
+            or group_structure.get("display_text")
+            or content.get("normalized")
+            or display
+        )
+        snapshot["token_count"] = int(group_structure.get("token_count", len(group_structure.get("flat_tokens", []))))
+        snapshot["content_signature"] = group_structure.get("content_signature", "")
+        snapshot["flat_tokens"] = list(group_structure.get("flat_tokens", []))
+        snapshot["sequence_groups"] = list(group_structure.get("sequence_groups", []))
+        snapshot["member_refs"] = list(group_structure.get("member_refs", []))
+        group_obj = ref_object.get("group", {}) if isinstance(ref_object.get("group", {}), dict) else {}
+        snapshot["required_structure_ids"] = list(group_obj.get("required_structure_ids", ref_object.get("required_structure_ids", [])) or [])
+        snapshot["bias_structure_ids"] = list(group_obj.get("bias_structure_ids", ref_object.get("bias_structure_ids", [])) or [])
+        snapshot["group_ext"] = copy.deepcopy(group_structure.get("ext", {})) if isinstance(group_structure.get("ext", {}), dict) else {}
     elif obj_type == "em":
         content = ref_object.get("content", {})
         memory = ref_object.get("memory", {})
+        structured_display = format_sequence_groups(memory.get("sequence_groups", []))
         display = (
-            content.get("display")
+            memory.get("semantic_grouped_display_text")
+            or memory.get("grouped_display_text")
+            or structured_display
+            or content.get("display")
             or memory.get("display_text")
             or memory.get("event_summary")
             or ref_object.get("id", "")
         )
         snapshot["content_display"] = display
-        snapshot["content_display_detail"] = memory.get("event_summary", display)
+        snapshot["content_display_detail"] = (
+            memory.get("semantic_grouped_display_text")
+            or memory.get("grouped_display_text")
+            or structured_display
+            or memory.get("event_summary", display)
+        )
         snapshot["memory_id"] = memory.get("memory_id", ref_object.get("id", ""))
         snapshot["structure_refs"] = list(memory.get("structure_refs", []))
         snapshot["group_refs"] = list(memory.get("group_refs", []))
+        snapshot["sequence_groups"] = list(memory.get("sequence_groups", []))
         snapshot["backing_structure_id"] = memory.get("backing_structure_id", "")
     elif obj_type == "cfs_signal":
         content = ref_object.get("content", {})
@@ -397,10 +595,210 @@ def _build_ref_snapshot(
         content = ref_object.get("content", {})
         snapshot["content_display"] = content.get("display", content.get("raw", ""))
         snapshot["action_type"] = ref_object.get("sub_type", "action")
+        ext = ref_object.get("ext", {}) if isinstance(ref_object.get("ext", {}), dict) else {}
+        meta_ext = ref_object.get("meta", {}).get("ext", {}) if isinstance(ref_object.get("meta", {}).get("ext", {}), dict) else {}
+        action_meta = {}
+        action_meta.update(meta_ext)
+        action_meta.update(ext)
+        for key in (
+            "action_id",
+            "action_kind",
+            "target_ref_object_id",
+            "target_ref_object_type",
+            "target_item_id",
+            "target_display",
+            "drive_hint",
+            "consumed_drive_hint",
+            "effective_threshold",
+            "threshold_scale",
+        ):
+            value = action_meta.get(key, None)
+            if value not in ("", None, [], {}):
+                snapshot[key] = value
     else:
         snapshot["content_display"] = str(ref_object.get("id", ""))
 
     return snapshot
+
+
+def _extract_context_display_text(
+    ref_object: dict,
+    *,
+    object_lookup: dict[str, dict] | None = None,
+    context_meta: dict[str, Any] | None = None,
+) -> str:
+    context_meta = dict(context_meta or {})
+    meta_ext = ref_object.get("meta", {}).get("ext", {}) if isinstance(ref_object.get("meta", {}).get("ext", {}), dict) else {}
+    structure_ext = ref_object.get("structure", {}).get("ext", {}) if isinstance(ref_object.get("structure", {}).get("ext", {}), dict) else {}
+    ext = ref_object.get("ext", {}) if isinstance(ref_object.get("ext", {}), dict) else {}
+    for candidate in (meta_ext, structure_ext, ext):
+        text = str(candidate.get("context_text", "") or candidate.get("context_display_text", "") or "").strip()
+        if text:
+            return text
+
+    for candidate_id in (
+        str(context_meta.get("context_ref_object_id", "") or "").strip(),
+        str(context_meta.get("context_owner_structure_id", "") or "").strip(),
+    ):
+        if not candidate_id:
+            continue
+        if object_lookup and candidate_id in object_lookup:
+            display = _extract_ref_object_display(object_lookup.get(candidate_id))
+            if display:
+                return display
+        return candidate_id
+    return ""
+
+
+def _extract_source_em_id(ref_object: dict) -> str:
+    obj_type = str(ref_object.get("object_type", "") or "").strip()
+    memory = ref_object.get("memory", {}) if isinstance(ref_object.get("memory", {}), dict) else {}
+    meta_ext = ref_object.get("meta", {}).get("ext", {}) if isinstance(ref_object.get("meta", {}).get("ext", {}), dict) else {}
+    structure_ext = ref_object.get("structure", {}).get("ext", {}) if isinstance(ref_object.get("structure", {}).get("ext", {}), dict) else {}
+    ext = ref_object.get("ext", {}) if isinstance(ref_object.get("ext", {}), dict) else {}
+    source = ref_object.get("source", {}) if isinstance(ref_object.get("source", {}), dict) else {}
+
+    candidates = []
+    if obj_type == "em":
+        candidates.append(memory.get("memory_id", ""))
+        candidates.append(ref_object.get("id", ""))
+    candidates.extend(
+        [
+            memory.get("memory_id", ""),
+            meta_ext.get("source_em_id", ""),
+            structure_ext.get("source_em_id", ""),
+            ext.get("source_em_id", ""),
+            meta_ext.get("anchor_memory_id", ""),
+            structure_ext.get("anchor_memory_id", ""),
+            ext.get("anchor_memory_id", ""),
+            meta_ext.get("memory_id", ""),
+            structure_ext.get("memory_id", ""),
+            ext.get("memory_id", ""),
+            source.get("origin_id", ""),
+        ]
+    )
+    for raw in candidates:
+        text = str(raw or "").strip()
+        if text.startswith("em_"):
+            return text
+    return ""
+
+
+def _extract_source_memory_created_at(ref_object: dict) -> int:
+    memory = ref_object.get("memory", {}) if isinstance(ref_object.get("memory", {}), dict) else {}
+    meta_ext = ref_object.get("meta", {}).get("ext", {}) if isinstance(ref_object.get("meta", {}).get("ext", {}), dict) else {}
+    structure_ext = ref_object.get("structure", {}).get("ext", {}) if isinstance(ref_object.get("structure", {}).get("ext", {}), dict) else {}
+    ext = ref_object.get("ext", {}) if isinstance(ref_object.get("ext", {}), dict) else {}
+    candidates = [
+        memory.get("memory_created_at", 0),
+        memory.get("source_memory_created_at", 0),
+        meta_ext.get("source_memory_created_at", 0),
+        structure_ext.get("source_memory_created_at", 0),
+        ext.get("source_memory_created_at", 0),
+        meta_ext.get("memory_created_at", 0),
+        structure_ext.get("memory_created_at", 0),
+        ext.get("memory_created_at", 0),
+    ]
+    for raw in candidates:
+        try:
+            value = int(raw or 0)
+        except Exception:
+            value = 0
+        if value > 0:
+            return value
+    return 0
+
+
+def _build_ref_alias_ids(
+    ref_object: dict,
+    *,
+    obj_id: str,
+    obj_type: str,
+    source_em_id: str = "",
+    residual_meta: dict[str, Any] | None = None,
+) -> list[str]:
+    aliases: list[str] = []
+
+    def _push(raw: Any) -> None:
+        value = str(raw or "").strip()
+        if value and value not in aliases:
+            aliases.append(value)
+
+    should_alias_source_em = _should_alias_source_em_id(
+        ref_object,
+        obj_type=obj_type,
+        source_em_id=source_em_id,
+        residual_meta=residual_meta,
+    )
+
+    _push(obj_id)
+    for raw in list(ref_object.get("ref_alias_ids", []) or []):
+        alias_id = str(raw or "").strip()
+        if alias_id.startswith("em_") and not (should_alias_source_em and alias_id == source_em_id):
+            continue
+        _push(alias_id)
+
+    if should_alias_source_em:
+        _push(source_em_id)
+    return aliases
+
+
+def _should_alias_source_em_id(
+    ref_object: dict,
+    *,
+    obj_type: str,
+    source_em_id: str = "",
+    residual_meta: dict[str, Any] | None = None,
+) -> bool:
+    if obj_type != "st":
+        return False
+    if not str(source_em_id or "").startswith("em_"):
+        return False
+    meta_ext = ref_object.get("meta", {}).get("ext", {}) if isinstance(ref_object.get("meta", {}).get("ext", {}), dict) else {}
+    item_ext = ref_object.get("ext", {}) if isinstance(ref_object.get("ext", {}), dict) else {}
+    source = ref_object.get("source", {}) if isinstance(ref_object.get("source", {}), dict) else {}
+    source_interface = str(source.get("interface", "") or "").strip()
+    return str(
+        meta_ext.get("memory_projection_object_type_actual", "")
+        or item_ext.get("memory_projection_object_type_actual", "")
+        or ""
+    ) == "st" and source_interface == "make_runtime_memory_object"
+
+
+def _normalize_residual_kind(
+    ref_object: dict,
+    *,
+    residual_meta: dict[str, Any] | None = None,
+    source_em_id: str = "",
+) -> str:
+    residual_kind = str((residual_meta or {}).get("residual_origin_kind", "") or "").strip()
+    if source_em_id or str(ref_object.get("object_type", "") or "").strip() == "em":
+        return "memory"
+    if "memory" in residual_kind:
+        return "memory"
+    if residual_kind:
+        return "structure"
+    return ""
+
+
+def _build_runtime_meta_ext(ref_object: dict) -> dict:
+    """Preserve lightweight runtime metadata needed by later modules."""
+    result: dict[str, Any] = {}
+
+    meta = ref_object.get("meta", {})
+    if isinstance(meta, dict):
+        meta_ext = meta.get("ext", {})
+        if isinstance(meta_ext, dict):
+            result.update(copy.deepcopy(meta_ext))
+
+    structure = ref_object.get("structure", {})
+    if isinstance(structure, dict):
+        structure_ext = structure.get("ext", {})
+        if isinstance(structure_ext, dict):
+            if "cognitive_stitching" in structure_ext and isinstance(structure_ext.get("cognitive_stitching"), dict):
+                result.setdefault("cognitive_stitching", copy.deepcopy(structure_ext.get("cognitive_stitching", {})))
+
+    return result
 
 
 def _extract_ref_object_display(ref_object: dict | None) -> str:
@@ -512,6 +910,13 @@ def _build_semantic_labels(
         labels["memory_id"] = str(memory.get("memory_id", "") or ref_object.get("id", ""))
         labels["content"] = _extract_object_content_token(ref_object)
         labels["backing_structure_id"] = str(memory.get("backing_structure_id", ""))
+    elif obj_type == "action_node":
+        ext = ref_object.get("ext", {}) if isinstance(ref_object.get("ext", {}), dict) else {}
+        meta_ext = ref_object.get("meta", {}).get("ext", {}) if isinstance(ref_object.get("meta", {}).get("ext", {}), dict) else {}
+        labels["content"] = _extract_object_content_token(ref_object)
+        labels["action_kind"] = str(meta_ext.get("action_kind", ext.get("action_kind", ref_object.get("sub_type", ""))) or "")
+        labels["target_ref_object_id"] = str(meta_ext.get("target_ref_object_id", ext.get("target_ref_object_id", "")) or "")
+        labels["target_item_id"] = str(meta_ext.get("target_item_id", ext.get("target_item_id", "")) or "")
     else:
         labels["content"] = _extract_object_content_token(ref_object)
 
@@ -541,7 +946,7 @@ def _build_sa_semantic_signature(
             value_token = content_token
 
         parent_obj = _extract_parent_feature_object(ref_object, object_lookup=object_lookup)
-        parent_token = _build_feature_semantic_token(parent_obj) if parent_obj else ""
+        parent_token = _build_feature_semantic_token(parent_obj) if parent_obj else _fallback_parent_feature_token(ref_object)
         return "|".join(
             [
                 "sa",
@@ -561,6 +966,40 @@ def _build_sa_semantic_signature(
     # 否则会导致同一个“你好”因为来源不同而在状态池里出现多个对象（用户验收阻塞点）。
     del modality, sub_type, value_type  # keep signature stable, ignore source differences
     return _build_feature_identity_signature(content_token)
+
+
+def _fallback_parent_feature_token(ref_object: dict) -> str:
+    meta = ref_object.get("meta", {}) if isinstance(ref_object.get("meta", {}), dict) else {}
+    meta_ext = meta.get("ext", {}) if isinstance(meta.get("ext", {}), dict) else {}
+    source = ref_object.get("source", {}) if isinstance(ref_object.get("source", {}), dict) else {}
+    parent_ids = list(source.get("parent_ids", []) or [])
+    parent_display = str(
+        meta_ext.get("bound_anchor_display", "")
+        or meta_ext.get("context_text", "")
+        or meta_ext.get("context_display_text", "")
+        or ""
+    ).strip()
+    parent_ref_type = str(
+        meta_ext.get("bound_anchor_ref_object_type", "")
+        or source.get("context_ref_object_type", "")
+        or ""
+    ).strip()
+    parent_ref_id = str(
+        meta_ext.get("bound_anchor_ref_object_id", "")
+        or source.get("context_ref_object_id", "")
+        or (parent_ids[0] if parent_ids else "")
+    ).strip()
+    parent_token = _normalize_text_fragment(parent_display or parent_ref_id)
+    if not parent_token:
+        return ""
+    return "|".join(
+        [
+            "feature",
+            parent_ref_type or "unknown",
+            "runtime_anchor",
+            parent_token,
+        ]
+    )
 
 
 def _build_feature_identity_signature(content_signature: Any) -> str:

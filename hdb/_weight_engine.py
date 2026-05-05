@@ -47,6 +47,34 @@ class WeightEngine:
         fatigue_factor = 1.0 / (1.0 + max(0.0, fatigue))
         return round(max(self._config.get("weight_floor", 0.05), base_weight * recent_gain * fatigue_factor * modulation), 8)
 
+    def update_base_weight_by_support(
+        self,
+        *,
+        current_base_weight: float | None,
+        reality_support: float,
+        virtual_support: float,
+        match_score: float = 1.0,
+    ) -> float:
+        storage_floor = max(0.0, float(self._config.get("base_weight_storage_floor", 0.0) or 0.0))
+        default_base = max(0.0, float(self._config.get("base_weight_new_default", 0.0) or 0.0))
+        try:
+            current = float(current_base_weight) if current_base_weight is not None else default_base
+        except Exception:
+            current = default_base
+        current = max(storage_floor, current)
+        score = max(0.0, float(match_score))
+        er_gain = max(0.0, float(reality_support)) * score * float(self._config.get("base_weight_er_gain", 0.08))
+        ev_wear_strength = max(0.0, float(virtual_support)) * score * float(self._config.get("base_weight_ev_wear", 0.03))
+        wear_mode = str(self._config.get("base_weight_ev_wear_mode", "multiplicative") or "multiplicative").strip().lower()
+        worn = current
+        if ev_wear_strength > 0.0:
+            if wear_mode == "subtractive":
+                worn = max(storage_floor, current - ev_wear_strength)
+            else:
+                wear_factor = math.exp(-ev_wear_strength)
+                worn = storage_floor + max(0.0, current - storage_floor) * wear_factor
+        return round(max(storage_floor, worn + er_gain), 8)
+
     def decay_structure(self, structure_obj: dict, now_ms: int | None = None, round_step: int = 1) -> dict:
         stats = structure_obj.setdefault("stats", {})
         now_ms = now_ms or int(time.time() * 1000)
@@ -96,11 +124,12 @@ class WeightEngine:
         now_ms = now_ms or int(time.time() * 1000)
         self.decay_structure(structure_obj, now_ms=now_ms, round_step=1)
 
-        er_gain = max(0.0, reality_support) * max(0.0, match_score) * float(self._config.get("base_weight_er_gain", 0.08))
-        ev_wear = max(0.0, virtual_support) * max(0.0, match_score) * float(self._config.get("base_weight_ev_wear", 0.03))
-        weight_floor = float(self._config.get("weight_floor", 0.05))
-
-        stats["base_weight"] = round(max(weight_floor, float(stats.get("base_weight", 1.0)) + er_gain - ev_wear), 8)
+        stats["base_weight"] = self.update_base_weight_by_support(
+            current_base_weight=stats.get("base_weight", None),
+            reality_support=reality_support,
+            virtual_support=virtual_support,
+            match_score=match_score,
+        )
         self.refresh_recent_state(stats, now_ms=now_ms, strength=max(self._recency_refresh_floor(), float(match_score)))
         self.apply_match_fatigue(stats, strength=match_score)
         stats["runtime_er"] = round(max(0.0, float(stats.get("runtime_er", 0.0)) + max(0.0, reality_support)), 8)
@@ -120,7 +149,12 @@ class WeightEngine:
         stats = group_obj.setdefault("stats", {})
         now_ms = now_ms or int(time.time() * 1000)
         self.decay_group(group_obj, now_ms=now_ms, round_step=1)
-        stats["base_weight"] = round(max(float(self._config.get("weight_floor", 0.05)), float(stats.get("base_weight", 1.0)) + float(self._config.get("base_weight_er_gain", 0.08)) * max(0.25, match_score)), 8)
+        stats["base_weight"] = self.update_base_weight_by_support(
+            current_base_weight=stats.get("base_weight", None),
+            reality_support=max(0.25, match_score),
+            virtual_support=0.0,
+            match_score=1.0,
+        )
         self.refresh_recent_state(stats, now_ms=now_ms, strength=max(self._recency_refresh_floor(), float(match_score)))
         self.apply_match_fatigue(stats, strength=match_score)
         stats["last_matched_at"] = now_ms
@@ -147,7 +181,7 @@ class WeightEngine:
 
     def entry_runtime_weight(self, entry: dict) -> float:
         return self.compute_runtime_weight(
-            base_weight=float(entry.get("base_weight", 1.0)),
+            base_weight=float(entry.get("base_weight", 0.0)),
             recent_gain=float(entry.get("recent_gain", 1.0)),
             fatigue=float(entry.get("fatigue", 0.0)),
         )

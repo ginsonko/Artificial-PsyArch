@@ -79,7 +79,8 @@ class BindingEngine:
 
         # 将属性SA记录到绑定状态
         target_item["binding_state"]["bound_attribute_sa_ids"].append(attr_id)
-        self._append_bound_attribute_snapshot(target_item, attribute_sa)
+        bind_info = self._append_bound_attribute_snapshot(target_item, attribute_sa, now_ms=now_ms, tick_number=tick_number)
+        self._maybe_transfer_dissonance_to_correctness(target_item=target_item, bind_info=bind_info, now_ms=now_ms, tick_number=tick_number)
         target_item["updated_at"] = now_ms
 
         if self._config.get("allow_auto_create_csa_on_attribute_bind", True):
@@ -196,11 +197,8 @@ class BindingEngine:
         target_item["updated_at"] = now_ms
         target_item["lifecycle"]["last_active_tick"] = tick_number
 
-        # 将属性SA快照存入ext
-        ext_attrs = target_item.get("ext", {}).get("bound_attributes", [])
-        ext_attrs.append(attribute_sa)
-        target_item.setdefault("ext", {})["bound_attributes"] = ext_attrs
-        self._append_bound_attribute_snapshot(target_item, attribute_sa)
+        bind_info = self._append_bound_attribute_snapshot(target_item, attribute_sa, now_ms=now_ms, tick_number=tick_number)
+        self._maybe_transfer_dissonance_to_correctness(target_item=target_item, bind_info=bind_info, now_ms=now_ms, tick_number=tick_number)
 
         return {
             "created_new_csa": False,
@@ -211,6 +209,19 @@ class BindingEngine:
 
     def _should_deduplicate(self, target_item: dict, attr_id: str, attribute_sa: dict) -> bool:
         """检查是否应去重。"""
+        # Replace-by-name semantics means binding the same attribute_name again is an upsert/refresh.
+        # 同名属性替换语义下，同一个属性重复绑定应视为刷新，而不是“去重跳过”。
+        replace_by_name = bool(self._config.get("attribute_bind_replace_by_attribute_name", True))
+        if replace_by_name and isinstance(attribute_sa, dict):
+            content = attribute_sa.get("content", {}) if isinstance(attribute_sa.get("content", {}), dict) else {}
+            name = str(content.get("attribute_name", "") or "").strip()
+            if not name:
+                raw = str(content.get("raw", "") or "")
+                if ":" in raw:
+                    name = raw.split(":", 1)[0].strip()
+            if name:
+                return False
+
         existing_ids = target_item.get("binding_state", {}).get("bound_attribute_sa_ids", [])
 
         if self._config.get("attribute_bind_deduplicate_by_id", True):
@@ -227,8 +238,14 @@ class BindingEngine:
 
         return False
 
-    def _append_bound_attribute_snapshot(self, target_item: dict, attribute_sa: dict):
-        """把绑定属性写回目标对象，便于快照与交互解释。"""
+    def _append_bound_attribute_snapshot(self, target_item: dict, attribute_sa: dict, *, now_ms: int, tick_number: int) -> dict:
+        """
+        把绑定属性写回目标对象，便于快照与交互解释。
+
+        Returns:
+          A small before/after energy dict to support conservation-style transforms
+          (e.g., dissonance drop -> correctness rise).
+        """
         attribute_display = self._extract_attribute_display(attribute_sa)
         content = attribute_sa.get("content", {}) if isinstance(attribute_sa.get("content", {}), dict) else {}
         attr_name = str(content.get("attribute_name", "") or "").strip()
@@ -237,55 +254,121 @@ class BindingEngine:
             if ":" in raw:
                 attr_name = raw.split(":", 1)[0].strip()
 
+        # Energy update mode (optional):
+        # - set/replace: replace the attribute row (default)
+        # - add: accumulate incoming energy onto existing row (for "slow variables")
+        # - max: keep max(er/ev) (debug-only)
+        update_mode = ""
+        try:
+            meta = attribute_sa.get("meta", {}) if isinstance(attribute_sa.get("meta", {}), dict) else {}
+            extm = meta.get("ext", {}) if isinstance(meta.get("ext", {}), dict) else {}
+            update_mode = str(extm.get("energy_update_mode", extm.get("update_mode", "")) or "").strip().lower()
+        except Exception:
+            update_mode = ""
+        if update_mode not in {"", "set", "replace", "add", "max"}:
+            update_mode = ""
+
+        def _attr_name_of(row: dict) -> str:
+            c2 = row.get("content", {}) if isinstance(row.get("content", {}), dict) else {}
+            n2 = str(c2.get("attribute_name", "") or "").strip()
+            if n2:
+                return n2
+            raw2 = str(c2.get("raw", "") or "")
+            if ":" in raw2:
+                return raw2.split(":", 1)[0].strip()
+            return ""
+
+        def _energy_of(row: dict | None) -> tuple[float, float]:
+            if not isinstance(row, dict):
+                return 0.0, 0.0
+            e2 = row.get("energy", {}) if isinstance(row.get("energy", {}), dict) else {}
+            try:
+                return float(e2.get("er", 0.0) or 0.0), float(e2.get("ev", 0.0) or 0.0)
+            except Exception:
+                return 0.0, 0.0
+
         ext = target_item.setdefault("ext", {})
         ext_attrs = list(ext.get("bound_attributes", []) or [])
-        # Replace-by-name (recommended) / 按属性名替换（推荐）
-        # 目的：避免同一个目标对象出现大量重复 runtime_attrs，导致前端难以验收。
-        # 例如：时间感受、违和感、奖励信号等通常希望“同名只保留最新一条”。
-        #
-        # 默认策略：若 attribute_name 可解析，则同名属性会被替换为最新绑定。
-        replace_by_name = bool(self._config.get("attribute_bind_replace_by_attribute_name", True))
-        removed_ids: list[str] = []
-        if replace_by_name and attr_name:
-            kept = []
-            for existing in ext_attrs:
+
+        existing_idx: int | None = None
+        existing_row: dict | None = None
+        if attr_name:
+            for idx, existing in enumerate(ext_attrs):
                 if not isinstance(existing, dict):
                     continue
-                ex_content = existing.get("content", {}) if isinstance(existing.get("content", {}), dict) else {}
-                ex_name = str(ex_content.get("attribute_name", "") or "").strip()
-                if not ex_name:
-                    ex_raw = str(ex_content.get("raw", "") or "")
-                    if ":" in ex_raw:
-                        ex_name = ex_raw.split(":", 1)[0].strip()
-                if ex_name and ex_name == attr_name:
-                    ex_id = str(existing.get("id", "") or "")
-                    if ex_id:
-                        removed_ids.append(ex_id)
-                    continue
-                kept.append(existing)
-            ext_attrs = kept
+                if _attr_name_of(existing) == attr_name:
+                    existing_idx = idx
+                    existing_row = existing
+                    break
 
-        # Upsert by id / 按 id 去重追加（保持原有行为）
-        attr_id = str(attribute_sa.get("id", "") or "")
-        if not any(isinstance(existing, dict) and str(existing.get("id", "") or "") == attr_id for existing in ext_attrs):
-            ext_attrs.append(attribute_sa)
+        before_er, before_ev = _energy_of(existing_row)
+
+        replace_by_name = bool(self._config.get("attribute_bind_replace_by_attribute_name", True))
+        removed_ids: list[str] = []
+
+        if update_mode in {"add", "max"} and existing_row is not None and attr_name:
+            inc_er, inc_ev = _energy_of(attribute_sa)
+            if update_mode == "add":
+                new_er = before_er + inc_er
+                new_ev = before_ev + inc_ev
+            else:
+                new_er = max(before_er, inc_er)
+                new_ev = max(before_ev, inc_ev)
+            new_er = round(float(new_er), 8)
+            new_ev = round(float(new_ev), 8)
+            existing_row["energy"] = {"er": new_er, "ev": new_ev}
+            existing_row["updated_at"] = int(max(int(existing_row.get("updated_at", 0) or 0), now_ms))
+            if isinstance(existing_row.get("content", {}), dict):
+                total = float(new_er) + float(new_ev)
+                existing_row["content"]["attribute_value"] = float(round(total, 8))
+                existing_row["content"]["raw"] = f"{attr_name}:{round(total, 6)}"
+                label_map = {
+                    "cfs_correctness": "正确感",
+                    "cfs_dissonance": "违和感",
+                    "cfs_pressure": "压力",
+                    "cfs_expectation": "期待",
+                    "cfs_grasp": "把握感/置信度",
+                }
+                label = label_map.get(attr_name, attr_name)
+                existing_row["content"]["display"] = f"{label}:{round(total, 3)}"
+            if existing_idx is not None:
+                ext_attrs[existing_idx] = existing_row
+        else:
+            # Replace-by-name (recommended) / 按属性名替换（推荐）
+            if replace_by_name and attr_name:
+                kept = []
+                for existing in ext_attrs:
+                    if not isinstance(existing, dict):
+                        continue
+                    if _attr_name_of(existing) == attr_name:
+                        ex_id = str(existing.get("id", "") or "")
+                        if ex_id:
+                            removed_ids.append(ex_id)
+                        continue
+                    kept.append(existing)
+                ext_attrs = kept
+
+            # Upsert by id / 按 id 去重追加（保持原有行为）
+            attr_id = str(attribute_sa.get("id", "") or "")
+            if not any(isinstance(existing, dict) and str(existing.get("id", "") or "") == attr_id for existing in ext_attrs):
+                ext_attrs.append(attribute_sa)
+
         ext["bound_attributes"] = ext_attrs
 
         # Keep binding_state ids in sync (so it won't grow forever).
-        # 同步 binding_state.bound_attribute_sa_ids（防止无限增长）。
         bs = target_item.setdefault("binding_state", {})
         if isinstance(bs, dict):
             bs_ids = [str(x) for x in (bs.get("bound_attribute_sa_ids", []) or []) if str(x)]
-            # Drop removed ids + keep only ids that still exist in ext_attrs.
             alive_ids = {str(a.get("id", "") or "") for a in ext_attrs if isinstance(a, dict) and str(a.get("id", "") or "")}
             bs_ids = [x for x in bs_ids if x in alive_ids and x not in set(removed_ids)]
-            # Ensure current attr id is present.
+            # Ensure current attr id is present (set-mode).
+            attr_id = str(attribute_sa.get("id", "") or "")
             if attr_id and attr_id in alive_ids and attr_id not in bs_ids:
                 bs_ids.append(attr_id)
             bs["bound_attribute_sa_ids"] = bs_ids
 
-        ref_snapshot = target_item.setdefault("ref_snapshot", {})
         # Rebuild display list from ext_attrs so "replace_by_name" can remove old displays.
+        ref_snapshot = target_item.setdefault("ref_snapshot", {})
         bound_displays = []
         for ex in ext_attrs:
             if not isinstance(ex, dict):
@@ -304,6 +387,66 @@ class BindingEngine:
             detail_parts.append(f"runtime_attrs={', '.join(bound_displays[:4])}")
         if detail_parts:
             ref_snapshot["content_display_detail"] = " | ".join(detail_parts)
+
+        after_row = None
+        if attr_name:
+            for existing in ext_attrs:
+                if not isinstance(existing, dict):
+                    continue
+                if _attr_name_of(existing) == attr_name:
+                    after_row = existing
+                    break
+        after_er, after_ev = _energy_of(after_row)
+        # Prefer returning a stable id if present.
+        attr_id = str(attribute_sa.get("id", "") or "")
+        return {
+            "attribute_name": attr_name,
+            "attribute_id": attr_id,
+            "update_mode": update_mode or "set",
+            "before_energy": {"er": round(float(before_er), 8), "ev": round(float(before_ev), 8)},
+            "after_energy": {"er": round(float(after_er), 8), "ev": round(float(after_ev), 8)},
+            "tick_number": int(tick_number),
+            "updated_at": int(now_ms),
+            "display": str(attribute_display or ""),
+        }
+
+    def _maybe_transfer_dissonance_to_correctness(self, *, target_item: dict, bind_info: dict, now_ms: int, tick_number: int) -> None:
+        """当违和感下降时，把下降量等量转移为正确感（MVP 守恒式转换）。"""
+        if not bool(self._config.get("enable_cfs_correctness_transfer", True)):
+            return
+        info = bind_info if isinstance(bind_info, dict) else {}
+        dis_name = str(self._config.get("cfs_dissonance_attribute_name", "cfs_dissonance") or "cfs_dissonance").strip() or "cfs_dissonance"
+        if str(info.get("attribute_name", "") or "") != dis_name:
+            return
+
+        before = info.get("before_energy", {}) if isinstance(info.get("before_energy", {}), dict) else {}
+        after = info.get("after_energy", {}) if isinstance(info.get("after_energy", {}), dict) else {}
+        try:
+            # Convention: dissonance stored in EV channel.
+            drop = float(before.get("ev", 0.0) or 0.0) - float(after.get("ev", 0.0) or 0.0)
+        except Exception:
+            drop = 0.0
+        if drop <= 1e-12:
+            return
+
+        correct_name = str(self._config.get("cfs_correctness_attribute_name", "cfs_correctness") or "cfs_correctness").strip() or "cfs_correctness"
+        target_ref_id = str(target_item.get("ref_object_id", "") or target_item.get("id", "") or "").strip()
+        attr_id = f"sa_iesm_attr_{correct_name}_{target_ref_id or 'item'}"
+        correctness_attr = {
+            "id": attr_id,
+            "object_type": "sa",
+            "content": {
+                "raw": f"{correct_name}:{round(float(drop), 6)}",
+                "display": f"正确感:+{round(float(drop), 3)}",
+                "value_type": "numerical",
+                "attribute_name": correct_name,
+                "attribute_value": float(round(float(drop), 8)),
+            },
+            "stimulus": {"role": "attribute", "modality": "internal"},
+            "energy": {"er": float(round(float(drop), 8)), "ev": 0.0},
+            "meta": {"ext": {"energy_update_mode": "add", "derived_from": "cfs_dissonance_drop", "created_at_ms": int(now_ms), "tick_number": int(tick_number)}},
+        }
+        self._append_bound_attribute_snapshot(target_item, correctness_attr, now_ms=now_ms, tick_number=tick_number)
 
     @staticmethod
     def _extract_attribute_display(attribute_sa: dict) -> str:

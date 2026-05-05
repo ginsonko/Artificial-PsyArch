@@ -1,0 +1,17 @@
+drive_decay_ratio: 0.877
+drive_max: 2.59
+max_action_nodes: 60
+max_actions_per_kind_per_tick_default: 0
+mode_attention_energy_budget_min: 0.52
+mode_attention_energy_budget_max: 22.0
+mode_attention_energy_budget_base: 5.0
+max_total_actions_per_tick: 4
+threshold_scale_by_nt:
+  DA: 0.06
+  ADR: -0.06
+  OXY: -0.05
+  SER: 0.06
+  END: -0.03
+  COR: 0.3
+  NOV: -0.08
+  FOC: -0.1

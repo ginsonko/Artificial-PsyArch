@@ -1,0 +1,2200 @@
+{
+  "schema_version": "v1",
+  "updated_at_ms": 1778000253889,
+  "points": [
+    {
+      "point_id": "rb_1778000253877_54",
+      "created_at_ms": 1778000253882,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 866.875,
+        "raw_mean": 286.45,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777944242199_929",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "cam_item_count"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 20.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 3654.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.05,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.973,
+        "state_pool.soft_capacity_start_items": 100.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.58,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.29,
+        "state_pool.neutralization_min_effect_threshold": 0.14,
+        "state_pool.soft_capacity_full_items": 800.0,
+        "attention.max_cam_items": 18.0,
+        "hdb.internal_resolution_flat_unit_cap_per_structure": 259.0,
+        "hdb.internal_resolution_detail_budget_base": 98.0,
+        "action.drive_decay_ratio": 0.852,
+        "action.drive_max": 3.0300000000000002,
+        "iesm.rules.innate_action_recall_from_expect_pressure.cooldown_ticks": 1.0,
+        "attention.attention_filter_gain_floor": 0.58
+      }
+    },
+    {
+      "point_id": "rb_1777944242169_53",
+      "created_at_ms": 1777944242173,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 445.6,
+        "raw_mean": 171.225,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777867507417_809",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "attention_net_delta_energy"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 20.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 3654.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.05,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.973,
+        "state_pool.soft_capacity_start_items": 100.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.58,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.29,
+        "state_pool.neutralization_min_effect_threshold": 0.14,
+        "state_pool.soft_capacity_full_items": 800.0,
+        "attention.max_cam_items": 17.0,
+        "hdb.internal_resolution_flat_unit_cap_per_structure": 259.0,
+        "hdb.internal_resolution_detail_budget_base": 98.0,
+        "action.drive_decay_ratio": 0.852,
+        "action.drive_max": 3.0300000000000002,
+        "iesm.rules.innate_action_recall_from_expect_pressure.cooldown_ticks": 1.0,
+        "attention.attention_filter_gain_floor": 0.58
+      }
+    },
+    {
+      "point_id": "rb_1777867507394_52",
+      "created_at_ms": 1777867507399,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 1030.9,
+        "raw_mean": 355.9,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777831201497_424",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "internal_sa_count"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 20.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 3654.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.05,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.973,
+        "state_pool.soft_capacity_start_items": 207.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.58,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.29,
+        "state_pool.neutralization_min_effect_threshold": 0.14,
+        "state_pool.soft_capacity_full_items": 421.0,
+        "attention.max_cam_items": 17.0,
+        "hdb.internal_resolution_flat_unit_cap_per_structure": 259.0,
+        "hdb.internal_resolution_detail_budget_base": 98.0,
+        "action.drive_decay_ratio": 0.852,
+        "action.drive_max": 3.0300000000000002,
+        "iesm.rules.innate_action_recall_from_expect_pressure.cooldown_ticks": 1.0
+      }
+    },
+    {
+      "point_id": "rb_1777831201472_51",
+      "created_at_ms": 1777831201475,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 586.7142857142857,
+        "raw_mean": 41.57142857142857,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777748394714_916",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "internal_sa_count"
+          },
+          {
+            "trial_id": "trial_1777748394761_917",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "pool_active_item_count"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 20.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 3654.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.05,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.971,
+        "state_pool.soft_capacity_start_items": 207.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.58,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.29,
+        "state_pool.neutralization_min_effect_threshold": 0.14,
+        "state_pool.soft_capacity_full_items": 421.0,
+        "attention.max_cam_items": 17.0,
+        "hdb.internal_resolution_flat_unit_cap_per_structure": 259.0,
+        "hdb.internal_resolution_detail_budget_base": 98.0,
+        "action.drive_decay_ratio": 0.852,
+        "action.drive_max": 3.0300000000000002,
+        "iesm.rules.innate_action_recall_from_expect_pressure.cooldown_ticks": 1.0
+      }
+    },
+    {
+      "point_id": "rb_1777748394701_50",
+      "created_at_ms": 1777748394704,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 306.25,
+        "raw_mean": 50.5,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777740586297_632",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "internal_sa_count"
+          },
+          {
+            "trial_id": "trial_1777740586343_633",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "pool_active_item_count"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 20.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 3654.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.05,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.971,
+        "state_pool.soft_capacity_start_items": 207.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.58,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.29,
+        "state_pool.neutralization_min_effect_threshold": 0.14,
+        "state_pool.soft_capacity_full_items": 421.0,
+        "attention.max_cam_items": 17.0,
+        "hdb.internal_resolution_flat_unit_cap_per_structure": 259.0,
+        "hdb.internal_resolution_detail_budget_base": 98.0,
+        "action.drive_decay_ratio": 0.852,
+        "action.drive_max": 3.0300000000000002,
+        "iesm.rules.innate_action_recall_from_expect_pressure.cooldown_ticks": 1.0
+      }
+    },
+    {
+      "point_id": "rb_1777740586284_49",
+      "created_at_ms": 1777740586286,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 486.025,
+        "raw_mean": 38.575,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777735189391_439",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "internal_sa_count"
+          },
+          {
+            "trial_id": "trial_1777735189430_440",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "pool_active_item_count"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 20.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 3654.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.05,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.97,
+        "state_pool.soft_capacity_start_items": 207.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.58,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.29,
+        "state_pool.neutralization_min_effect_threshold": 0.14,
+        "state_pool.soft_capacity_full_items": 421.0,
+        "attention.max_cam_items": 17.0,
+        "hdb.internal_resolution_flat_unit_cap_per_structure": 259.0,
+        "hdb.internal_resolution_detail_budget_base": 98.0,
+        "action.drive_decay_ratio": 0.852,
+        "action.drive_max": 3.0300000000000002,
+        "iesm.rules.innate_action_recall_from_expect_pressure.cooldown_ticks": 1.0
+      }
+    },
+    {
+      "point_id": "rb_1777735189379_48",
+      "created_at_ms": 1777735189381,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 370.8666666666667,
+        "raw_mean": 32.8,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777714142937_940",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "internal_sa_count"
+          },
+          {
+            "trial_id": "trial_1777714142998_941",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "pool_active_item_count"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 20.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 3654.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.05,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.969,
+        "state_pool.soft_capacity_start_items": 206.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.58,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.29,
+        "state_pool.neutralization_min_effect_threshold": 0.14,
+        "state_pool.soft_capacity_full_items": 421.0,
+        "attention.max_cam_items": 17.0,
+        "hdb.internal_resolution_flat_unit_cap_per_structure": 259.0,
+        "hdb.internal_resolution_detail_budget_base": 98.0,
+        "action.drive_decay_ratio": 0.852,
+        "action.drive_max": 3.0300000000000002,
+        "iesm.rules.innate_action_recall_from_expect_pressure.cooldown_ticks": 1.0
+      }
+    },
+    {
+      "point_id": "rb_1777714142910_47",
+      "created_at_ms": 1777714142913,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 580.825,
+        "raw_mean": 68.875,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777629751073_976",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "action_drive_active_count"
+          },
+          {
+            "trial_id": "trial_1777629751652_977",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "action_executed_recall"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 20.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 3654.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.05,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.969,
+        "state_pool.soft_capacity_start_items": 204.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.58,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.29,
+        "state_pool.neutralization_min_effect_threshold": 0.14,
+        "state_pool.soft_capacity_full_items": 421.0,
+        "attention.max_cam_items": 17.0,
+        "hdb.internal_resolution_flat_unit_cap_per_structure": 259.0,
+        "hdb.internal_resolution_detail_budget_base": 98.0,
+        "action.drive_decay_ratio": 0.852,
+        "action.drive_max": 3.0300000000000002,
+        "iesm.rules.innate_action_recall_from_expect_pressure.cooldown_ticks": 1.0
+      }
+    },
+    {
+      "point_id": "rb_1777629751064_46",
+      "created_at_ms": 1777629751065,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 455.675,
+        "raw_mean": 126.85,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777618580999_443",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "action_drive_max"
+          },
+          {
+            "trial_id": "trial_1777618581665_444",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "action_executed_count_source_visible"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 20.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 3654.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.05,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.969,
+        "state_pool.soft_capacity_start_items": 204.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.58,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.29,
+        "state_pool.neutralization_min_effect_threshold": 0.14,
+        "state_pool.soft_capacity_full_items": 421.0,
+        "attention.max_cam_items": 17.0,
+        "hdb.internal_resolution_flat_unit_cap_per_structure": 259.0,
+        "hdb.internal_resolution_detail_budget_base": 98.0,
+        "action.drive_decay_ratio": 0.844,
+        "action.drive_max": 3.0300000000000002
+      }
+    },
+    {
+      "point_id": "rb_1777618580979_45",
+      "created_at_ms": 1777618580983,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 633.1,
+        "raw_mean": 206.4,
+        "evaluated_trials": []
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 20.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 3654.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.05,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.969,
+        "state_pool.soft_capacity_start_items": 204.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.58,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.29,
+        "state_pool.neutralization_min_effect_threshold": 0.14,
+        "state_pool.soft_capacity_full_items": 421.0,
+        "attention.max_cam_items": 17.0,
+        "hdb.internal_resolution_flat_unit_cap_per_structure": 259.0,
+        "hdb.internal_resolution_detail_budget_base": 98.0
+      }
+    },
+    {
+      "point_id": "rb_1777563348354_44",
+      "created_at_ms": 1777563348355,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 1421.95,
+        "raw_mean": 27.45,
+        "evaluated_trials": []
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 20.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 3654.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.05,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.967,
+        "state_pool.soft_capacity_start_items": 204.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.58,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.29,
+        "state_pool.neutralization_min_effect_threshold": 0.14,
+        "state_pool.soft_capacity_full_items": 421.0,
+        "attention.max_cam_items": 17.0,
+        "hdb.internal_resolution_flat_unit_cap_per_structure": 259.0,
+        "hdb.internal_resolution_detail_budget_base": 98.0
+      }
+    },
+    {
+      "point_id": "rb_1777297302580_43",
+      "created_at_ms": 1777297302582,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 5986.35,
+        "raw_mean": 140.875,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777296824956_543",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "internal_sa_count"
+          },
+          {
+            "trial_id": "trial_1777296824988_544",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "pool_active_item_count"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 20.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 3775.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.05,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.967,
+        "state_pool.soft_capacity_start_items": 204.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.5700000000000001,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.29,
+        "state_pool.neutralization_min_effect_threshold": 0.14,
+        "state_pool.soft_capacity_full_items": 421.0,
+        "observatory.induction_source_max_items": 20.0,
+        "attention.max_cam_items": 17.0,
+        "hdb.internal_resolution_flat_unit_cap_per_structure": 259.0,
+        "hdb.internal_resolution_detail_budget_base": 98.0
+      }
+    },
+    {
+      "point_id": "rb_1777296824945_42",
+      "created_at_ms": 1777296824947,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 4808.575,
+        "raw_mean": 156.575,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777296020348_526",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "induction_source_available_st_count"
+          },
+          {
+            "trial_id": "trial_1777296020416_527",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "memory_feedback_structure_projection_total_ev"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 20.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 3775.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.05,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.967,
+        "state_pool.soft_capacity_start_items": 203.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.5700000000000001,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.29,
+        "state_pool.neutralization_min_effect_threshold": 0.14,
+        "state_pool.soft_capacity_full_items": 421.0,
+        "observatory.induction_source_max_items": 20.0,
+        "attention.max_cam_items": 17.0,
+        "hdb.internal_resolution_flat_unit_cap_per_structure": 259.0,
+        "hdb.internal_resolution_detail_budget_base": 98.0
+      }
+    },
+    {
+      "point_id": "rb_1777296020314_41",
+      "created_at_ms": 1777296020317,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 6699.575,
+        "raw_mean": 186.75,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777292152086_563",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "pool_active_item_count"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 20.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 3775.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.05,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.967,
+        "state_pool.soft_capacity_start_items": 203.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.5700000000000001,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.27,
+        "state_pool.neutralization_min_effect_threshold": 0.14,
+        "state_pool.soft_capacity_full_items": 421.0,
+        "observatory.induction_source_max_items": 20.0,
+        "attention.max_cam_items": 17.0,
+        "hdb.internal_resolution_flat_unit_cap_per_structure": 259.0,
+        "hdb.internal_resolution_detail_budget_base": 98.0
+      }
+    },
+    {
+      "point_id": "rb_1777292152071_40",
+      "created_at_ms": 1777292152072,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 5300.5,
+        "raw_mean": 139.0,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777291551637_548",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "pool_active_item_count"
+          },
+          {
+            "trial_id": "trial_1777291551663_549",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "pool_total_er"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 20.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 3900.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.05,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.967,
+        "state_pool.soft_capacity_start_items": 203.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.5700000000000001,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.27,
+        "state_pool.neutralization_min_effect_threshold": 0.14,
+        "state_pool.soft_capacity_full_items": 421.0,
+        "observatory.induction_source_max_items": 20.0,
+        "attention.max_cam_items": 17.0,
+        "hdb.internal_resolution_flat_unit_cap_per_structure": 259.0,
+        "hdb.internal_resolution_detail_budget_base": 98.0
+      }
+    },
+    {
+      "point_id": "rb_1777291551623_39",
+      "created_at_ms": 1777291551625,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 5389.575,
+        "raw_mean": 129.525,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777291054842_620",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "internal_sa_count"
+          },
+          {
+            "trial_id": "trial_1777291054871_621",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "pool_active_item_count"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 20.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4024.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.05,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.967,
+        "state_pool.soft_capacity_start_items": 203.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.56,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.27,
+        "state_pool.neutralization_min_effect_threshold": 0.14,
+        "state_pool.soft_capacity_full_items": 421.0,
+        "observatory.induction_source_max_items": 20.0,
+        "attention.max_cam_items": 17.0,
+        "hdb.internal_resolution_flat_unit_cap_per_structure": 259.0,
+        "hdb.internal_resolution_detail_budget_base": 98.0
+      }
+    },
+    {
+      "point_id": "rb_1777291054834_38",
+      "created_at_ms": 1777291054835,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 4825.0,
+        "raw_mean": 128.575,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777289453847_522",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "memory_feedback_structure_projection_total_ev"
+          },
+          {
+            "trial_id": "trial_1777289453958_523",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "pool_residual_origin_item_ratio"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 20.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4024.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.05,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.966,
+        "state_pool.soft_capacity_start_items": 202.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.56,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.27,
+        "state_pool.neutralization_min_effect_threshold": 0.14,
+        "state_pool.soft_capacity_full_items": 421.0,
+        "observatory.induction_source_max_items": 20.0,
+        "attention.max_cam_items": 17.0,
+        "hdb.internal_resolution_flat_unit_cap_per_structure": 259.0,
+        "hdb.internal_resolution_detail_budget_base": 98.0
+      }
+    },
+    {
+      "point_id": "rb_1777289453822_37",
+      "created_at_ms": 1777289453825,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 4567.9,
+        "raw_mean": 103.7,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777289372958_539",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "induction_source_available_st_count"
+          },
+          {
+            "trial_id": "trial_1777289372986_540",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "pool_residual_origin_item_ratio"
+          },
+          {
+            "trial_id": "trial_1777289373013_541",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "pool_total_ev"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 19.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4024.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.05,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.966,
+        "state_pool.soft_capacity_start_items": 202.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.56,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.25,
+        "state_pool.neutralization_min_effect_threshold": 0.14,
+        "state_pool.soft_capacity_full_items": 421.0,
+        "observatory.induction_source_max_items": 20.0,
+        "attention.max_cam_items": 17.0,
+        "hdb.internal_resolution_flat_unit_cap_per_structure": 259.0,
+        "hdb.internal_resolution_detail_budget_base": 98.0
+      }
+    },
+    {
+      "point_id": "rb_1777289372950_36",
+      "created_at_ms": 1777289372951,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 3414.8064516129034,
+        "raw_mean": 161.0,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777288826947_522",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "internal_sa_count"
+          },
+          {
+            "trial_id": "trial_1777288828396_523",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "internal_sa_count"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 19.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4024.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.05,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.966,
+        "state_pool.soft_capacity_start_items": 202.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.56,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.25,
+        "state_pool.neutralization_min_effect_threshold": 0.14,
+        "state_pool.soft_capacity_full_items": 421.0,
+        "observatory.induction_source_max_items": 20.0,
+        "attention.max_cam_items": 17.0,
+        "hdb.internal_resolution_flat_unit_cap_per_structure": 259.0,
+        "hdb.internal_resolution_detail_budget_base": 98.0
+      }
+    },
+    {
+      "point_id": "rb_1777288825680_35",
+      "created_at_ms": 1777288825681,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 4018.2,
+        "raw_mean": 109.4,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777288747403_540",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "cam_item_count"
+          },
+          {
+            "trial_id": "trial_1777288747829_541",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "internal_resolution_structure_count_selected"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 19.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4024.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.05,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.966,
+        "state_pool.soft_capacity_start_items": 202.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.56,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.25,
+        "state_pool.neutralization_min_effect_threshold": 0.14,
+        "state_pool.soft_capacity_full_items": 421.0,
+        "observatory.induction_source_max_items": 20.0,
+        "attention.max_cam_items": 17.0
+      }
+    },
+    {
+      "point_id": "rb_1777288747000_34",
+      "created_at_ms": 1777288747002,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 2924.6774193548385,
+        "raw_mean": 137.5483870967742,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777287218834_539",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "internal_sa_count"
+          },
+          {
+            "trial_id": "trial_1777287219350_540",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "pool_active_item_count"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 19.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4024.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.05,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.965,
+        "state_pool.soft_capacity_start_items": 202.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.56,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.25,
+        "state_pool.neutralization_min_effect_threshold": 0.14,
+        "state_pool.soft_capacity_full_items": 421.0,
+        "observatory.induction_source_max_items": 20.0,
+        "attention.max_cam_items": 17.0
+      }
+    },
+    {
+      "point_id": "rb_1777287218327_33",
+      "created_at_ms": 1777287218328,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 3128.1612903225805,
+        "raw_mean": 145.2258064516129,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777286781189_580",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "cam_item_count"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 19.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4024.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.05,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.964,
+        "state_pool.soft_capacity_start_items": 201.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.56,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.25,
+        "state_pool.neutralization_min_effect_threshold": 0.14,
+        "state_pool.soft_capacity_full_items": 421.0,
+        "observatory.induction_source_max_items": 20.0,
+        "attention.max_cam_items": 17.0
+      }
+    },
+    {
+      "point_id": "rb_1777286780653_32",
+      "created_at_ms": 1777286780656,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 5283.975,
+        "raw_mean": 154.65,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777286447415_540",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "internal_sa_count"
+          },
+          {
+            "trial_id": "trial_1777286447873_541",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "pool_active_item_count"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 19.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4024.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.05,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.964,
+        "state_pool.soft_capacity_start_items": 201.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.56,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.25,
+        "state_pool.neutralization_min_effect_threshold": 0.14,
+        "state_pool.soft_capacity_full_items": 421.0,
+        "observatory.induction_source_max_items": 20.0
+      }
+    },
+    {
+      "point_id": "rb_1777286447034_31",
+      "created_at_ms": 1777286447035,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 3164.7741935483873,
+        "raw_mean": 145.2258064516129,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777283816017_579",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "internal_sa_count"
+          },
+          {
+            "trial_id": "trial_1777283816575_580",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "pool_active_item_count"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 19.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4024.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.05,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.963,
+        "state_pool.soft_capacity_start_items": 200.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.56,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.25,
+        "state_pool.neutralization_min_effect_threshold": 0.14,
+        "state_pool.soft_capacity_full_items": 421.0,
+        "observatory.induction_source_max_items": 20.0
+      }
+    },
+    {
+      "point_id": "rb_1777283815469_30",
+      "created_at_ms": 1777283815471,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 6638.4,
+        "raw_mean": 187.95,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777283412746_534",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "internal_sa_count"
+          },
+          {
+            "trial_id": "trial_1777283413314_535",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "pool_active_item_count"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 19.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4024.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.05,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.963,
+        "state_pool.soft_capacity_start_items": 200.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.56,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.25,
+        "state_pool.neutralization_min_effect_threshold": 0.14,
+        "state_pool.soft_capacity_full_items": 421.0,
+        "observatory.induction_source_max_items": 20.0
+      }
+    },
+    {
+      "point_id": "rb_1777283411314_29",
+      "created_at_ms": 1777283411317,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 3474.1612903225805,
+        "raw_mean": 136.0,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777283122866_566",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "induction_source_available_st_count"
+          },
+          {
+            "trial_id": "trial_1777283123286_567",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "timing_cache_neutralization_ms"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 19.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4024.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.05,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.962,
+        "state_pool.soft_capacity_start_items": 199.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.56,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.25,
+        "state_pool.neutralization_min_effect_threshold": 0.14,
+        "state_pool.soft_capacity_full_items": 421.0,
+        "observatory.induction_source_max_items": 20.0
+      }
+    },
+    {
+      "point_id": "rb_1777283122435_28",
+      "created_at_ms": 1777283122438,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 6952.775,
+        "raw_mean": 147.225,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777279909293_977",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "timing_cache_neutralization_ms"
+          },
+          {
+            "trial_id": "trial_1777279909834_978",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "timing_cache_neutralization_ms"
+          },
+          {
+            "trial_id": "trial_1777279910431_979",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "timing_maintenance_ms"
+          },
+          {
+            "trial_id": "trial_1777279911006_980",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "timing_maintenance_ms"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 19.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4024.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.04,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.962,
+        "state_pool.soft_capacity_start_items": 199.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.56,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.25,
+        "state_pool.neutralization_min_effect_threshold": 0.14,
+        "state_pool.soft_capacity_full_items": 421.0
+      }
+    },
+    {
+      "point_id": "rb_1777279908661_27",
+      "created_at_ms": 1777279908666,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 11740.75,
+        "raw_mean": 103.475,
+        "evaluated_trials": []
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 19.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4024.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.04,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.962,
+        "state_pool.soft_capacity_start_items": 203.0,
+        "observatory.induction_source_max_items": 21.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.56,
+        "hdb.induction_raw_residual_structure_share": 0.67,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.25,
+        "state_pool.neutralization_min_effect_threshold": 0.14,
+        "state_pool.soft_capacity_full_items": 424.0
+      }
+    },
+    {
+      "point_id": "rb_1777273158356_26",
+      "created_at_ms": 1777273158358,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 10701.85,
+        "raw_mean": 88.575,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777268527889_642",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "internal_sa_count"
+          },
+          {
+            "trial_id": "trial_1777268528471_643",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "pool_active_item_count"
+          },
+          {
+            "trial_id": "trial_1777268528991_644",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "pool_active_item_count"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 19.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4024.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.04,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.962,
+        "state_pool.soft_capacity_start_items": 203.0,
+        "observatory.induction_source_max_items": 21.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.56,
+        "hdb.induction_raw_residual_structure_share": 0.67,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.25,
+        "state_pool.neutralization_min_effect_threshold": 0.14,
+        "state_pool.soft_capacity_full_items": 424.0
+      }
+    },
+    {
+      "point_id": "rb_1777268527412_25",
+      "created_at_ms": 1777268527414,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 11306.8,
+        "raw_mean": 137.2,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777266119509_921",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "timing_cache_neutralization_ms"
+          },
+          {
+            "trial_id": "trial_1777266119949_922",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "timing_cache_neutralization_ms"
+          },
+          {
+            "trial_id": "trial_1777266120382_923",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "timing_maintenance_ms"
+          },
+          {
+            "trial_id": "trial_1777266120778_924",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "timing_maintenance_ms"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 19.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4024.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.04,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.962,
+        "state_pool.soft_capacity_start_items": 203.0,
+        "observatory.induction_source_max_items": 21.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.56,
+        "hdb.induction_raw_residual_structure_share": 0.67,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.25,
+        "state_pool.neutralization_min_effect_threshold": 0.14,
+        "state_pool.soft_capacity_full_items": 424.0
+      }
+    },
+    {
+      "point_id": "rb_1777266118997_24",
+      "created_at_ms": 1777266118998,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 9544.55,
+        "raw_mean": 100.95,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777263777545_510",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "induction_source_available_st_count"
+          },
+          {
+            "trial_id": "trial_1777263777860_511",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "pool_ev_to_er_ratio"
+          },
+          {
+            "trial_id": "trial_1777263778156_512",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "timing_cache_neutralization_ms"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 19.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4024.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.04,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.995,
+        "state_pool.default_er_decay_ratio": 0.962,
+        "state_pool.soft_capacity_start_items": 203.0,
+        "observatory.induction_source_max_items": 21.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.56,
+        "hdb.induction_raw_residual_structure_share": 0.67,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.25
+      }
+    },
+    {
+      "point_id": "rb_1777263777271_23",
+      "created_at_ms": 1777263777272,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 5203.225,
+        "raw_mean": 143.8,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777263254802_908",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "pool_active_item_count"
+          },
+          {
+            "trial_id": "trial_1777263255104_909",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "pool_total_er"
+          },
+          {
+            "trial_id": "trial_1777263255366_910",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "pool_total_ev"
+          },
+          {
+            "trial_id": "trial_1777263255643_911",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "memory_feedback_packet_total_ev"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 19.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4024.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.03,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.993,
+        "state_pool.default_er_decay_ratio": 0.962,
+        "state_pool.soft_capacity_start_items": 203.0,
+        "observatory.induction_source_max_items": 21.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.56,
+        "hdb.induction_raw_residual_structure_share": 0.67,
+        "attention.keep_score_ratio_base": 0.4,
+        "observatory.memory_feedback_stimulus_packet_structure_projection_ratio": 0.25
+      }
+    },
+    {
+      "point_id": "rb_1777263254544_22",
+      "created_at_ms": 1777263254545,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 8830.925,
+        "raw_mean": 112.8,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777260300364_973",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "pool_active_item_count"
+          },
+          {
+            "trial_id": "trial_1777260300644_974",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "pool_total_er"
+          },
+          {
+            "trial_id": "trial_1777260300909_975",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "pool_total_ev"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 19.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4212.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.03,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.993,
+        "state_pool.default_er_decay_ratio": 0.962,
+        "state_pool.soft_capacity_start_items": 203.0,
+        "observatory.induction_source_max_items": 21.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.55,
+        "hdb.induction_raw_residual_structure_share": 0.67,
+        "attention.keep_score_ratio_base": 0.39
+      }
+    },
+    {
+      "point_id": "rb_1777260300108_21",
+      "created_at_ms": 1777260300109,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 8500.625,
+        "raw_mean": 101.925,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777243635781_542",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "induction_source_available_st_count"
+          },
+          {
+            "trial_id": "trial_1777243636056_543",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "induction_raw_residual_structure_target_total_ev"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 19.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4212.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.03,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.993,
+        "state_pool.default_er_decay_ratio": 0.962,
+        "state_pool.soft_capacity_start_items": 203.0,
+        "observatory.induction_source_max_items": 21.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.54,
+        "hdb.induction_raw_residual_structure_share": 0.67
+      }
+    },
+    {
+      "point_id": "rb_1777243635505_20",
+      "created_at_ms": 1777243635506,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 3065.525,
+        "raw_mean": 122.425,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777243139401_526",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "induction_source_available_st_count"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 19.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4212.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.03,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.993,
+        "state_pool.default_er_decay_ratio": 0.962,
+        "state_pool.soft_capacity_start_items": 203.0,
+        "observatory.induction_source_max_items": 20.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.54
+      }
+    },
+    {
+      "point_id": "rb_1777243139161_19",
+      "created_at_ms": 1777243139162,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 2905.2,
+        "raw_mean": 122.8,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777241184962_517",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "induction_source_available_st_count"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 19.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4212.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.03,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.993,
+        "state_pool.default_er_decay_ratio": 0.962,
+        "state_pool.soft_capacity_start_items": 203.0,
+        "observatory.induction_source_max_items": 19.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.54
+      }
+    },
+    {
+      "point_id": "rb_1777241184738_18",
+      "created_at_ms": 1777241184739,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 2869.775,
+        "raw_mean": 121.875,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777238956281_531",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "induction_source_available_st_count"
+          },
+          {
+            "trial_id": "trial_1777238956543_532",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "pool_total_ev"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 19.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4212.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.03,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.993,
+        "state_pool.default_er_decay_ratio": 0.962,
+        "state_pool.soft_capacity_start_items": 203.0,
+        "observatory.induction_source_max_items": 18.0,
+        "hdb.ev_propagation_ratio": 1.0,
+        "observatory.attention_memory_energy_ratio": 0.54
+      }
+    },
+    {
+      "point_id": "rb_1777238956040_17",
+      "created_at_ms": 1777238956041,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 2678.35,
+        "raw_mean": 127.15,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777235794124_492",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "induction_propagated_target_ratio"
+          },
+          {
+            "trial_id": "trial_1777235794373_493",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "induction_source_available_st_count"
+          },
+          {
+            "trial_id": "trial_1777235794615_494",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "pool_residual_origin_item_ratio"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 19.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4212.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.03,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.993,
+        "state_pool.default_er_decay_ratio": 0.962,
+        "state_pool.soft_capacity_start_items": 203.0,
+        "observatory.induction_source_max_items": 17.0,
+        "hdb.ev_propagation_ratio": 1.0
+      }
+    },
+    {
+      "point_id": "rb_1777235793888_16",
+      "created_at_ms": 1777235793889,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 1925.0,
+        "raw_mean": 121.54166666666667,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777234586653_479",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "induction_source_available_st_count"
+          },
+          {
+            "trial_id": "trial_1777234586896_480",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "pool_residual_origin_item_ratio"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 18.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4212.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.03,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.993,
+        "state_pool.default_er_decay_ratio": 0.962,
+        "state_pool.soft_capacity_start_items": 203.0,
+        "observatory.induction_source_max_items": 16.0
+      }
+    },
+    {
+      "point_id": "rb_1777234586392_15",
+      "created_at_ms": 1777234586393,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 1680.2083333333333,
+        "raw_mean": 114.25,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777233861992_568",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "internal_sa_count"
+          },
+          {
+            "trial_id": "trial_1777233862257_569",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "internal_sa_count"
+          },
+          {
+            "trial_id": "trial_1777233862496_570",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "pool_active_item_count"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 17.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4212.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.03,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.993,
+        "state_pool.default_er_decay_ratio": 0.962,
+        "state_pool.soft_capacity_start_items": 203.0
+      }
+    },
+    {
+      "point_id": "rb_1777233861756_14",
+      "created_at_ms": 1777233861757,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 3566.325,
+        "raw_mean": 120.55,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777231589012_472",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "induction_target_count"
+          },
+          {
+            "trial_id": "trial_1777231589305_473",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "pool_ev_to_er_ratio"
+          },
+          {
+            "trial_id": "trial_1777231589570_474",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "pool_residual_origin_item_ratio"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 17.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4212.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.03,
+        "emotion.modulation.hdb.scales.ev_propagation_threshold.base": 0.98,
+        "state_pool.default_ev_decay_ratio": 0.993
+      }
+    },
+    {
+      "point_id": "rb_1777231588727_13",
+      "created_at_ms": 1777231588729,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 1708.2,
+        "raw_mean": 122.9,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777231226364_482",
+            "result": "failure",
+            "rolled_back": false,
+            "metric_key": "induction_propagated_target_ratio"
+          },
+          {
+            "trial_id": "trial_1777231226649_483",
+            "result": "failure",
+            "rolled_back": false,
+            "metric_key": "induction_target_count"
+          },
+          {
+            "trial_id": "trial_1777231226928_484",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "timing_cache_neutralization_ms"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 16.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4212.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26,
+        "state_pool.priority_neutralization_min_effect_threshold": 0.03
+      }
+    },
+    {
+      "point_id": "rb_1777231226096_12",
+      "created_at_ms": 1777231226098,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 2737.425,
+        "raw_mean": 124.075,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777132745453_524",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "internal_to_external_sa_ratio"
+          },
+          {
+            "trial_id": "trial_1777132745763_525",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "cfs_dissonance_max"
+          },
+          {
+            "trial_id": "trial_1777132746074_526",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "cfs_pressure_max"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 16.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4212.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.26
+      }
+    },
+    {
+      "point_id": "rb_1777132745155_11",
+      "created_at_ms": 1777132745156,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 6367.3,
+        "raw_mean": 148.65,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777131830666_526",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "pool_active_item_count"
+          },
+          {
+            "trial_id": "trial_1777131830994_527",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "cfs_dissonance_max"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 16.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4212.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.6,
+        "cognitive_feeling.pressure_ev_threshold": 0.28
+      }
+    },
+    {
+      "point_id": "rb_1777131830353_10",
+      "created_at_ms": 1777131830354,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 5621.225,
+        "raw_mean": 142.15,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777105565346_435",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "cfs_dissonance_max"
+          },
+          {
+            "trial_id": "trial_1777105565633_436",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "cfs_pressure_max"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 16.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4304.0,
+        "cognitive_feeling.dissonance_cp_abs_threshold": 0.58,
+        "cognitive_feeling.pressure_ev_threshold": 0.28
+      }
+    },
+    {
+      "point_id": "rb_1777105565084_9",
+      "created_at_ms": 1777105565085,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 2243.3333333333335,
+        "raw_mean": 123.6,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777103962979_405",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "pool_active_item_count"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 16.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4304.0
+      }
+    },
+    {
+      "point_id": "rb_1777103962588_8",
+      "created_at_ms": 1777103962589,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 5099.925,
+        "raw_mean": 127.75,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777102739905_346",
+            "result": "success",
+            "rolled_back": false,
+            "metric_key": "internal_resolution_structure_count_selected"
+          },
+          {
+            "trial_id": "trial_1777102740284_347",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "pool_active_item_count"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 16.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4399.0
+      }
+    },
+    {
+      "point_id": "rb_1777102739564_7",
+      "created_at_ms": 1777102739565,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 7087.6,
+        "raw_mean": 164.4,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777102259685_301",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "internal_resolution_structure_count_selected"
+          },
+          {
+            "trial_id": "trial_1777102259994_302",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "pool_active_item_count"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 15.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4399.0
+      }
+    },
+    {
+      "point_id": "rb_1777102258479_6",
+      "created_at_ms": 1777102258480,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 5906.625,
+        "raw_mean": 155.625,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777101935790_255",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "internal_resolution_structure_count_selected"
+          },
+          {
+            "trial_id": "trial_1777101936100_256",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "pool_active_item_count"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 14.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4516.0
+      }
+    },
+    {
+      "point_id": "rb_1777101935465_5",
+      "created_at_ms": 1777101935466,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 6552.525,
+        "raw_mean": 169.575,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777101046931_211",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "internal_resolution_structure_count_selected"
+          },
+          {
+            "trial_id": "trial_1777101047207_212",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "pool_active_item_count"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 13.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4629.0
+      }
+    },
+    {
+      "point_id": "rb_1777101046629_4",
+      "created_at_ms": 1777101046629,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 6154.675,
+        "raw_mean": 178.375,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777099627529_167",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "internal_resolution_structure_count_selected"
+          },
+          {
+            "trial_id": "trial_1777099627886_168",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "pool_active_item_count"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 12.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005,
+        "state_pool.pool_max_items": 4741.0
+      }
+    },
+    {
+      "point_id": "rb_1777099627154_3",
+      "created_at_ms": 1777099627154,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 5960.0,
+        "raw_mean": 164.55,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777099263599_123",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "internal_resolution_structure_count_selected"
+          },
+          {
+            "trial_id": "trial_1777099263886_124",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "merged_flat_token_count"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 11.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.120000000000005
+      }
+    },
+    {
+      "point_id": "rb_1777099263282_2",
+      "created_at_ms": 1777099263283,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 5770.2,
+        "raw_mean": 176.225,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777098431116_82",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "internal_resolution_structure_count_selected"
+          },
+          {
+            "trial_id": "trial_1777098431385_83",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "merged_flat_token_count"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 10.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.08
+      }
+    },
+    {
+      "point_id": "rb_1777098430848_1",
+      "created_at_ms": 1777098430849,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 5185.8,
+        "raw_mean": 176.225,
+        "evaluated_trials": [
+          {
+            "trial_id": "trial_1777098050866_41",
+            "result": "failure",
+            "rolled_back": true,
+            "metric_key": "internal_resolution_structure_count_selected"
+          },
+          {
+            "trial_id": "trial_1777098051148_42",
+            "result": "neutral",
+            "rolled_back": false,
+            "metric_key": "merged_flat_token_count"
+          }
+        ]
+      },
+      "persisted_params": {
+        "hdb.stimulus_level_max_rounds": 9.0,
+        "hdb.internal_resolution_detail_budget_adr_gain": 56.04
+      }
+    },
+    {
+      "point_id": "rb_1777098050527_0",
+      "created_at_ms": 1777098050528,
+      "reason": "long_term_before_update",
+      "summary": {
+        "trace_id": "exp_complete",
+        "timing_mean": 5119.425,
+        "raw_mean": 194.3,
+        "evaluated_trials": []
+      },
+      "persisted_params": {}
+    }
+  ]
+}

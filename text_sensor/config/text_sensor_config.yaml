@@ -119,6 +119,12 @@ importance_fallback_order: ["keyword", "rule", "none"]
 # 建议: 原型验收阶段默认关闭，等其它模块对齐后再打开观察其影响。
 enable_stimulus_intensity_attribute_sa: false
 
+# stimulus_intensity_attribute_min_er / 强度属性 SA 的最小 ER 阈值
+# Purpose / 作用: Suppresses auto-generated `stimulus_intensity:*` attribute SA for weak feature SA whose ER is below this threshold.
+# Meaning / 意义: Raising this value trims punctuation/noise numeric attributes first, which helps balance explainability, packet size, and matching cost.
+# Reference / 参考: Default 0.0. A practical probe range is roughly 0.3-1.0 depending on how aggressively you want to prune weak units.
+stimulus_intensity_attribute_min_er: 0.0
+
 # attribute_er_ratio / 属性 SA 实能量比例
 # Purpose / 作用: Sets how much ER each auto-generated attribute SA receives relative to its feature SA context.
 # Meaning / 意义: Higher values make attributes compete more strongly during later retrieval and matching.
@@ -198,8 +204,8 @@ echo_decay_mode: "round_factor"
 # echo_round_decay_factor / 每轮残响保留系数
 # Purpose / 作用: Sets the retained fraction of echo energy per round in round_factor mode.
 # Meaning / 意义: Lower values make echoes disappear faster; higher values let previous input persist longer.
-# Reference / 参考: Default 0.4. A value like 0.4 yields roughly 1.0 -> 0.4 -> 0.16 -> 0.064.
-echo_round_decay_factor: 0.4
+# Reference / 参考: Default 0.30. A value like 0.30 yields roughly 1.0 -> 0.30 -> 0.09 -> 0.027.
+echo_round_decay_factor: 0.30
 
 # echo_half_life_rounds / 残响半衰期轮数
 # Purpose / 作用: Sets the half-life in rounds when echo_decay_mode is round_half_life.
@@ -210,8 +216,8 @@ echo_half_life_rounds: 2.0
 # echo_min_energy_threshold / 残响淘汰阈值
 # Purpose / 作用: Removes echo objects whose remaining energy falls below this threshold.
 # Meaning / 意义: This is the hard stop that prevents endless accumulation of tiny historical fragments.
-# Reference / 参考: Default 0.08. Lower values lengthen tails; higher values make echo more short-lived.
-echo_min_energy_threshold: 0.08
+# Reference / 参考: Default 0.12. Lower values lengthen tails; higher values make echo more short-lived.
+echo_min_energy_threshold: 0.12
 
 # echo_pool_max_frames / 残响池最大帧数
 # Purpose / 作用: Limits how many historical echo frames the sensor keeps.
@@ -269,6 +275,12 @@ max_text_length: 10000
 # Meaning / 意义: Keeping this false forces explicit empty-tick handling elsewhere and avoids ambiguous sensor frames.
 # Reference / 参考: Default false. Enable only if your test harness intentionally feeds empty strings as input events.
 allow_empty_text: false
+
+# reject_suspect_encoding_text / 是否拦截疑似编码异常或不可恢复乱码
+# Purpose / 作用: Rejects text that already looks mojibaked, contains replacement chars, or has collapsed into unreadable placeholder runs before it can enter the state/database pipeline.
+# Meaning / 意义: If the corruption is still recoverable (for example classic UTF-8 <-> latin-1 mojibake), the sensor will first try a high-confidence repair; only unrecoverable garbage is blocked.
+# Reference / 参考: Default true. Keep enabled to avoid polluting HDB / StatePool with `? ? ? ?`-style lossy input.
+reject_suspect_encoding_text: true
 
 # strip_control_chars / 是否移除不可见控制字符
 # Purpose / 作用: Removes non-printable control characters during normalization.

@@ -37,6 +37,7 @@ from ._object_builder import (
     build_stimulus_packet,
 )
 from ._logger import ModuleLogger
+from ._text_integrity import sanitize_text_input
 from . import __version__, __schema_version__, __module_name__
 
 
@@ -103,6 +104,13 @@ _DEFAULT_CONFIG = {
     # - 可读性/验收: 关闭后不会在状态池与结构中出现大量 `stimulus_intensity:0.4235` 之类的属性 token，
     #   更方便观察其它模块的行为。
     "enable_stimulus_intensity_attribute_sa": False,
+    # 中文: 只有当特征 SA 的 ER 不低于该阈值时，才生成 stimulus_intensity 属性 SA。
+    # English: Only emit `stimulus_intensity:*` attribute SA when the feature SA ER reaches this threshold.
+    #
+    # 说明:
+    # - 默认 0.0 表示保持旧行为：只要开关打开，就对每个特征 SA 生成数值属性 SA。
+    # - 提高该值可以抑制弱标点/弱噪音带来的属性 SA 膨胀，是后续性能-效果折中的低风险抓手。
+    "stimulus_intensity_attribute_min_er": 0.0,
 
     # ---- 刺激量参数 ----
     "char_base_er": 1.0,
@@ -133,6 +141,7 @@ _DEFAULT_CONFIG = {
     # ---- 文本处理 ----
     "max_text_length": 10000,
     "allow_empty_text": False,
+    "reject_suspect_encoding_text": True,
 
     # ---- 归一化 ----
     "strip_control_chars": True,
@@ -233,7 +242,9 @@ class TextSensor:
         sensor_round = self._ingest_round
 
         # ---- Step 1: 参数校验 ----
-        validation_error = self._validate_input(text, trace_id, mode_override)
+        prepared_text, validation_error, input_integrity = self._prepare_input_text(
+            text, trace_id, mode_override
+        )
         if validation_error:
             self._logger.error(
                 trace_id=trace_id,
@@ -249,6 +260,13 @@ class TextSensor:
                 error=validation_error,
                 trace_id=trace_id,
                 elapsed_ms=self._elapsed_ms(start_time),
+            )
+        text = str(prepared_text or "")
+        if (input_integrity or {}).get("status") == "repaired":
+            self._logger.detail(
+                trace_id=trace_id,
+                step="text_integrity_repair",
+                info=input_integrity,
             )
 
         # ---- Step 2: 衰减感受器残响池 ----
@@ -351,6 +369,7 @@ class TextSensor:
         all_attribute_sas: list[dict] = []
         all_csas: list[dict] = []
         enable_intensity_attr_sa = bool(self._config.get("enable_stimulus_intensity_attribute_sa", False))
+        intensity_attr_min_er = max(0.0, float(self._config.get("stimulus_intensity_attribute_min_er", 0.0) or 0.0))
         fatigue_history_keys: list[str] = []
         fatigue_records: list[dict] = []
         total_er_before_fatigue = 0.0
@@ -376,7 +395,8 @@ class TextSensor:
             er = round(max(0.0, er_before_fatigue * (1.0 - fatigue_state["suppression_ratio"])), 6)
             attribute_er = 0.0
             attribute_ev = 0.0
-            if enable_intensity_attr_sa:
+            should_emit_intensity_attr = enable_intensity_attr_sa and er >= intensity_attr_min_er
+            if should_emit_intensity_attr:
                 attribute_er = round(er * self._config.get("attribute_er_ratio", 0.25), 6)
                 attribute_ev = round(er * self._config.get("attribute_ev_ratio", 0.0), 6)
 
@@ -407,7 +427,7 @@ class TextSensor:
             all_feature_sas.append(feature_sa)
 
             attr_sa = None
-            if enable_intensity_attr_sa:
+            if should_emit_intensity_attr:
                 attr_sa = build_attribute_sa(
                     attribute_name="stimulus_intensity",
                     attribute_value=er,
@@ -535,6 +555,7 @@ class TextSensor:
             include_echo_in_objects=self._config.get(
                 "include_echoes_in_stimulus_packet_objects", False
             ),
+            goal_b_char_sa_string_mode=bool(self._config.get("enable_goal_b_char_sa_string_mode", False)),
         )
 
         # ---- Step 12: 日志 & 返回 ----
@@ -592,6 +613,10 @@ class TextSensor:
                     "token_units": len(token_units),
                     "tokenizer_backend": self._segmenter.backend_name,
                     "tokenizer_fallback": tokenizer_fallback,
+                },
+                "input_integrity": input_integrity or {
+                    "status": "clean",
+                    "detail": {"reason": "ok"},
                 },
                 "importance_summary": importance_summaries,
                 "echo_decay_summary": decay_summary,
@@ -817,56 +842,89 @@ class TextSensor:
 
         return cfg
 
-    def _validate_input(
+    def preflight_input_text(
+        self, text: Any, *, trace_id: str = "preflight", mode_override: Any = None
+    ) -> dict[str, Any]:
+        prepared_text, error, integrity = self._prepare_input_text(
+            text, trace_id, mode_override
+        )
+        return {
+            "success": error is None,
+            "text": str(prepared_text or "") if error is None else "",
+            "error": error,
+            "integrity": integrity
+            or {"status": "clean", "detail": {"reason": "ok"}},
+        }
+
+    def _prepare_input_text(
         self, text: Any, trace_id: Any, mode_override: Any
-    ) -> dict | None:
+    ) -> tuple[str | None, dict | None, dict[str, Any] | None]:
         """
-        参数校验。返回 None 表示校验通过，否则返回错误 dict。
+        输入预检。返回 (prepared_text, error, integrity_meta)。
         """
         # text 类型检查
         if not isinstance(text, str):
-            return {
+            return None, {
                 "code": "INPUT_VALIDATION_ERROR",
                 "message": f"参数 text 类型错误 / Parameter 'text' type error: 期望/expected str, 实际/actual {type(text).__name__}",
                 "detail": {"param": "text", "actual_type": type(text).__name__},
-            }
+            }, None
 
         # trace_id 必填
         if not trace_id or not isinstance(trace_id, str):
-            return {
+            return None, {
                 "code": "INPUT_VALIDATION_ERROR",
                 "message": "参数 trace_id 必填且必须为非空字符串 / Parameter 'trace_id' is required and must be a non-empty string",
                 "detail": {"param": "trace_id"},
-            }
-
-        # 空文本检查
-        if len(text) == 0 and not self._config.get("allow_empty_text", False):
-            return {
-                "code": "INPUT_VALIDATION_ERROR",
-                "message": "空文本不被允许（可通过 allow_empty_text 配置开启） / Empty text not allowed (enable via allow_empty_text config)",
-                "detail": {"param": "text", "text_len": 0},
-            }
-
-        # 超长文本检查
-        max_len = self._config.get("max_text_length", 10000)
-        if len(text) > max_len:
-            return {
-                "code": "INPUT_VALIDATION_ERROR",
-                "message": f"文本长度超过上限 / Text length {len(text)} exceeds max {max_len}",
-                "detail": {"param": "text", "text_len": len(text), "max": max_len},
-            }
+            }, None
 
         # mode_override 校验
         if mode_override is not None:
             valid_modes = ("simple", "advanced", "hybrid")
             if mode_override not in valid_modes:
-                return {
+                return None, {
                     "code": "INPUT_VALIDATION_ERROR",
                     "message": f"mode_override 值不合法 / Invalid mode_override '{mode_override}', 可选/valid: {valid_modes}",
                     "detail": {"param": "mode_override", "actual": mode_override},
-                }
+                }, None
 
-        return None
+        prepared_text = str(text)
+        integrity_meta: dict[str, Any] = {
+            "status": "clean",
+            "detail": {"reason": "ok"},
+        }
+        if self._config.get("reject_suspect_encoding_text", True):
+            sanitized = sanitize_text_input(prepared_text)
+            integrity_meta = {
+                "status": str(sanitized.get("status") or "clean"),
+                "detail": dict(sanitized.get("detail") or {}),
+            }
+            if not bool(sanitized.get("ok", False)):
+                return None, {
+                    "code": "INPUT_TEXT_INTEGRITY_ERROR",
+                    "message": "输入文本疑似编码异常或已丢失原始字符，已在进入状态链路前拒绝 / Input text looks mojibaked or irrecoverably unreadable; rejected before ingestion",
+                    "detail": integrity_meta,
+                }, integrity_meta
+            prepared_text = str(sanitized.get("text") or "")
+
+        # 空文本检查
+        if len(prepared_text) == 0 and not self._config.get("allow_empty_text", False):
+            return None, {
+                "code": "INPUT_VALIDATION_ERROR",
+                "message": "空文本不被允许（可通过 allow_empty_text 配置开启） / Empty text not allowed (enable via allow_empty_text config)",
+                "detail": {"param": "text", "text_len": 0},
+            }, integrity_meta
+
+        # 超长文本检查
+        max_len = self._config.get("max_text_length", 10000)
+        if len(prepared_text) > max_len:
+            return None, {
+                "code": "INPUT_VALIDATION_ERROR",
+                "message": f"文本长度超过上限 / Text length {len(prepared_text)} exceeds max {max_len}",
+                "detail": {"param": "text", "text_len": len(prepared_text), "max": max_len},
+            }, integrity_meta
+
+        return prepared_text, None, integrity_meta
 
     def _get_type_ratio(self, unit: dict) -> float:
         """

@@ -79,7 +79,7 @@ class SelfCheckEngine:
                 if len(issues) >= max_items:
                     break
 
-        if include_orphans and len(issues) < max_items:
+        if include_orphans and len(issues) < max_items and check_scope != "quick":
             owner_ids = {item.get("id", "") for item in structure_store.iter_structures()}
             for structure_db in structure_store.iter_structure_dbs()[:max_items]:
                 owner_id = structure_db.get("owner_structure_id", "")
@@ -139,33 +139,45 @@ class SelfCheckEngine:
         )
 
     def _pick_structures(self, structure_store, check_scope: str, max_items: int) -> list[dict]:
-        items = structure_store.iter_structures()
         if check_scope in {"quick", "structure_only"}:
+            if hasattr(structure_store, "get_recent_structures"):
+                return structure_store.get_recent_structures(max_items)
+            items = structure_store.iter_structures()
             return sorted(items, key=lambda item: item.get("updated_at", 0), reverse=True)[:max_items]
+        items = structure_store.iter_structures()
         return items[:max_items]
 
     def _pick_groups(self, group_store, check_scope: str, max_items: int) -> list[dict]:
         if check_scope in {"episodic_only", "memory_activation_only"}:
             return []
-        items = group_store.iter_items()
         if check_scope in {"quick", "group_only"}:
+            if hasattr(group_store, "get_recent"):
+                return group_store.get_recent(max_items)
+            items = group_store.iter_items()
             return sorted(items, key=lambda item: item.get("updated_at", 0), reverse=True)[:max_items]
+        items = group_store.iter_items()
         return items[:max_items]
 
     def _pick_episodic(self, episodic_store, check_scope: str, max_items: int) -> list[dict]:
         if check_scope in {"structure_only", "group_only", "memory_activation_only"}:
             return []
-        items = episodic_store.iter_items()
         if check_scope in {"quick", "episodic_only"}:
+            if hasattr(episodic_store, "get_recent"):
+                return episodic_store.get_recent(max_items)
+            items = episodic_store.iter_items()
             return sorted(items, key=lambda item: item.get("updated_at", 0), reverse=True)[:max_items]
+        items = episodic_store.iter_items()
         return items[:max_items]
 
     def _pick_memory_activations(self, memory_activation_store, check_scope: str, max_items: int) -> list[dict]:
         if check_scope in {"structure_only", "group_only"}:
             return []
-        items = memory_activation_store.iter_items()
         if check_scope in {"quick", "memory_activation_only"}:
+            if hasattr(memory_activation_store, "get_recent"):
+                return memory_activation_store.get_recent(max_items)
+            items = memory_activation_store.iter_items()
             return sorted(items, key=lambda item: item.get("last_updated_at", 0), reverse=True)[:max_items]
+        items = memory_activation_store.iter_items()
         return items[:max_items]
 
     def _check_structure(self, structure_obj: dict, structure_store, group_store, pointer_index) -> list[dict]:

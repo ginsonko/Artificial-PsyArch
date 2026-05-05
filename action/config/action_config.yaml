@@ -95,12 +95,106 @@ threshold_scale_by_nt:
   SER: 0.06
   END: -0.03
   COR: 0.30
+  NOV: -0.08
+  FOC: -0.10
+
+# threshold_scale_by_rwd_pun_enabled / 是否启用 reward/punish 对行动阈值的直接调制
+# 说明：
+# - 对齐新版理论：reward 代表“更值得做/更可能对”，应降低行动阈值；
+# - punish 代表“更危险/更不值得做”，应提高行动阈值；
+# - 该链路读取 EmotionManager 输出的 `rwd_pun_snapshot`，不改写 drive，只调制阈值；
+# - 如需快速回退旧行为，可直接关闭本开关。
+threshold_scale_by_rwd_pun_enabled: true
+
+# threshold_scale_by_rwd_pun_reward_coef / 奖励对阈值缩放的线性系数
+# 说明：
+# - 负值表示 reward 越高，threshold_scale 越低；
+# - 例如 rwd=1.0、coef=-0.28 时，reward 单独可把阈值缩放拉到约 0.72。
+threshold_scale_by_rwd_pun_reward_coef: -0.28
+
+# threshold_scale_by_rwd_pun_punish_coef / 惩罚对阈值缩放的线性系数
+# 说明：
+# - 正值表示 punish 越高，threshold_scale 越高；
+# - 默认略大于 reward 系数，体现“惩罚更保守”的行为倾向。
+threshold_scale_by_rwd_pun_punish_coef: 0.34
+
+# threshold_scale_by_rwd_pun_min / 奖惩阈值调制子项下限
+# threshold_scale_by_rwd_pun_max / 奖惩阈值调制子项上限
+# 说明：
+# - 只约束 reward/punish 这一子项，避免单独因为奖惩过强而把阈值拉爆或拉空；
+# - 最终还会再经过全局 threshold_scale_min/max 与 fatigue 的组合。
+threshold_scale_by_rwd_pun_min: 0.60
+threshold_scale_by_rwd_pun_max: 1.45
 
 # threshold_scale_min / 阈值缩放下限（避免过度冲动导致失控）
 threshold_scale_min: 0.55
 
 # threshold_scale_max / 阈值缩放上限（避免过度保守导致系统不行动）
 threshold_scale_max: 1.75
+
+# ---- 局部奖惩 -> 行动驱动力调制（对齐理论“同结构内局部作用”）----
+#
+# 说明：
+# - 全局 reward/punish 现在已通过 effective_threshold 生效；
+# - 这里补的是“局部对象级”的作用：如果某个 action node 明确指向某个结构/对象，
+#   且该对象本身携带 reward_signal / punish_signal / teacher_reward_signal / teacher_punish_signal，
+#   那么该 action node 本轮获得的 drive 增益会被局部放大或抑制。
+# - 该链路不会直接改写阈值，只调制“本轮 drive 增益”。
+
+# local_drive_modulation_by_rwd_pun_enabled / 是否启用局部奖惩对 drive 的塑形
+local_drive_modulation_by_rwd_pun_enabled: true
+
+# local_drive_modulation_require_target / 是否要求 action node 必须有明确 target
+# 说明：建议保持 true，避免把无目标的全局行动也强行套上局部奖惩。
+local_drive_modulation_require_target: true
+
+# local_drive_reward_bonus_coef / 局部奖励的 drive 放大系数
+# local_drive_punish_penalty_coef / 局部惩罚的 drive 抑制系数
+# 计算口径（MVP）：
+#   local_drive_scale = clamp(1 + rwd*reward_coef - pun*punish_coef, min, max)
+local_drive_reward_bonus_coef: 0.45
+local_drive_punish_penalty_coef: 0.55
+
+# local_drive_scale_min / 局部 drive 缩放下限
+# local_drive_scale_max / 局部 drive 缩放上限
+local_drive_scale_min: 0.20
+local_drive_scale_max: 1.80
+
+# local_drive_feedback_* / 局部奖惩聚合参数
+# 说明：
+# - 观测层会从状态池对象的 reward/punish 类运行态属性中，为每个 ref_object 汇总一个局部 rwd/pun 值；
+# - 预测侧主要看 EV，验证侧主要看 delta_er，再用 softcap + 权重混合。
+local_drive_feedback_ev_min: 0.0
+local_drive_feedback_k_pred: 1.0
+local_drive_feedback_k_got: 0.5
+local_drive_feedback_w_pred: 0.7
+local_drive_feedback_w_got: 0.3
+
+# local_drive_feedback_drop_zero_signal_enabled / 是否跳过“奖惩强度均为 0”的局部反馈候选
+# 说明：
+# - 有些运行态对象会带 reward/punish 属性名，但当前属性值、EV、delta_ER 都不足以形成实际 rwd/pun。
+# - 默认跳过这类候选，避免 action 文本回落把“无信号对象”误记为命中，也减少候选噪声。
+# - 如需回看旧诊断口径，可设为 false。
+local_drive_feedback_drop_zero_signal_enabled: true
+
+# local_drive_feedback_min_signal / 视作有效局部奖惩信号的最小 rwd+pun
+# 说明：默认只过滤数值意义上的 0，不影响正常弱信号。
+local_drive_feedback_min_signal: 1.0e-9
+
+# local_drive_reward_attribute_names / 视作“局部奖励”的属性名列表
+# local_drive_punish_attribute_names / 视作“局部惩罚”的属性名列表
+local_drive_reward_attribute_names: ["reward_signal", "teacher_reward_signal"]
+local_drive_punish_attribute_names: ["punish_signal", "teacher_punish_signal"]
+
+# local_drive_teacher_feedback_override_* / 教师奖惩的局部优先级口径
+# 说明：
+# - 当对象上明确出现 teacher_reward_signal / teacher_punish_signal 时，
+#   它代表外置教师监督，应允许比普通推断出的 reward/punish 更直接地塑形 action drive。
+# - floor_scale：把教师属性值作为局部 rwd/pun 的最小地板值；
+# - cross_suppress_scale：若只出现教师奖励（无教师惩罚），则压低普通惩罚项；反之亦然。
+local_drive_teacher_feedback_override_enabled: true
+local_drive_teacher_feedback_floor_scale: 1.0
+local_drive_teacher_feedback_cross_suppress_scale: 0.35
 
 # ---- 行动疲劳（模块内局部实现）----
 #
@@ -142,6 +236,16 @@ mode_focus_top_n_scale: 0.70
 
 # mode_diverge_top_n_scale / 发散模式 top_n 缩放
 mode_diverge_top_n_scale: 1.30
+
+# mode_*_attention_energy_budget_scale / 注意力模式对能量资源预算的调制
+# 说明：
+# - 聚焦/发散只调节有限注意资源的分配和预算，不再形成无上限倍率放大；
+# - 聚焦略提高可用资源并收窄对象数，发散略降低单 tick 净增资源但放宽对象数。
+mode_focus_attention_energy_budget_scale: 1.25
+mode_diverge_attention_energy_budget_scale: 0.75
+mode_attention_energy_budget_base: 8.0
+mode_attention_energy_budget_min: 0.0
+mode_attention_energy_budget_max: 24.0
 
 # mode_cooldown_ticks / 模式行动冷却 tick
 mode_cooldown_ticks: 2

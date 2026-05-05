@@ -46,9 +46,42 @@ consume_energy: true
 # 参考（Reference）: 默认 0.5。
 memory_energy_ratio: 0.5
 
+# ---- 注意力能量资源（Attention Energy Resource）----
+# 理论口径：
+# - CAM 先从状态池按 memory_energy_ratio 得到“未滤波基础能量”；
+# - 注意力滤波会抑制低权重对象，并把有限的注意力资源分给高权重对象；
+# - 滤波后 CAM 总能量 - 未滤波基础 CAM 总能量 <= attention_energy_budget_base。
+# 这不是倍率上限，而是每 tick 注意力可额外注入/维持的能量份额。
+attention_energy_budget_enabled: true
+attention_energy_budget_base: 8.0
+attention_energy_budget_min: 0.0
+attention_energy_budget_max: 32.0
+attention_energy_budget_apply_when_not_consuming: false
+
+# attention_filter_* / 滤波参数
+# - suppression_floor 以下会逐渐抑制，最低保留 suppression_min_ratio；
+# - gain_floor 以上才参与预算分配；
+# - gain_exponent 越高，预算越集中给最高权重对象。
+attention_filter_suppression_enabled: true
+attention_filter_suppression_floor: 0.36
+attention_filter_suppression_min_ratio: 0.25
+attention_filter_gain_floor: 0.52
+attention_filter_gain_exponent: 1.15
+
+# fast_source_snapshot_enabled / 注意力候选轻量快照
+# Purpose / 作用: CAM 评分只需要运行态候选的能量、属性、上下文和 canonical 序列信息；
+# 这里直接从 StatePool store 构建轻量候选，避免每 tick 为全部对象生成 UI 级完整快照。
+# Rollback / 回退: 如需调试完整 StatePool snapshot 序列化，可设为 false。
+fast_source_snapshot_enabled: true
+
 # exclude_ref_object_types / 排除的运行态对象类型
 # 参考（Reference）: 默认 ["em"]（情景记忆条目一般不作为 CAM 项）。
 exclude_ref_object_types: ["em"]
+
+# residual_memory_runtime_object_type / 残差记忆运行态对象类型
+# 作用（Purpose）: 决定默认残差记忆投影是按 ST 结构语义参与 CAM，还是保留旧 EM 兼容壳。
+# 参考（Reference）: 默认 "em"；仅在回滚或对照实验时改成 "st"。
+residual_memory_runtime_object_type: "em"
 
 # min_total_energy / 最低能量过滤阈值
 min_total_energy: 0.0
@@ -67,3 +100,54 @@ priority_weight_recency_gain: 0.0
 log_dir: ""
 log_max_file_bytes: 5242880
 stdout_fallback_when_log_fail: true
+
+# ---- reward/action shaping ----
+reward_action_humanlike_v2_enabled: true
+reward_action_priority_enabled: true
+reward_action_structure_first_mode: true
+reward_action_signal_names: ["reward_signal", "punish_signal", "teacher_reward_signal", "teacher_punish_signal"]
+reward_action_special_attribute_names:
+  - reward_signal
+  - punish_signal
+  - teacher_reward_signal
+  - teacher_punish_signal
+  - cfs_dissonance
+  - cfs_correctness
+  - cfs_correct_event
+  - cfs_expectation
+  - cfs_expectation_unverified
+  - cfs_expectation_verified
+  - cfs_pressure
+  - cfs_pressure_unverified
+  - cfs_pressure_verified
+  - cfs_surprise
+  - cfs_grasp
+  - cfs_complexity
+  - cfs_simplicity
+  - cfs_repetition
+  - cfs_relief
+  - cfs_reassurance
+reward_action_bonus_cap: 2.4
+reward_action_penalty_cap: 1.8
+reward_action_special_standalone_penalty: 0.98
+reward_action_special_standalone_energy_gain: 0.3
+reward_action_action_node_penalty: 0.46
+reward_action_action_node_energy_gain: 0.10
+reward_action_structure_carrier_bonus: 0.56
+reward_action_structure_carrier_value_gain: 0.22
+reward_action_structure_carrier_context_gain: 0.28
+reward_action_target_association_bonus: 0.58
+reward_action_target_association_energy_gain: 0.34
+reward_action_min_carrier_score: 0.35
+attention_repeat_fatigue_special_multiplier: 2.0
+attention_repeat_fatigue_structure_carrier_multiplier: 0.82
+
+# ---- repeat-attention fatigue ----
+attention_repeat_fatigue_enabled: true
+attention_repeat_fatigue_semantic_context_first: true
+attention_repeat_fatigue_window_calls: 6
+attention_repeat_fatigue_recovery_per_call: 0.57
+attention_repeat_fatigue_penalty_gain: 0.58
+attention_repeat_fatigue_selected_gain: 1.18
+attention_repeat_fatigue_max_penalty: 1.7
+attention_repeat_fatigue_max_strength: 4.0

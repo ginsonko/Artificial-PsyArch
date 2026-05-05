@@ -32,8 +32,14 @@ class HistoryWindow:
 
     def append_many(self, events: list[dict]):
         """批量添加事件。"""
-        for ev in events:
-            self.append(ev)
+        valid_events = [ev for ev in (events or []) if isinstance(ev, dict)]
+        if not valid_events:
+            return
+        self._events.extend(valid_events)
+        self._total_recorded += len(valid_events)
+        if len(self._events) > self._max_events:
+            trim_count = len(self._events) - self._max_events
+            self._events = self._events[trim_count:]
 
     def get_recent(self, count: int | None = None) -> list[dict]:
         """获取最近的 N 个事件（None=全部）。"""

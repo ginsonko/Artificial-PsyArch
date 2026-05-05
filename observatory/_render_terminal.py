@@ -52,6 +52,7 @@ def format_help() -> str:
             "  repair <target>        执行局部修复",
             "  repair_all             启动后台全局修复",
             "  stop_repair <job_id>   停止后台修复任务",
+            "  idle_consolidate [n]   执行闲时巩固/压缩（可选：仅巩固最近 n 个事件）",
             "  open_report [latest|trace_id] 打开 HTML 观测报告",
             "  clear_hdb              清空 HDB",
             "  clear_all              清空 文本感受器残响（echo）+ 状态池 + HDB（全息深度数据库）",
@@ -81,6 +82,7 @@ def render_cycle_report(report: dict) -> str:
     lines = ["", LINE, f"Cycle / 轮次: {report.get('trace_id', '')}", LINE]
     lines.extend(_render_sensor(report.get("sensor", {})))
     lines.extend(_render_maintenance(report.get("maintenance", {})))
+    lines.extend(_render_cognitive_stitching(report.get("cognitive_stitching", {})))
     lines.extend(_render_attention(report.get("attention", {})))
     lines.extend(_render_structure(report.get("structure_level", {})))
     lines.extend(_render_cache(report.get("cache_neutralization", {})))
@@ -90,6 +92,7 @@ def render_cycle_report(report: dict) -> str:
     lines.extend(_render_cognitive_feeling(report.get("cognitive_feeling", {})))
     lines.extend(_render_emotion(report.get("emotion", {})))
     lines.extend(_render_innate_script(report.get("innate_script", {})))
+    lines.extend(_render_action(report.get("action", {})))
     lines.extend(_render_final(report.get("final_state", {}), report.get("exports", {})))
     return "\n".join(lines)
 
@@ -119,17 +122,17 @@ def render_hdb_snapshot(report: dict) -> str:
     lines.append(
         f"ST={summary.get('structure_count', 0)} | SDB={summary.get('structure_db_count', 0)} | "
         f"SG={summary.get('group_count', 0)} | EM={summary.get('episodic_count', 0)} | "
-        f"MAP={summary.get('memory_activation_count', 0)} | "
-        f"MAP_ER={_n(summary.get('memory_activation_total_er', 0.0))} | "
-        f"MAP_EV={_n(summary.get('memory_activation_total_ev', 0.0))} | "
-        f"MAP_Total={_n(summary.get('memory_activation_total_energy', 0.0))} | "
+        f"MAP兼容={summary.get('memory_activation_count', 0)} | "
+        f"MAP兼容_ER={_n(summary.get('memory_activation_total_er', 0.0))} | "
+        f"MAP兼容_EV={_n(summary.get('memory_activation_total_ev', 0.0))} | "
+        f"MAP兼容_Total={_n(summary.get('memory_activation_total_energy', 0.0))} | "
         f"issue={summary.get('issue_count', 0)} | repair={summary.get('active_repair_job_count', 0)}"
     )
     for item in report.get("recent_structures", [])[:12]:
         lines.append(f"- {item.get('structure_id', '')} | {item.get('display_text', '')} | sig={item.get('signature', '')}")
     for item in report.get("recent_memory_activations", [])[:8]:
         lines.append(
-            f"- MAP {item.get('memory_id', '')} | {item.get('display_text', '')} | "
+            f"- MAP兼容 {item.get('memory_id', '')} | {item.get('display_text', '')} | "
             f"ER={_n(item.get('er', 0.0))} | EV={_n(item.get('ev', 0.0))} | "
             f"Total={_n(item.get('total_energy', 0.0))} | "
             f"last_ER={_n(item.get('last_delta_er', 0.0))} | last_EV={_n(item.get('last_delta_ev', 0.0))}"
@@ -249,6 +252,62 @@ def _render_attention(attention: dict) -> list[str]:
     return lines
 
 
+def _render_cognitive_stitching(cognitive_stitching: dict) -> list[str]:
+    lines = ["[CS] 认知拼接 / Cognitive Stitching", THIN]
+    enabled = bool(cognitive_stitching.get("enabled", False))
+    candidate_audit = cognitive_stitching.get("candidate_audit", {}) if isinstance(cognitive_stitching.get("candidate_audit", {}), dict) else {}
+    rejected_reason_counts = candidate_audit.get("rejected_reason_counts", {}) if isinstance(candidate_audit.get("rejected_reason_counts", {}), dict) else {}
+    score_means = candidate_audit.get("score_means", {}) if isinstance(candidate_audit.get("score_means", {}), dict) else {}
+    lines.append(
+        f"enabled={_b(enabled)} | stage={cognitive_stitching.get('stage', '')} | "
+        f"seed={cognitive_stitching.get('seed_structure_count', 0)} | "
+        f"candidate={cognitive_stitching.get('candidate_count', 0)} | "
+        f"action={cognitive_stitching.get('action_count', 0)}"
+    )
+    lines.append(
+        f"plain/event seed={cognitive_stitching.get('seed_plain_structure_count', 0)}/{cognitive_stitching.get('seed_event_count', 0)} | "
+        f"create/extend/merge={cognitive_stitching.get('created_count', 0)}/{cognitive_stitching.get('extended_count', 0)}/{cognitive_stitching.get('merged_count', 0)} | "
+        f"reinforced={cognitive_stitching.get('reinforced_count', 0)}"
+    )
+    lines.append(
+        f"esdb events={cognitive_stitching.get('esdb_event_count', 0)} | "
+        f"mat={cognitive_stitching.get('esdb_materialized_event_count', 0)} | "
+        f"delta={cognitive_stitching.get('esdb_delta_entry_total', 0)}"
+    )
+    lines.append(
+        f"audit raw/dedup/reject={candidate_audit.get('raw_accepted_count', 0)}/{candidate_audit.get('deduped_candidate_count', 0)}/{candidate_audit.get('rejected_count', 0)} | "
+        f"pruned={candidate_audit.get('deduped_pruned_count', 0)} | replace/keep={candidate_audit.get('replacement_count', 0)}/{candidate_audit.get('kept_existing_count', 0)}"
+    )
+    lines.append(
+        f"audit mean score={_n(score_means.get('score', 0.0))} | margin={_n(score_means.get('threshold_margin', 0.0))} | "
+        f"match={_n(score_means.get('match_strength', 0.0))} | context={_n(score_means.get('context_ratio', 0.0))}"
+    )
+    if rejected_reason_counts:
+        lines.append("reject reasons: " + " | ".join(f"{k}={v}" for k, v in rejected_reason_counts.items()))
+    if not enabled:
+        lines.append(f"reason={cognitive_stitching.get('reason', 'disabled')}")
+        return lines
+    for item in cognitive_stitching.get("actions", [])[:12]:
+        lines.append(
+            f"- {item.get('action', '')} | {item.get('event_display', '')} | "
+            f"score={_n(item.get('score', 0.0))} | absorb={_n(item.get('absorbed_total', 0.0))} | "
+            f"match={item.get('match_mode', '')} | context_k={item.get('context_k', 0)} | "
+            f"matched_span={item.get('matched_span', 0)} | family={item.get('action_family', '')}"
+        )
+    top_items = cognitive_stitching.get("narrative_top_items", [])[:8]
+    if top_items:
+        lines.append("narrative top:")
+    for item in top_items:
+        lines.append(
+            f"- {item.get('display', '')} | ER={_n(item.get('er', 0.0))} | "
+            f"EV={_n(item.get('ev', 0.0))} | CP={_n(item.get('cp_abs', 0.0))} | "
+            f"grasp={_n(item.get('event_grasp', 0.0))} | components={item.get('component_count', 0)} | "
+            f"es_depth={item.get('esdb_parent_depth', 0)} | delta={item.get('esdb_delta_entry_count', 0)} | "
+            f"mat={1 if item.get('esdb_materialized', False) else 0} | upd={item.get('esdb_update_count', 0)}"
+        )
+    return lines
+
+
 def _render_structure(structure_level: dict) -> list[str]:
     data = structure_level.get("result", {})
     debug = data.get("debug", {})
@@ -286,6 +345,8 @@ def _render_structure(structure_level: dict) -> list[str]:
 
 def _render_cache(cache: dict) -> list[str]:
     summary = cache.get("priority_summary", {})
+    component_count = int(summary.get("event_component_neutralization_count", 0) or 0)
+    component_cp_drop = float(summary.get("event_component_cp_drop_sum", 0.0) or 0.0)
     lines = ["[5/9] 缓存中和 / Cache Neutralization", THIN]
     lines.append(
         f"中和对象={summary.get('priority_neutralized_item_count', 0)} | 事件={summary.get('priority_event_count', 0)} | "
@@ -293,6 +354,8 @@ def _render_cache(cache: dict) -> list[str]:
     )
     lines.append(f"输入包={cache.get('input_packet', {}).get('display_text', '') or '空'}")
     lines.append(f"剩余包={cache.get('residual_packet', {}).get('display_text', '') or '空'}")
+    if component_count or component_cp_drop:
+        lines.append(f"event_components={component_count} | cp_drop={_n(component_cp_drop)}")
     for event in cache.get("priority_events", [])[:16]:
         extra = event.get("extra_context", {}) or {}
         et = _term_event_type_label(str(event.get("event_type", "") or "priority_stimulus_neutralization"))
@@ -388,7 +451,7 @@ def _render_induction(induction: dict) -> list[str]:
     debug = data.get("debug", {})
     lines = ["[8/9] 感应赋能 / Induction Propagation", THIN]
     lines.append(
-        f"源结构={data.get('source_item_count', 0)} | ev传播={data.get('propagated_target_count', 0)} | "
+        f"感应源={data.get('source_item_count', 0)} | ev传播={data.get('propagated_target_count', 0)} | "
         f"er诱发={data.get('induced_target_count', 0)} | total_delta_ev={_n(data.get('total_delta_ev', 0.0))} | total_ev_consumed={_n(data.get('total_ev_consumed', 0.0))}"
     )
     for source in debug.get("source_details", [])[:8]:
@@ -440,10 +503,79 @@ def _state_item(index: int, item: dict) -> list[str]:
     )
     item_id = item.get("id") or item.get("ref_object_id", "")
     item_type = item.get("ref_object_type", item.get("object_type", ""))
-    return [
+    lines = [
         f"{index}. {display} | id={item_id} | type={item_type}:{item.get('ref_object_id', '')}",
         f"   ER={_n(item.get('er', item.get('energy', {}).get('er', 0.0)))} | EV={_n(item.get('ev', item.get('energy', {}).get('ev', 0.0)))} | CP={_n(item.get('cp_abs', item.get('energy', {}).get('cognitive_pressure_abs', 0.0)))}",
     ]
+    if any(k in item for k in ("attention_priority", "attention_priority_base", "reward_action_bonus")):
+        lines.append(
+            f"   ATTN={_n(item.get('attention_priority', 0.0))} | "
+            f"base={_n(item.get('attention_priority_base', 0.0))} | "
+            f"reward_action_bonus={_n(item.get('reward_action_bonus', 0.0))}"
+        )
+    snap = item.get("ref_snapshot", {}) if isinstance(item.get("ref_snapshot", {}), dict) else {}
+    if item_type == "action_node" or snap:
+        target = (
+            snap.get("target_display")
+            or snap.get("target_ref_object_id")
+            or snap.get("target_item_id")
+            or item.get("target_display")
+            or item.get("target_ref_object_id")
+            or item.get("target_item_id")
+            or ""
+        )
+        if target:
+            lines.append(
+                f"   target={target} | drive={_n(item.get('drive', snap.get('drive', 0.0)))} | "
+                f"threshold={_n(item.get('effective_threshold', snap.get('effective_threshold', 0.0)))} | "
+                f"consumed={_n(item.get('tick_consumed_drive_total', snap.get('tick_consumed_drive_total', snap.get('last_consumed_drive', 0.0))))}"
+            )
+    return lines
+
+
+def _render_action(action: dict) -> list[str]:
+    action = dict(action or {}) if isinstance(action, dict) else {}
+    summary = action.get("action_learning_summary", {}) if isinstance(action.get("action_learning_summary", {}), dict) else {}
+    nodes = [row for row in (action.get("nodes", []) or []) if isinstance(row, dict)]
+    executed = [row for row in (action.get("executed_actions", []) or []) if isinstance(row, dict)]
+    if not summary and not nodes and not executed:
+        return []
+
+    lines = ["[8.5/9] 行动模块 / Action Runtime", THIN]
+    lines.append(
+        f"人形主路径={_b(summary.get('humanlike_runtime_sync_enabled', True))} | "
+        f"运行态信号节点={summary.get('runtime_signal_node_active_count', 0)}/{summary.get('runtime_signal_node_count', 0)} | "
+        f"运行态行动节点={summary.get('runtime_action_node_active_count', 0)}/{summary.get('runtime_action_node_count', 0)} | "
+        f"执行显影={summary.get('runtime_action_node_executed_count', 0)}"
+    )
+    lines.append(
+        f"局部塑形开关={_b(summary.get('local_drive_modulation_enabled', True))} | "
+        f"targeted={summary.get('targeted_node_count', 0)} | hit={summary.get('local_lookup_hit_count', 0)} | "
+        f"text_fallback={summary.get('local_lookup_text_fallback_hit_count', 0)} | miss={summary.get('local_lookup_miss_count', 0)} | "
+        f"skipped={summary.get('local_lookup_skipped_count', 0)}"
+    )
+    lines.append(
+        f"奖励增益={_n(summary.get('local_reward_drive_bonus_total', 0.0))} | "
+        f"惩罚扣减={_n(summary.get('local_punish_drive_penalty_total', 0.0))} | "
+        f"scale_mean={_n(summary.get('local_drive_scale_mean', 1.0))}"
+    )
+    for row in nodes[:10]:
+        target = row.get("target_display", "") or row.get("target_ref_object_id", "") or row.get("target_item_id", "") or "—"
+        local_mod = row.get("local_drive_modulation", {}) if isinstance(row.get("local_drive_modulation", {}), dict) else {}
+        lines.append(
+            f"- 节点 {row.get('action_kind', '')}/{row.get('action_id', '')} | target={target} | "
+            f"drive={_n(row.get('drive', 0.0))} | consumed={_n(row.get('tick_consumed_drive_total', row.get('last_consumed_drive', 0.0)))} | "
+            f"threshold={_n(row.get('effective_threshold', row.get('threshold', 0.0)))} | lookup={local_mod.get('lookup_status', '-')}"
+        )
+    for row in executed[:10]:
+        target = row.get("target_display", "") or row.get("target_ref_object_id", "") or row.get("target_item_id", "") or "—"
+        local_mod = row.get("local_drive_modulation", {}) if isinstance(row.get("local_drive_modulation", {}), dict) else {}
+        lines.append(
+            f"- 执行 {row.get('action_kind', '')}/{row.get('action_id', '')} | target={target} | "
+            f"success={_b(row.get('success', False))} | attempted={_b(row.get('attempted', True))} | "
+            f"consumed={_n(row.get('consumed_drive', 0.0))} | lookup={local_mod.get('lookup_status', '-')}"
+        )
+    return lines
 
 
 def _n(value: Any) -> str:
@@ -721,7 +853,7 @@ def _render_induction(induction: dict) -> list[str]:
     debug = data.get("debug", {})
     lines = ["[8/9] 感应赋能 / Induction Propagation", THIN]
     lines.append(
-        f"源结构={data.get('source_item_count', 0)} | ev传播={data.get('propagated_target_count', 0)} | "
+        f"感应源={data.get('source_item_count', 0)} | ev传播={data.get('propagated_target_count', 0)} | "
         f"er诱发={data.get('induced_target_count', 0)} | total_delta_ev={_n(data.get('total_delta_ev', 0.0))} | "
         f"total_ev_consumed={_n(data.get('total_ev_consumed', 0.0))}"
     )
@@ -996,7 +1128,7 @@ def _render_induction(induction: dict) -> list[str]:
     debug = data.get("debug", {})
     lines = ["[8/9] 感应赋能 / Induction Propagation", THIN]
     lines.append(
-        f"源结构={data.get('source_item_count', 0)} | ev传播={data.get('propagated_target_count', 0)} | "
+        f"感应源={data.get('source_item_count', 0)} | ev传播={data.get('propagated_target_count', 0)} | "
         f"er诱发={data.get('induced_target_count', 0)} | total_delta_ev={_n(data.get('total_delta_ev', 0.0))} | total_ev_consumed={_n(data.get('total_ev_consumed', 0.0))}"
     )
     for source in debug.get("source_details", [])[:8]:
@@ -1046,7 +1178,7 @@ def _storage(summary: dict) -> str:
 def _term_projection_kind_label(kind: str) -> str:
     mapping = {
         "structure": "结构 / Structure",
-        "memory": "记忆 / Memory",
+        "memory": "残差记忆 / Residual Memory",
     }
     return mapping.get(str(kind or ""), str(kind or "structure"))
 
@@ -1388,17 +1520,35 @@ def _render_projection(pool_apply: dict) -> list[str]:
 def _render_induction(induction: dict) -> list[str]:
     data = induction.get("result", {})
     debug = data.get("debug", {})
+    source_selection = induction.get("source_selection", {}) or data.get("source_selection", {}) or {}
+    source_details = list(debug.get("source_details", []) or [])
+    source_hit_count = sum(1 for source in source_details if list(source.get("candidate_entries", []) or []))
+    source_miss_count = max(0, len(source_details) - source_hit_count)
     lines = ["[8/9] 感应赋能 / Induction Propagation", THIN]
     lines.append(
-        f"源结构/Source={data.get('source_item_count', 0)} | EV 传播/Propagation={data.get('propagated_target_count', 0)} | ER 诱发/Induction={data.get('induced_target_count', 0)} | total_delta_ev={_n(data.get('total_delta_ev', 0.0))} | total_ev_consumed={_n(data.get('total_ev_consumed', 0.0))}"
+        f"可用源/参与={source_selection.get('induction_source_available_runtime_count', data.get('source_item_count', 0))}/{data.get('source_item_count', 0)} | "
+        f"ER源={source_selection.get('induction_source_selected_from_er_count', 0)} | EV源={source_selection.get('induction_source_selected_from_ev_count', 0)} | "
+        f"命中源={source_hit_count} | 无候选={source_miss_count} | "
+        f"EV传播={data.get('propagated_target_count', 0)} | ER诱发={data.get('induced_target_count', 0)} | "
+        f"total_delta_ev={_n(data.get('total_delta_ev', 0.0))} | total_ev_consumed={_n(data.get('total_ev_consumed', 0.0))}"
     )
-    for source in debug.get("source_details", [])[:8]:
+    for source in source_details[:8]:
+        source_id = str(source.get("source_item_id", "") or source.get("source_structure_id", "") or "")
+        support_ids = [str(x) for x in (source.get("resolved_support_structure_ids", []) or source.get("support_structure_ids", []) or []) if str(x)]
+        pointer_info = source.get("pointer_info", {}) if isinstance(source.get("pointer_info", {}), dict) else {}
         lines.append(
-            f"源结构 / Source={source.get('display_text', '')}[{source.get('source_structure_id', '')}] | ER={_n(source.get('source_er', 0.0))} | EV={_n(source.get('source_ev', 0.0))}"
+            f"源对象 / Source={source.get('display_text', '')}[{source_id}] | type={source.get('source_ref_object_type', '') or '-'} | ER={_n(source.get('source_er', 0.0))} | EV={_n(source.get('source_ev', 0.0))}"
+        )
+        lines.append(
+            f"  support={','.join(support_ids) if support_ids else '-'} | db={pointer_info.get('resolved_db_id', '-') or '-'} | fallback={_b(pointer_info.get('used_fallback', False))}"
         )
         entries = source.get("candidate_entries", []) or []
         if not entries:
-            lines.append("  该源结构本轮没有命中可赋能目标。")
+            skipped_reason = str(source.get("skipped_reason", "") or "")
+            if skipped_reason:
+                lines.append(f"  本轮未执行有效赋能：{skipped_reason}")
+            else:
+                lines.append("  该源对象本轮没有命中可赋能目标。")
             continue
         for entry in entries[:12]:
             target_id = entry.get("memory_id", "") or entry.get("target_structure_id", "")

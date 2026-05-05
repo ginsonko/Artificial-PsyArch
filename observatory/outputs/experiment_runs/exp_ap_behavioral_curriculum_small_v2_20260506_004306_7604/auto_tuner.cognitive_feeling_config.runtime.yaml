@@ -1,0 +1,6 @@
+dissonance_cp_abs_threshold: 0.51
+pressure_ev_threshold: 0.26
+correct_event_cp_drop_threshold: 0.32
+correct_event_strength_drop_max: 1.12
+dissonance_cp_abs_max: 1.8900000000000001
+expectation_ev_threshold: 0.32

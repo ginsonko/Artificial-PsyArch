@@ -1,0 +1,5 @@
+stimulus_level_max_rounds: 20
+internal_resolution_detail_budget_adr_gain: 56
+ev_propagation_ratio: 1.0
+internal_resolution_flat_unit_cap_per_structure: 259
+internal_resolution_detail_budget_base: 98

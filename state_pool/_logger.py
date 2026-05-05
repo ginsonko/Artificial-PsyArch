@@ -13,6 +13,7 @@ AP 状态池模块 — 模块专属日志管理器
 import json
 import os
 import sys
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -40,9 +41,11 @@ class ModuleLogger:
         self,
         log_dir: str = "",
         max_file_bytes: int = 5 * 1024 * 1024,
+        archive_keep_per_level: int | dict[str, int] | None = None,
         enable_stdout_fallback: bool = True,
     ):
         self._max_bytes = max_file_bytes
+        self._archive_keep_per_level = self._normalize_archive_keep_per_level(archive_keep_per_level)
         self._stdout_fallback = enable_stdout_fallback
 
         if not log_dir:
@@ -59,6 +62,11 @@ class ModuleLogger:
                 self._dirs[level] = None
 
         self._handles: dict[str, Any] = {}
+        self._file_sizes: dict[str, int] = {}
+        self._dirty_write_counts: dict[str, int] = {}
+        self._last_flush_at: dict[str, float] = {}
+        self._active_paths: dict[str, Path] = {}
+        self._lock = threading.RLock()
 
     # ------------------------------------------------------------------ #
     #                         公共写入方法                                 #
@@ -182,30 +190,149 @@ class ModuleLogger:
             record["detail"] = str(detail)
             return json.dumps(record, ensure_ascii=False)
 
+    @staticmethod
+    def _estimate_line_bytes(line: str) -> int:
+        try:
+            return len((line + "\n").encode("utf-8"))
+        except Exception:
+            return len(line) + 1
+
+    def _default_current_path(self, level_key: str, target_dir: Path) -> Path:
+        return target_dir / f"{level_key}_current.log"
+
+    def _spill_current_path(self, level_key: str, target_dir: Path) -> Path:
+        ts = time.strftime("%Y-%m-%d_%H-%M-%S")
+        return target_dir / f"{level_key}_current_{ts}_{os.getpid()}_{time.time_ns()}.log"
+
+    def _next_path_after_rotation(self, level_key: str, target_dir: Path, current_path: Path) -> Path:
+        default_path = self._default_current_path(level_key, target_dir)
+        if current_path == default_path:
+            return default_path
+        return self._spill_current_path(level_key, target_dir)
+
+    @staticmethod
+    def _normalize_archive_keep_per_level(
+        archive_keep_per_level: int | dict[str, int] | None,
+    ) -> dict[str, int]:
+        normalized = {"error": 0, "brief": 0, "detail": 0}
+        if isinstance(archive_keep_per_level, int):
+            keep = max(0, int(archive_keep_per_level))
+            return {level: keep for level in normalized}
+        if not isinstance(archive_keep_per_level, dict):
+            return normalized
+        for level in normalized:
+            value = archive_keep_per_level.get(level, 0)
+            try:
+                normalized[level] = max(0, int(value))
+            except (TypeError, ValueError):
+                normalized[level] = 0
+        return normalized
+
+    def _prune_archived_logs(self, level_key: str, target_dir: Path) -> None:
+        keep = int(self._archive_keep_per_level.get(level_key, 0) or 0)
+        if keep <= 0:
+            return
+        default_current_path = self._default_current_path(level_key, target_dir)
+        active_path = self._active_paths.get(level_key)
+        candidates: list[Path] = []
+        for path in target_dir.glob(f"{level_key}*.log"):
+            if path == default_current_path or path == active_path:
+                continue
+            if not path.is_file():
+                continue
+            candidates.append(path)
+        if len(candidates) <= keep:
+            return
+        candidates.sort(
+            key=lambda p: (
+                p.stat().st_mtime if p.exists() else 0.0,
+                p.name,
+            ),
+            reverse=True,
+        )
+        for path in candidates[keep:]:
+            try:
+                path.unlink()
+            except OSError:
+                continue
+
+    def _open_handle_for_path(self, level_key: str, filepath: Path):
+        fh = open(filepath, "a", encoding="utf-8")
+        self._handles[level_key] = fh
+        self._active_paths[level_key] = filepath
+        try:
+            self._file_sizes[level_key] = int(filepath.stat().st_size)
+        except OSError:
+            self._file_sizes[level_key] = 0
+        self._dirty_write_counts[level_key] = 0
+        self._last_flush_at[level_key] = time.monotonic()
+        self._prune_archived_logs(level_key, filepath.parent)
+        return fh
+
+    def _archive_current_path(self, level_key: str, target_dir: Path, current_path: Path) -> None:
+        size = int(self._file_sizes.get(level_key, 0) or 0)
+        if size <= 0:
+            try:
+                size = int(current_path.stat().st_size)
+            except OSError:
+                size = 0
+        if not current_path.exists() or size <= 0:
+            return
+        ts = time.strftime("%Y-%m-%d_%H-%M-%S")
+        archive_path = target_dir / f"{level_key}_{ts}_{os.getpid()}_{time.time_ns()}.log"
+        current_path.rename(archive_path)
+
+    def _flush_if_needed(self, level_key: str, fh, *, force: bool = False):
+        now = time.monotonic()
+        pending = int(self._dirty_write_counts.get(level_key, 0) or 0)
+        threshold = 1 if level_key != "detail" else 32
+        interval_sec = 0.0 if level_key != "detail" else 1.5
+        last_flush = float(self._last_flush_at.get(level_key, 0.0) or 0.0)
+        if (not force) and pending < threshold and (now - last_flush) < interval_sec:
+            return
+        fh.flush()
+        self._dirty_write_counts[level_key] = 0
+        self._last_flush_at[level_key] = now
+
     def _write(self, level_key: str, line: str):
         """向对应级别的日志文件追加一行。"""
-        target_dir = self._dirs.get(level_key)
-        if target_dir is None:
-            if self._stdout_fallback:
-                print(line, file=sys.stderr)
-            return
-        try:
-            fh = self._get_or_open(level_key, target_dir)
-            fh.write(line + "\n")
-            fh.flush()
-            if fh.tell() >= self._max_bytes:
-                self._rotate(level_key, target_dir)
-        except OSError:
-            if self._stdout_fallback:
-                print(line, file=sys.stderr)
+        with self._lock:
+            target_dir = self._dirs.get(level_key)
+            if target_dir is None:
+                if self._stdout_fallback:
+                    print(line, file=sys.stderr)
+                return
+            try:
+                fh = self._get_or_open(level_key, target_dir)
+                fh.write(line + "\n")
+                self._file_sizes[level_key] = int(self._file_sizes.get(level_key, 0) or 0) + self._estimate_line_bytes(line)
+                self._dirty_write_counts[level_key] = int(self._dirty_write_counts.get(level_key, 0) or 0) + 1
+                if int(self._file_sizes.get(level_key, 0) or 0) >= self._max_bytes:
+                    self._rotate(level_key, target_dir)
+                else:
+                    self._flush_if_needed(level_key, fh)
+            except OSError:
+                if self._stdout_fallback:
+                    print(line, file=sys.stderr)
 
     def _get_or_open(self, level_key: str, target_dir: Path):
         """获取或延迟打开日志文件句柄。"""
         fh = self._handles.get(level_key)
         if fh is None or fh.closed:
-            filepath = target_dir / f"{level_key}_current.log"
-            fh = open(filepath, "a", encoding="utf-8")
-            self._handles[level_key] = fh
+            default_path = self._default_current_path(level_key, target_dir)
+            filepath = self._active_paths.get(level_key, default_path)
+            if filepath == default_path and filepath.exists():
+                try:
+                    current_size = int(filepath.stat().st_size)
+                except OSError:
+                    current_size = 0
+                if current_size >= self._max_bytes:
+                    try:
+                        self._file_sizes[level_key] = current_size
+                        self._archive_current_path(level_key, target_dir, filepath)
+                    except OSError:
+                        filepath = self._spill_current_path(level_key, target_dir)
+            fh = self._open_handle_for_path(level_key, filepath)
         return fh
 
     def _rotate(self, level_key: str, target_dir: Path):
@@ -213,41 +340,70 @@ class ModuleLogger:
         try:
             old_fh = self._handles.pop(level_key, None)
             if old_fh and not old_fh.closed:
+                self._flush_if_needed(level_key, old_fh, force=True)
                 old_fh.close()
-            current_path = target_dir / f"{level_key}_current.log"
-            if current_path.exists():
-                ts = time.strftime("%Y-%m-%d_%H-%M-%S")
-                archive_path = target_dir / f"{level_key}_{ts}.log"
-                current_path.rename(archive_path)
+            current_path = self._active_paths.get(level_key, self._default_current_path(level_key, target_dir))
+            self._archive_current_path(level_key, target_dir, current_path)
+            self._open_handle_for_path(level_key, self._next_path_after_rotation(level_key, target_dir, current_path))
         except OSError:
-            if self._stdout_fallback:
-                print(f"[{_MODULE_NAME}] 日志轮转失败 / Log rotation failed: {level_key}", file=sys.stderr)
+            # Do not spam stderr on transient rotation failures.
+            # Fall back to a unique spill current file so oversized/locked current logs
+            # do not trigger a rotation attempt on every subsequent write.
+            try:
+                self._open_handle_for_path(level_key, self._spill_current_path(level_key, target_dir))
+            except OSError:
+                pass
 
     def close(self):
         """关闭所有打开的日志文件句柄。"""
-        for fh in self._handles.values():
-            try:
-                if fh and not fh.closed:
-                    fh.close()
-            except OSError:
-                pass
-        self._handles.clear()
-
-    def update_config(self, log_dir: str = "", max_file_bytes: int = 0):
-        """热加载时更新日志配置。"""
-        changed = False
-        if max_file_bytes > 0 and max_file_bytes != self._max_bytes:
-            self._max_bytes = max_file_bytes
-            changed = True
-        if log_dir and log_dir != str(self._base_dir):
-            self.close()
-            self._base_dir = Path(log_dir)
-            for level in ("error", "brief", "detail"):
-                d = self._base_dir / level
+        with self._lock:
+            for fh in self._handles.values():
                 try:
-                    d.mkdir(parents=True, exist_ok=True)
-                    self._dirs[level] = d
+                    if fh and not fh.closed:
+                        fh.flush()
+                        fh.close()
                 except OSError:
-                    self._dirs[level] = None
-            changed = True
-        return changed
+                    pass
+            self._handles.clear()
+            self._file_sizes.clear()
+            self._dirty_write_counts.clear()
+            self._last_flush_at.clear()
+            self._active_paths.clear()
+
+    def update_config(
+        self,
+        log_dir: str = "",
+        max_file_bytes: int = 0,
+        archive_keep_per_level: int | dict[str, int] | None = None,
+        enable_stdout_fallback: bool | None = None,
+    ):
+        """热加载时更新日志配置。"""
+        with self._lock:
+            changed = False
+            if max_file_bytes > 0 and max_file_bytes != self._max_bytes:
+                self._max_bytes = max_file_bytes
+                changed = True
+            if archive_keep_per_level is not None:
+                normalized_keep = self._normalize_archive_keep_per_level(archive_keep_per_level)
+                if normalized_keep != self._archive_keep_per_level:
+                    self._archive_keep_per_level = normalized_keep
+                    changed = True
+            if enable_stdout_fallback is not None and bool(enable_stdout_fallback) != self._stdout_fallback:
+                self._stdout_fallback = bool(enable_stdout_fallback)
+                changed = True
+            if log_dir and log_dir != str(self._base_dir):
+                self.close()
+                self._base_dir = Path(log_dir)
+                for level in ("error", "brief", "detail"):
+                    d = self._base_dir / level
+                    try:
+                        d.mkdir(parents=True, exist_ok=True)
+                        self._dirs[level] = d
+                    except OSError:
+                        self._dirs[level] = None
+                changed = True
+            for level, target_dir in self._dirs.items():
+                if target_dir is None:
+                    continue
+                self._prune_archived_logs(level, target_dir)
+            return changed

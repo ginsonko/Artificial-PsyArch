@@ -1,0 +1,10 @@
+keep_score_ratio_base: 0.42
+max_cam_items: 25
+attention_filter_gain_floor: 0.59
+top_n: 8
+attention_energy_budget_base: 0.0
+size_cost_max_cost: 4
+keep_score_ratio_concentration_gain: 0.28
+keep_score_ratio_min: 0.34
+keep_score_ratio_max: 0.8
+memory_energy_ratio: 0.62

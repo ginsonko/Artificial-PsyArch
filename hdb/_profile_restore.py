@@ -52,6 +52,43 @@ def restore_structure_profile(
     )
 
 
+def restore_group_profile(
+    group_obj: dict,
+    *,
+    cut_engine,
+    structure_store,
+    group_store=None,
+    max_depth: int = 12,
+    _cache: dict | None = None,
+    _visited: set[str] | None = None,
+) -> dict:
+    if not group_obj:
+        return {
+            "display_text": "",
+            "flat_tokens": [],
+            "sequence_groups": [],
+            "member_refs": [],
+            "content_signature": "",
+            "ext": {},
+        }
+
+    cache = _cache if isinstance(_cache, dict) else {}
+    visited = set(_visited or set())
+    group_id = str(group_obj.get("id", "") or "")
+    if group_id:
+        visited.add(group_id)
+    return _build_group_profile(
+        group_obj,
+        cut_engine=cut_engine,
+        structure_store=structure_store,
+        group_store=group_store,
+        cache=cache,
+        visited=visited,
+        depth=0,
+        max_depth=max_depth,
+    )
+
+
 def restore_profile(
     profile: dict,
     *,
